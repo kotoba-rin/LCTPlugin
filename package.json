@@ -1,0 +1,28 @@
+{
+  "name": "lacan-translation-helper",
+  "version": "0.6.0",
+  "private": true,
+  "description": "Desktop Obsidian tools for reading and editing the Lacan Chinese Translation Project.",
+  "license": "CC-BY-4.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kotoba-rin/LCTPlugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kotoba-rin/LCTPlugin/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "build:check": "node esbuild.config.mjs --check",
+    "test": "node scripts/test.mjs",
+    "check": "npm run build:check && npm test",
+    "package:plugin": "npm run build && node scripts/package-plugin.mjs",
+    "install:plugin": "npm run build && node scripts/install-plugin.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}
