@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const pluginDir = dirname(fileURLToPath(import.meta.url));
 const outputPath = join(pluginDir, "main.js");
 const checkOnly = process.argv.includes("--check");
+const license = await readFile(join(pluginDir, "LICENSE"), "utf8");
 
 const result = await build({
   absWorkingDir: pluginDir,
@@ -22,6 +23,7 @@ const result = await build({
   ],
   charset: "utf8",
   legalComments: "none",
+  banner: { js: `/*\n${license.trim()}\n*/` },
   minify: false,
   sourcemap: false,
   write: !checkOnly,
