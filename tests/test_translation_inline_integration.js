@@ -268,7 +268,6 @@ async function run() {
   const note = body.appendChild(new Element("p"));
   const noteLink = note.appendChild(new Element("a", "internal-link"));
   noteLink.textContent = "阅读笔记";
-  const comparison = body.appendChild(new Element("div", "lacan-segment-compare-control"));
   const link = paragraph.appendChild(new Element("a"));
   const footnoteRef = paragraph.appendChild(new Element("sup", "footnote-ref"));
   const ownEditor = paragraph.appendChild(new Element("div", "lacan-translation-inline-editor"));
@@ -276,7 +275,7 @@ async function run() {
   bound.plugin.bindTranslationBlockEditing(body, translationPath, "s8-01-0002");
   assert.ok(body.className.includes("lacan-translation-editable"));
   assert.strictEqual(body.listeners.get("dblclick").options.capture, true, "handle the edit before native reading-view double-click switches mode");
-  for (const excluded of [link, noteLink, footnotes, footnoteRef, input, comparison]) {
+  for (const excluded of [link, noteLink, footnotes, footnoteRef, input, ownEditor]) {
     const event = body.doubleClick(excluded);
     assert.strictEqual(event.prevented, false, "links, global footnotes and editor controls retain their own actions");
   }

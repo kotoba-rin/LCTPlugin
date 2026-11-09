@@ -118,8 +118,8 @@ const noteWidget = groupedFirst.body.append(new Element("span", "lacan-segment-n
 assert.strictEqual(locateTranslationPreviewTarget(eventFor(noteWidget), groupedFirst.wrapper, context, { sourcePath }), null);
 const nestedLink = groupedFirst.body.append(new Element("a"));
 assert.strictEqual(locateTranslationPreviewTarget(eventFor(nestedLink), groupedFirst.wrapper, context, { sourcePath }), null);
-const comparison = groupedFirst.body.append(new Element("div", "lacan-segment-compare-control"));
-assert.strictEqual(locateTranslationPreviewTarget(eventFor(comparison), groupedFirst.wrapper, context, { sourcePath }), null);
+const aiControl = groupedFirst.body.append(new Element("div", "lacan-segment-ai-control"));
+assert.strictEqual(locateTranslationPreviewTarget(eventFor(aiControl), groupedFirst.wrapper, context, { sourcePath }), null);
 const bilingual = groupedFirst.body.append(new Element("div", "lacan-bilingual-content"));
 assert.strictEqual(locateTranslationPreviewTarget(eventFor(bilingual), groupedFirst.wrapper, context, { sourcePath }), null);
 

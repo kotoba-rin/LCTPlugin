@@ -97,7 +97,6 @@ class LacanBilingualReadingView extends FileView {
     this.pendingReadingPosition = null;
     this.renderToken = 0;
     this.markdownComponents = new Set();
-    this.comparisonBlocks = [];
     this.refreshTimer = null;
     this.modifyEvent = null;
     this.closed = false;
@@ -171,7 +170,7 @@ class LacanBilingualReadingView extends FileView {
     if (this.file === previousFile || !this.file) {
       await this.render({ scrollTop: this.savedScrollTop });
     }
-    this.plugin.renderComparisonToolbar({ renderSegments: false });
+    this.plugin.renderReadingToolbar();
   }
 
   async onLoadFile(file) {
@@ -191,7 +190,7 @@ class LacanBilingualReadingView extends FileView {
     await super.onRename(file);
     if (file === this.file) {
       await this.render();
-      this.plugin.renderComparisonToolbar({ renderSegments: false });
+      this.plugin.renderReadingToolbar();
     }
   }
 
@@ -249,8 +248,6 @@ class LacanBilingualReadingView extends FileView {
   }
 
   unloadMarkdown() {
-    this.plugin.unloadMarkdownRenderComponents(this.contentRoot());
-    this.comparisonBlocks = [];
     for (const component of this.markdownComponents) {
       component.unload();
     }
@@ -271,7 +268,7 @@ class LacanBilingualReadingView extends FileView {
     // Keep the current lesson mounted until the asynchronous Markdown work ends.
     // A second refresh must never capture a position clamped by a partial page.
     const stagingEl = rootEl.ownerDocument.createElement("div");
-    const rendered = { markdownComponents: new Set(), comparisonBlocks: [] };
+    const rendered = { markdownComponents: new Set() };
     let committed = false;
     try {
       const [originalText, translationText] = paths
@@ -334,9 +331,7 @@ class LacanBilingualReadingView extends FileView {
       rootEl.addClass("lacan-bilingual-view");
       rootEl.replaceChildren(...stagingEl.childNodes);
       this.markdownComponents = rendered.markdownComponents;
-      this.comparisonBlocks = rendered.comparisonBlocks;
       committed = true;
-      this.renderComparisonControls();
       rootEl.scrollTop = scrollTop;
       if (this.pendingReadingPosition && restoreBilingualReadingPosition(rootEl, this.pendingReadingPosition)) {
         this.pendingReadingPosition = null;
@@ -354,26 +349,6 @@ class LacanBilingualReadingView extends FileView {
     }
   }
 
-  renderComparisonControls() {
-    const forks = this.plugin.getActiveComparisonForks();
-    const signature = this.plugin.comparisonForkSignature(forks);
-    for (const { laneEl, bodyEl, sourcePath, segmentId } of this.comparisonBlocks) {
-      let controlEl = laneEl.querySelector(".lacan-segment-compare-control");
-      if (!forks.length) {
-        if (controlEl) {
-          this.plugin.unloadMarkdownRenderComponents(controlEl);
-          controlEl.remove();
-        }
-        continue;
-      }
-      if (!controlEl) {
-        controlEl = laneEl.createDiv({ cls: "lacan-segment-compare-control" });
-        laneEl.insertBefore(controlEl, bodyEl);
-      }
-      this.plugin.renderSegmentComparisonControlIfNeeded(controlEl, sourcePath, segmentId, forks, signature);
-    }
-  }
-
   async renderBlock(pairEl, language, block, fileText, sourcePath, rendered) {
     const isOriginal = language === "original";
     const laneEl = pairEl.createDiv({ cls: `lacan-bilingual-language is-${language}`, attr: { lang: isOriginal ? "fr" : "zh" } });
@@ -387,7 +362,6 @@ class LacanBilingualReadingView extends FileView {
     }
     const bodyEl = laneEl.createDiv({ cls: "lacan-bilingual-content markdown-rendered" });
     if (!isOriginal) this.plugin.bindTranslationBlockEditing?.(bodyEl, sourcePath, block.primaryId);
-    rendered.comparisonBlocks.push({ laneEl, bodyEl, sourcePath, segmentId: block.primaryId });
     const markdown = blockReadingMarkdown(block, fileText, `${isOriginal ? "fr" : "zh"}-${block.primaryId}`);
     if (!markdown) {
       bodyEl.createDiv({ cls: "lacan-bilingual-empty", text: !isOriginal && /<!--\s*untranslated\s*-->/i.test(block.markdown) ? "[该段尚未翻译]" : "[该段暂无正文]" });

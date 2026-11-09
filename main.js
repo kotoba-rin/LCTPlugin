@@ -532,7 +532,6 @@ ${appended.join("\n\n")}`;
         this.pendingReadingPosition = null;
         this.renderToken = 0;
         this.markdownComponents = /* @__PURE__ */ new Set();
-        this.comparisonBlocks = [];
         this.refreshTimer = null;
         this.modifyEvent = null;
         this.closed = false;
@@ -592,7 +591,7 @@ ${appended.join("\n\n")}`;
         if (this.file === previousFile || !this.file) {
           await this.render({ scrollTop: this.savedScrollTop });
         }
-        this.plugin.renderComparisonToolbar({ renderSegments: false });
+        this.plugin.renderReadingToolbar();
       }
       async onLoadFile(file) {
         this.sourcePath = LESSON_PATH_RE.test(file.path) ? file.path : "";
@@ -609,7 +608,7 @@ ${appended.join("\n\n")}`;
         await super.onRename(file);
         if (file === this.file) {
           await this.render();
-          this.plugin.renderComparisonToolbar({ renderSegments: false });
+          this.plugin.renderReadingToolbar();
         }
       }
       async openMonolingual(path, options) {
@@ -660,8 +659,6 @@ ${appended.join("\n\n")}`;
         return this.plugin.app.vault.cachedRead(file);
       }
       unloadMarkdown() {
-        this.plugin.unloadMarkdownRenderComponents(this.contentRoot());
-        this.comparisonBlocks = [];
         for (const component of this.markdownComponents) {
           component.unload();
         }
@@ -679,7 +676,7 @@ ${appended.join("\n\n")}`;
         const token = ++this.renderToken;
         const paths = this.lessonPaths();
         const stagingEl = rootEl.ownerDocument.createElement("div");
-        const rendered = { markdownComponents: /* @__PURE__ */ new Set(), comparisonBlocks: [] };
+        const rendered = { markdownComponents: /* @__PURE__ */ new Set() };
         let committed = false;
         try {
           const [originalText, translationText] = paths ? await Promise.all([this.readLesson(paths.originalPath), this.readLesson(paths.translationPath)]) : ["", ""];
@@ -736,9 +733,7 @@ ${appended.join("\n\n")}`;
           rootEl.addClass("lacan-bilingual-view");
           rootEl.replaceChildren(...stagingEl.childNodes);
           this.markdownComponents = rendered.markdownComponents;
-          this.comparisonBlocks = rendered.comparisonBlocks;
           committed = true;
-          this.renderComparisonControls();
           rootEl.scrollTop = scrollTop;
           if (this.pendingReadingPosition && restoreBilingualReadingPosition(rootEl, this.pendingReadingPosition)) {
             this.pendingReadingPosition = null;
@@ -755,25 +750,6 @@ ${appended.join("\n\n")}`;
           }
         }
       }
-      renderComparisonControls() {
-        const forks = this.plugin.getActiveComparisonForks();
-        const signature = this.plugin.comparisonForkSignature(forks);
-        for (const { laneEl, bodyEl, sourcePath, segmentId } of this.comparisonBlocks) {
-          let controlEl = laneEl.querySelector(".lacan-segment-compare-control");
-          if (!forks.length) {
-            if (controlEl) {
-              this.plugin.unloadMarkdownRenderComponents(controlEl);
-              controlEl.remove();
-            }
-            continue;
-          }
-          if (!controlEl) {
-            controlEl = laneEl.createDiv({ cls: "lacan-segment-compare-control" });
-            laneEl.insertBefore(controlEl, bodyEl);
-          }
-          this.plugin.renderSegmentComparisonControlIfNeeded(controlEl, sourcePath, segmentId, forks, signature);
-        }
-      }
       async renderBlock(pairEl, language, block, fileText, sourcePath, rendered) {
         const isOriginal = language === "original";
         const laneEl = pairEl.createDiv({ cls: `lacan-bilingual-language is-${language}`, attr: { lang: isOriginal ? "fr" : "zh" } });
@@ -787,7 +763,6 @@ ${appended.join("\n\n")}`;
         }
         const bodyEl = laneEl.createDiv({ cls: "lacan-bilingual-content markdown-rendered" });
         if (!isOriginal) this.plugin.bindTranslationBlockEditing?.(bodyEl, sourcePath, block.primaryId);
-        rendered.comparisonBlocks.push({ laneEl, bodyEl, sourcePath, segmentId: block.primaryId });
         const markdown = blockReadingMarkdown(block, fileText, `${isOriginal ? "fr" : "zh"}-${block.primaryId}`);
         if (!markdown) {
           bodyEl.createDiv({ cls: "lacan-bilingual-empty", text: !isOriginal && /<!--\s*untranslated\s*-->/i.test(block.markdown) ? "[该段尚未翻译]" : "[该段暂无正文]" });
@@ -1258,7 +1233,7 @@ var require_french_lookup_popup = __commonJS({
   "src/french-lookup-popup.js"(exports2, module2) {
     var { buildFrenchLookup: buildFrenchLookup2, getFrenchWordAt } = require_french_lookup_text();
     var { readPdfTextLayer } = require_pdf_lookup_text();
-    var EXCLUDED_TARGETS = ".lacan-french-lookup, .view-header, .inline-title, .cm-gutters, .modal-container, .setting-item, button, input, textarea, select, .lacan-segment-ai-control, .lacan-segment-note-actions, .lacan-segment-compare-control, .lacan-translation-inline-editor";
+    var EXCLUDED_TARGETS = ".lacan-french-lookup, .view-header, .inline-title, .cm-gutters, .modal-container, .setting-item, button, input, textarea, select, .lacan-segment-ai-control, .lacan-segment-note-actions, .lacan-translation-inline-editor";
     function createElement(parent, tag, className, text) {
       const element = parent.ownerDocument.createElement(tag);
       if (className) element.className = className;
@@ -2585,7 +2560,6 @@ var require_translation_reading_preview = __commonJS({
       ".lacan-translation-inline-editor",
       ".lacan-segment-ai-control",
       ".lacan-segment-note-actions",
-      ".lacan-segment-compare-control",
       ".lacan-segment-preview-popover",
       ".lacan-french-lookup"
     ].join(", ");
@@ -8402,7 +8376,6 @@ var TRANSLATION_PATH_RE = /^texts\/([^/]+)\/translation\/((?:Leçon|Lecon|lesson
 var READING_NOTE_PATH_RE = /^texts\/([^/]+)\/notes\/(.+\.md)$/i;
 var SEGMENT_ID_ANCHOR_LINE_RE = /<!--\s*id\s*:?\s*(s\d+[a-z]?-\d+-\d+)\s*-->/i;
 var SEGMENT_ID_COMMENT_RE = /<!--\s*ids?\b\s*:?\s*([\s\S]*?)-->/gi;
-var SEGMENT_ID_COMMENT_TEST_RE = /<!--\s*ids?\b\s*:?\s*[\s\S]*?\bs\d+b?-\d+-\d+\b[\s\S]*?-->/i;
 var SEGMENT_ID_TOKEN_RE = /\bs\d+b?-\d+-\d+\b/gi;
 var SEGMENT_ID_LINK_RE = /^s(\d+[a-z]?)-(\d+)-\d+$/i;
 var SEGMENT_ID_RE = /\bs\d+b?-\d+-(\d+)\b/gi;
@@ -8461,8 +8434,7 @@ var DEFAULT_SETTINGS = {
   frenchLookupAutoTranslate: true,
   frenchLookupSecretName: "lacan-eudic-api-token",
   frenchLookupWordbookId: "0",
-  frenchLookupWordbooks: [],
-  forks: []
+  frenchLookupWordbooks: []
 };
 var ReadingNoteButtonWidget = class extends WidgetTypeBase {
   constructor(plugin, sourcePath, segmentId) {
@@ -8528,7 +8500,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
       legacyProfiles: legacySkillProfiles,
       defaultProfileId: loadedSettings.segmentAiDefaultSkillProfileId
     });
-    this.settings.forks = Array.isArray(this.settings.forks) ? this.settings.forks : [];
+    delete this.settings.forks;
     this.settings.segmentAiSessions = Array.isArray(this.settings.segmentAiSessions) ? this.settings.segmentAiSessions : [];
     this.settings.segmentAiMaxOpenSessions = normalizeMaxOpenSessions(
       this.settings.segmentAiMaxOpenSessions
@@ -8578,18 +8550,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
       this.settings.segmentAiMcpServerCatalogUpdatedAt
     ) ? this.settings.segmentAiMcpServerCatalogUpdatedAt : 0;
     this.progressTimers = /* @__PURE__ */ new Map();
-    this.activeComparisonForks = /* @__PURE__ */ new Set();
-    this.expandedComparisonSegments = /* @__PURE__ */ new Set();
-    this.comparisonContentCache = /* @__PURE__ */ new Map();
-    this.comparisonSegmentIndexCache = /* @__PURE__ */ new Map();
-    this.compareRenderTimer = null;
-    this.compareRenderToken = 0;
-    this.compareLoadingTimer = null;
-    this.comparisonPreviewObserver = null;
-    this.comparisonPreviewRenderTimer = null;
-    this.comparisonCacheRevision = 0;
-    this.comparisonRenderRevision = 0;
-    this.comparisonRenderStates = /* @__PURE__ */ new WeakMap();
+    this.readingToolbarRenderTimer = null;
     this.syncInProgress = false;
     this.gitProcesses = /* @__PURE__ */ new Set();
     this.startupSyncTimer = null;
@@ -8663,7 +8624,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.registerReadingNoteEditorExtension();
     this.registerMarkdownPostProcessor((element, context) => {
       const sourcePath = normalizePath(context.sourcePath || "");
-      if (!this.isTranslationLessonPath(sourcePath) || element.closest?.(".cm-editor, .markdown-source-view, .lacan-bilingual-content, .lacan-segment-compare-control, .lacan-segment-preview")) return;
+      if (!this.isTranslationLessonPath(sourcePath) || element.closest?.(".cm-editor, .markdown-source-view, .lacan-bilingual-content, .lacan-segment-preview")) return;
       const cleanup = bindTranslationPreview(element, context, {
         sourcePath,
         openEditor: ({ segmentId, renderedElements, element: anchorEl }) => this.openTranslationInlineEditor({
@@ -8709,23 +8670,6 @@ module.exports = class LacanTranslationHelper extends Plugin {
         context.getSectionInfo?.(element)
       );
     });
-    this.registerMarkdownPostProcessor((element, context) => {
-      if (!this.hasActiveComparisonForks()) {
-        return;
-      }
-      const path = normalizePath(context.sourcePath || "");
-      if (!this.isTextMarkdownPath(path) || element.closest?.(".cm-editor, .markdown-source-view")) {
-        return;
-      }
-      const sectionInfo = context.getSectionInfo?.(element);
-      if (!this.hasSegmentIdComment(sectionInfo?.text || "")) {
-        return;
-      }
-      this.renderInlineComparisonControls(element, context.sourcePath, {
-        allowSourceFallback: false,
-        sectionInfo
-      }).catch((error) => this.handleComparisonRenderError(error));
-    });
     this.registerEvent(
       this.app.vault.on("create", (file) => {
         this.handleCreatedFile(file);
@@ -8743,12 +8687,12 @@ module.exports = class LacanTranslationHelper extends Plugin {
     );
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
-        this.scheduleComparisonRender();
+        this.scheduleReadingToolbarRender();
       })
     );
     this.registerEvent(
       this.app.workspace.on("layout-change", () => {
-        this.scheduleComparisonRender();
+        this.scheduleReadingToolbarRender();
         if (this.settings.projectGraphEnabled) {
           this.applyProjectGraphToViews();
         }
@@ -8756,7 +8700,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     );
     this.registerEvent(
       this.app.workspace.on("file-open", () => {
-        this.scheduleComparisonRender();
+        this.scheduleReadingToolbarRender();
       })
     );
     this.registerProjectBasesView();
@@ -8805,7 +8749,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
         "Git 同步失败"
       )
     });
-    this.scheduleComparisonRender();
+    this.scheduleReadingToolbarRender();
     this.refreshSegmentAiEntrances();
     if (this.settings.autoSyncOnStartup) {
       this.startupSyncTimer = window.setTimeout(() => {
@@ -8854,16 +8798,11 @@ module.exports = class LacanTranslationHelper extends Plugin {
       this.segmentPreviewHideTimer = null;
     }
     this.segmentPreviewCache.clear();
-    if (this.compareRenderTimer) {
-      window.clearTimeout(this.compareRenderTimer);
-      this.compareRenderTimer = null;
+    if (this.readingToolbarRenderTimer) {
+      window.clearTimeout(this.readingToolbarRenderTimer);
+      this.readingToolbarRenderTimer = null;
     }
-    if (this.compareLoadingTimer) {
-      window.clearTimeout(this.compareLoadingTimer);
-      this.compareLoadingTimer = null;
-    }
-    this.disconnectComparisonPreviewWatchers();
-    this.removeComparisonToolbars();
+    this.removeReadingToolbars();
     this.segmentAiSkillChangeUnsubscribe?.();
     this.segmentAiSkillChangeUnsubscribe = null;
     if (this.segmentAiEphemeralPersistTimer) {
@@ -9436,10 +9375,10 @@ module.exports = class LacanTranslationHelper extends Plugin {
     bodyEl.setAttribute("title", "双击编辑整段中文译文、注释和建言");
     bodyEl.addEventListener("dblclick", (event) => {
       const target = event.target?.nodeType === 3 ? event.target.parentElement : event.target;
-      if (target?.closest?.("a, button, input, textarea, select, .footnotes, .footnote-ref, .lacan-translation-inline-editor, .lacan-segment-compare-control")) return;
+      if (target?.closest?.("a, button, input, textarea, select, .footnotes, .footnote-ref, .lacan-translation-inline-editor")) return;
       event.preventDefault();
       event.stopPropagation();
-      const renderedEls = Array.from(bodyEl.children).filter((element) => !element.matches(".footnotes, .lacan-segment-compare-control") && !(element.matches("p") && Array.from(element.children).some((child) => child.matches("a.internal-link") && /^(?:阅读笔记|s\d+[a-z]?-\d+)$/.test(child.textContent.trim()) && element.textContent.trim() === child.textContent.trim())));
+      const renderedEls = Array.from(bodyEl.children).filter((element) => !element.matches(".footnotes") && !(element.matches("p") && Array.from(element.children).some((child) => child.matches("a.internal-link") && /^(?:阅读笔记|s\d+[a-z]?-\d+)$/.test(child.textContent.trim()) && element.textContent.trim() === child.textContent.trim())));
       void this.openTranslationInlineEditor({ sourcePath, segmentId, hostEl: bodyEl, renderedEls });
     }, { capture: true });
   }
@@ -9645,13 +9584,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
       return;
     }
     if (file.path.startsWith("texts/") && file.extension === "md") {
-      this.comparisonSegmentIndexCache.delete(file.path);
       this.segmentPreviewCache.clear();
-      const activeFile = this.app.workspace.getActiveFile();
-      if (this.hasActiveComparisonForks() && activeFile instanceof TFile && normalizePath(activeFile.path) === normalizePath(file.path)) {
-        this.bumpComparisonRenderRevision();
-        this.scheduleComparisonRender(350);
-      }
     }
     if (!this.isTranslationLessonPath(file.path)) {
       return;
@@ -10134,7 +10067,6 @@ ${section}`
     return this.withGitSyncLock(() => this.syncConfiguredRepositoriesUnlocked({ notify }));
   }
   async syncConfiguredRepositoriesUnlocked({ notify = false } = {}) {
-    this.invalidateComparisonCaches();
     if (!this.settings.repositoryUrl?.trim()) {
       throw new Error("尚未配置 Lacan-Chinese-Translation-Project 仓库地址。");
     }
@@ -10144,14 +10076,7 @@ ${section}`
     } else {
       await this.syncEditorRepository({ ensureRepository: false });
     }
-    for (const fork of this.settings.forks) {
-      await this.syncForkRepository(fork, {
-        refreshComparison: false,
-        ensureRepository: false,
-        skipLock: true
-      });
-    }
-    this.refreshComparisonAfterRepositorySync({ showLoading: notify });
+    this.refreshReadingAfterRepositorySync();
     if (notify) {
       new Notice("Git 同步完成。");
     }
@@ -10189,33 +10114,6 @@ ${section}`
       await this.ensureGitRepositoryInitialized();
     }
     await this.fetchRepositoryToLocalBranch(url, branch, localBranch);
-  }
-  async syncForkRepository(fork, { refreshComparison = true, ensureRepository = true, skipLock = false } = {}) {
-    if (!skipLock) {
-      return this.withGitSyncLock(
-        () => this.syncForkRepository(fork, {
-          refreshComparison,
-          ensureRepository,
-          skipLock: true
-        })
-      );
-    }
-    if (!fork?.enabled) {
-      return;
-    }
-    const url = fork.url?.trim();
-    const branch = fork.remoteBranch?.trim() || "main";
-    const localBranch = fork.localBranch?.trim();
-    if (!url || !localBranch) {
-      throw new Error(`fork 配置不完整：${fork.name || url || "未命名 fork"}`);
-    }
-    if (ensureRepository) {
-      await this.ensureGitRepositoryInitialized({ notify: refreshComparison });
-    }
-    await this.fetchRepositoryToLocalBranch(url, branch, localBranch);
-    if (refreshComparison) {
-      this.refreshComparisonAfterRepositorySync({ showLoading: true });
-    }
   }
   async fetchRepositoryToLocalBranch(url, remoteBranch, localBranch) {
     await this.execGit(["check-ref-format", "--branch", localBranch]);
@@ -10336,27 +10234,10 @@ ${section}`
     const path = require("path");
     return fs.existsSync(path.join(this.getVaultBasePath(), ".git"));
   }
-  invalidateComparisonCaches() {
-    this.comparisonContentCache.clear();
-    this.comparisonSegmentIndexCache.clear();
-    this.comparisonCacheRevision += 1;
-    this.bumpComparisonRenderRevision();
-  }
-  bumpComparisonRenderRevision() {
-    this.comparisonRenderRevision += 1;
-  }
-  refreshComparisonAfterRepositorySync({ showLoading = false } = {}) {
-    this.invalidateComparisonCaches();
+  refreshReadingAfterRepositorySync() {
+    this.segmentPreviewCache.clear();
     this.refreshBilingualReadingViews();
-    const file = this.app.workspace.getActiveFile();
-    if (!(file instanceof TFile) || !this.isTextMarkdownPath(file.path)) {
-      return;
-    }
-    this.renderComparisonToolbar({
-      renderSegments: true,
-      showLoading,
-      forcePreviewRerender: false
-    });
+    this.renderReadingToolbar();
   }
   withGitHubProxy(args, useGithubProxy, remoteUrl) {
     const proxyUrl = this.settings.githubProxyUrl?.trim() || DEFAULT_GITHUB_PROXY_URL;
@@ -10379,34 +10260,32 @@ ${section}`
     }
     throw new Error("Git 功能需要 Obsidian 桌面端本地 vault。");
   }
-  scheduleComparisonRender(delay = 220) {
-    if (this.compareRenderTimer) {
-      window.clearTimeout(this.compareRenderTimer);
+  scheduleReadingToolbarRender(delay = 220) {
+    if (this.readingToolbarRenderTimer) {
+      window.clearTimeout(this.readingToolbarRenderTimer);
     }
-    this.compareRenderTimer = window.setTimeout(() => {
-      this.compareRenderTimer = null;
-      this.renderComparisonToolbar();
+    this.readingToolbarRenderTimer = window.setTimeout(() => {
+      this.readingToolbarRenderTimer = null;
+      this.renderReadingToolbar();
     }, delay);
   }
-  renderComparisonToolbar({ renderSegments = true, showLoading = false, forcePreviewRerender = false } = {}) {
+  renderReadingToolbar() {
     const activeView = this.app.workspace.activeLeaf?.view;
     const isBilingual = activeView?.getViewType?.() === LACAN_BILINGUAL_VIEW_TYPE;
     const file = isBilingual ? this.app.vault.getAbstractFileByPath(activeView.sourcePath) : this.app.workspace.getActiveFile();
-    if (!(file instanceof TFile) || !this.isTextMarkdownPath(file.path)) {
-      this.removeComparisonToolbars();
+    if (!(file instanceof TFile) || !this.isSegmentAiLessonPath(file.path)) {
+      this.removeReadingToolbars();
       return;
     }
-    const view = isBilingual ? activeView : Obsidian.MarkdownView ? this.app.workspace.getActiveViewOfType(Obsidian.MarkdownView) : this.app.workspace.activeLeaf?.view;
+    const view = isBilingual ? activeView : Obsidian.MarkdownView ? this.app.workspace.getActiveViewOfType(Obsidian.MarkdownView) : activeView;
     if (!view?.containerEl) {
       return;
     }
-    const contentEl = view.containerEl.querySelector(".view-content");
-    const toolbarMount = this.resolveComparisonToolbarMount(view);
-    if (!contentEl || !toolbarMount) {
+    const toolbarMount = this.resolveReadingToolbarMount(view);
+    if (!toolbarMount) {
       return;
     }
-    const forks = this.settings.forks.filter((fork) => fork.enabled && fork.localBranch);
-    const toolbarSignature = this.comparisonToolbarSignature(file.path, forks);
+    const toolbarSignature = normalizePath(file.path);
     let toolbarEl = view.containerEl.querySelector(".lacan-compare-toolbar");
     if (!toolbarEl) {
       toolbarEl = document.createElement("div");
@@ -10416,16 +10295,11 @@ ${section}`
     toolbarEl.classList.toggle("is-content-fallback", toolbarMount.location === "content");
     toolbarMount.hostEl.insertBefore(toolbarEl, toolbarMount.beforeEl);
     if (toolbarEl.dataset.toolbarSignature !== toolbarSignature) {
-      this.renderComparisonToolbarContent(toolbarEl, forks, file.path, view.leaf);
+      this.renderReadingToolbarContent(toolbarEl, file.path, view.leaf);
       toolbarEl.dataset.toolbarSignature = toolbarSignature;
     }
-    if (renderSegments && isBilingual) {
-      view.renderComparisonControls();
-    } else if (renderSegments && this.canRenderComparisonSegments(contentEl, view)) {
-      this.renderInlineComparisonControlsForActiveView({ showLoading, forcePreviewRerender }).catch((error) => this.handleComparisonRenderError(error));
-    }
   }
-  resolveComparisonToolbarMount(view) {
+  resolveReadingToolbarMount(view) {
     const viewHeaderEl = view?.containerEl?.querySelector?.(".view-header");
     if (viewHeaderEl) {
       const viewActionsEl = viewHeaderEl.querySelector?.(":scope > .view-actions") || viewHeaderEl.querySelector?.(".view-actions") || null;
@@ -10445,16 +10319,7 @@ ${section}`
       location: "content"
     };
   }
-  comparisonToolbarSignature(path, forks) {
-    const forkSignature = forks.map((fork) => [
-      fork.id,
-      fork.name || "",
-      fork.localBranch || "",
-      this.activeComparisonForks.has(fork.id) ? "1" : "0"
-    ].join(":")).join("|");
-    return `${normalizePath(path || "")}::${forkSignature}`;
-  }
-  renderComparisonToolbarContent(toolbarEl, forks, sourcePath, sourceLeaf) {
+  renderReadingToolbarContent(toolbarEl, sourcePath, sourceLeaf) {
     toolbarEl.empty();
     if (this.isSegmentAiLessonPath(sourcePath || "")) {
       const bilingualButton = toolbarEl.createEl("button", {
@@ -10476,130 +10341,10 @@ ${section}`
         );
       });
     }
-    const titleEl = toolbarEl.createSpan({
-      cls: "lacan-compare-toolbar-title",
-      text: "Fork 对照版本"
-    });
-    titleEl.setAttribute("aria-label", "选择要参与分段对照的 fork 版本");
-    if (forks.length === 0) {
-      toolbarEl.createSpan({
-        cls: "lacan-compare-empty",
-        text: "未配置可对照 fork"
-      });
-      return;
-    }
-    for (const fork of forks) {
-      const active = this.activeComparisonForks.has(fork.id);
-      const label = fork.name || fork.localBranch;
-      const button = toolbarEl.createEl("button", {
-        cls: active ? "lacan-compare-button is-active" : "lacan-compare-button",
-        text: active ? `已选 ${label}` : `选择 ${label}`
-      });
-      button.addEventListener("click", async () => {
-        if (active) {
-          this.activeComparisonForks.delete(fork.id);
-        } else {
-          this.activeComparisonForks.add(fork.id);
-        }
-        this.bumpComparisonRenderRevision();
-        this.renderComparisonToolbar({
-          renderSegments: true,
-          showLoading: true,
-          forcePreviewRerender: false
-        });
-      });
-    }
   }
-  removeComparisonToolbars() {
-    this.disconnectComparisonPreviewWatchers();
+  removeReadingToolbars() {
     const rootEl = this.app.workspace?.containerEl || document.body;
-    this.removeComparisonControls(rootEl);
     rootEl.querySelectorAll(".lacan-compare-toolbar").forEach((element) => element.remove());
-    rootEl.querySelectorAll(".lacan-compare-loading").forEach((element) => element.remove());
-  }
-  removeComparisonControls(rootEl) {
-    rootEl.querySelectorAll?.(".lacan-segment-compare-control").forEach((element) => {
-      this.unloadMarkdownRenderComponents(element);
-      element.remove();
-    });
-  }
-  handleComparisonRenderError(error) {
-    console.warn("Lacan Translation Helper: comparison render failed.", error);
-  }
-  async renderInlineComparisonControlsForActiveView({
-    showLoading = false,
-    forcePreviewRerender = false
-  } = {}) {
-    const renderToken = ++this.compareRenderToken;
-    const view = Obsidian.MarkdownView ? this.app.workspace.getActiveViewOfType(Obsidian.MarkdownView) : this.app.workspace.activeLeaf?.view;
-    const file = this.app.workspace.getActiveFile();
-    if (!(file instanceof TFile) || !view?.containerEl) {
-      return;
-    }
-    const contentEl = view.containerEl.querySelector(".view-content");
-    if (forcePreviewRerender) {
-      await this.rerenderPreview(view);
-    }
-    const renderedEl = view.containerEl.querySelector(".markdown-preview-view");
-    if (!renderedEl) {
-      this.disconnectComparisonPreviewWatchers();
-      return;
-    }
-    if (this.hasActiveComparisonForks()) {
-      this.installComparisonPreviewWatchers(view, renderedEl, file.path);
-    } else {
-      this.disconnectComparisonPreviewWatchers();
-    }
-    const activeForks = this.getActiveComparisonForks();
-    const state = this.getComparisonRenderState(renderedEl);
-    const fullRenderSignature = this.comparisonFullRenderSignature(file.path, activeForks);
-    const hasControls = Boolean(renderedEl.querySelector(".lacan-segment-compare-control"));
-    if (!forcePreviewRerender && state.fullRenderSignature === fullRenderSignature) {
-      return;
-    }
-    if (activeForks.length === 0 && !hasControls) {
-      state.fullRenderSignature = fullRenderSignature;
-      return;
-    }
-    const loadingTimer = showLoading && contentEl ? window.setTimeout(() => {
-      if (renderToken === this.compareRenderToken) {
-        this.setComparisonLoading(contentEl, true);
-      }
-    }, 120) : null;
-    if (loadingTimer) {
-      this.compareLoadingTimer = loadingTimer;
-    }
-    try {
-      await this.renderInlineComparisonControls(renderedEl, file.path, {
-        allowSourceFallback: true
-      });
-      state.fullRenderSignature = fullRenderSignature;
-    } finally {
-      if (loadingTimer) {
-        window.clearTimeout(loadingTimer);
-        if (this.compareLoadingTimer === loadingTimer) {
-          this.compareLoadingTimer = null;
-        }
-      }
-      if (contentEl && renderToken === this.compareRenderToken) {
-        this.setComparisonLoading(contentEl, false);
-      }
-    }
-  }
-  getComparisonRenderState(element) {
-    let state = this.comparisonRenderStates.get(element);
-    if (!state) {
-      state = {};
-      this.comparisonRenderStates.set(element, state);
-    }
-    return state;
-  }
-  comparisonFullRenderSignature(path, activeForks = this.getActiveComparisonForks()) {
-    return [
-      normalizePath(path || ""),
-      this.comparisonForkSignature(activeForks),
-      this.comparisonRenderRevision
-    ].join("::");
   }
   async rerenderPreview(view) {
     const rerender = view?.previewMode?.rerender;
@@ -10613,46 +10358,6 @@ ${section}`
       console.warn("Lacan Translation Helper: preview rerender failed.", error);
     }
   }
-  setComparisonLoading(contentEl, visible) {
-    let loadingEl = contentEl.querySelector(":scope > .lacan-compare-loading");
-    if (!visible) {
-      loadingEl?.remove();
-      return;
-    }
-    if (!loadingEl) {
-      loadingEl = document.createElement("div");
-      loadingEl.className = "lacan-compare-loading";
-      const toolbarEl = contentEl.querySelector(":scope > .lacan-compare-toolbar");
-      if (toolbarEl) {
-        contentEl.insertBefore(loadingEl, toolbarEl.nextSibling);
-      } else {
-        contentEl.prepend(loadingEl);
-      }
-    }
-    loadingEl.empty();
-    loadingEl.createSpan({ cls: "lacan-compare-loading-spinner" });
-    loadingEl.createSpan({ text: "正在渲染分段对照..." });
-  }
-  hasActiveComparisonForks() {
-    return this.settings.forks.some(
-      (fork) => fork.enabled && fork.localBranch && this.activeComparisonForks.has(fork.id)
-    );
-  }
-  getActiveComparisonForks() {
-    return this.settings.forks.filter(
-      (fork) => fork.enabled && fork.localBranch && this.activeComparisonForks.has(fork.id)
-    );
-  }
-  comparisonForkSignature(activeForks = this.getActiveComparisonForks()) {
-    const forks = activeForks.map((fork) => `${fork.id}:${fork.localBranch}`).join("|");
-    return `${this.comparisonCacheRevision}:${forks}`;
-  }
-  shouldRenderComparisonSegments(contentEl) {
-    return this.hasActiveComparisonForks() || Boolean(contentEl?.querySelector?.(".lacan-segment-compare-control"));
-  }
-  canRenderComparisonSegments(contentEl, view) {
-    return this.shouldRenderComparisonSegments(contentEl) && !this.isDocumentSearchActive(view?.containerEl);
-  }
   isTextMarkdownPath(path) {
     const normalized = normalizePath(path || "");
     return normalized.startsWith("texts/") && normalized.endsWith(".md");
@@ -10660,366 +10365,7 @@ ${section}`
   isReadingNotePath(path) {
     return READING_NOTE_PATH_RE.test(normalizePath(path || ""));
   }
-  hasSegmentIdComment(text) {
-    return SEGMENT_ID_COMMENT_TEST_RE.test(String(text || ""));
-  }
-  installComparisonPreviewWatchers(view, previewEl, path) {
-    if (this.comparisonObservedPreviewEl === previewEl && this.comparisonObservedPath === path) {
-      return;
-    }
-    this.disconnectComparisonPreviewWatchers();
-    this.comparisonObservedPreviewEl = previewEl;
-    this.comparisonObservedPath = path;
-    this.comparisonPreviewObserver = new MutationObserver((mutations) => {
-      if (!this.hasActiveComparisonForks() || this.isDocumentSearchActive(view.containerEl)) {
-        return;
-      }
-      const hasContentChange = this.hasMeaningfulPreviewMutation(mutations);
-      if (hasContentChange) {
-        this.invalidateComparisonRenderState(previewEl);
-        this.schedulePreviewComparisonRender(path, 500);
-      }
-    });
-    this.comparisonPreviewObserver.observe(previewEl, {
-      childList: true,
-      subtree: true
-    });
-  }
-  disconnectComparisonPreviewWatchers() {
-    if (this.comparisonPreviewObserver) {
-      this.comparisonPreviewObserver.disconnect();
-      this.comparisonPreviewObserver = null;
-    }
-    if (this.comparisonPreviewRenderTimer) {
-      window.clearTimeout(this.comparisonPreviewRenderTimer);
-      this.comparisonPreviewRenderTimer = null;
-    }
-    this.comparisonObservedPreviewEl = null;
-    this.comparisonObservedPath = "";
-  }
-  schedulePreviewComparisonRender(path, delay = 220) {
-    if (this.comparisonPreviewRenderTimer) {
-      window.clearTimeout(this.comparisonPreviewRenderTimer);
-    }
-    this.comparisonPreviewRenderTimer = window.setTimeout(() => {
-      this.comparisonPreviewRenderTimer = null;
-      const view = Obsidian.MarkdownView ? this.app.workspace.getActiveViewOfType(Obsidian.MarkdownView) : this.app.workspace.activeLeaf?.view;
-      const file = this.app.workspace.getActiveFile();
-      if (!(file instanceof TFile) || normalizePath(file.path) !== normalizePath(path)) {
-        return;
-      }
-      const renderedEl = view?.containerEl?.querySelector(".markdown-preview-view");
-      if (renderedEl && this.hasActiveComparisonForks() && !this.isDocumentSearchActive(view?.containerEl)) {
-        this.renderInlineComparisonControls(renderedEl, path, {
-          allowSourceFallback: false
-        }).catch((error) => this.handleComparisonRenderError(error));
-      }
-    }, delay);
-  }
-  invalidateComparisonRenderState(element) {
-    const state = element ? this.comparisonRenderStates.get(element) : null;
-    if (state) {
-      state.fullRenderSignature = "";
-    }
-  }
-  isComparisonUiNode(node) {
-    if (!(node instanceof Element)) {
-      return false;
-    }
-    return Boolean(
-      node.closest?.(".lacan-segment-compare-control, .lacan-compare-toolbar, .lacan-compare-loading") || node.matches?.(".lacan-segment-compare-control, .lacan-compare-toolbar, .lacan-compare-loading")
-    );
-  }
-  hasMeaningfulPreviewMutation(mutations) {
-    return mutations.some(
-      (mutation) => [...mutation.addedNodes, ...mutation.removedNodes].some((node) => this.isMeaningfulPreviewNode(node))
-    );
-  }
-  isMeaningfulPreviewNode(node) {
-    return node instanceof Element && !this.isComparisonUiNode(node) && !this.isObsidianTransientNode(node);
-  }
-  isObsidianTransientNode(node) {
-    if (!(node instanceof Element)) {
-      return false;
-    }
-    const selector = [
-      ".search-highlight",
-      ".obsidian-search-match-highlight",
-      ".cm-searchMatch",
-      ".cm-searchMatch-selected",
-      ".cm-selectionMatch",
-      ".document-search-container",
-      ".document-search",
-      ".is-flashing",
-      ".is-highlighted",
-      ".mod-search-highlight",
-      ".mod-highlighted"
-    ].join(", ");
-    if (node.matches?.(selector) || node.closest?.(selector)) {
-      return true;
-    }
-    const className = typeof node.className === "string" ? node.className : "";
-    return /(?:search|find|highlight|flashing|selectionMatch)/i.test(className);
-  }
-  isDocumentSearchActive(rootEl) {
-    const searchEl = rootEl?.querySelector?.(".document-search-container, .document-search");
-    if (!searchEl) {
-      return false;
-    }
-    if (searchEl.matches?.(".is-hidden, .mod-hidden")) {
-      return false;
-    }
-    return Boolean(searchEl.offsetParent || searchEl.getClientRects?.().length);
-  }
-  async renderInlineComparisonControls(containerEl, sourcePath, { allowSourceFallback = true, sectionInfo = null } = {}) {
-    const path = normalizePath(sourcePath || "");
-    if (containerEl.closest?.(".cm-editor, .markdown-source-view")) {
-      return;
-    }
-    if (!this.isTextMarkdownPath(path)) {
-      return;
-    }
-    const activeForks = this.getActiveComparisonForks();
-    if (activeForks.length === 0) {
-      this.removeComparisonControls(containerEl);
-      return;
-    }
-    const forkSignature = this.comparisonForkSignature(activeForks);
-    const existingControls = this.getExistingComparisonControls(containerEl);
-    const sectionInsertedCount = this.renderSectionAnchoredComparisonControls(
-      containerEl,
-      path,
-      sectionInfo,
-      activeForks,
-      forkSignature,
-      existingControls
-    );
-    if (sectionInsertedCount > 0) {
-      return;
-    }
-    const insertedCount = this.renderCommentAnchoredComparisonControls(
-      containerEl,
-      path,
-      activeForks,
-      forkSignature,
-      existingControls
-    );
-    if (insertedCount > 0 || !allowSourceFallback) {
-      return;
-    }
-    await this.renderSourceAnchoredComparisonControls(
-      containerEl,
-      path,
-      activeForks,
-      forkSignature,
-      existingControls
-    );
-  }
-  getExistingComparisonControls(containerEl) {
-    const controls = /* @__PURE__ */ new Map();
-    containerEl.querySelectorAll?.(".lacan-segment-compare-control[data-segment-id]").forEach((element) => {
-      if (!controls.has(element.dataset.segmentId)) {
-        controls.set(element.dataset.segmentId, element);
-      }
-    });
-    return controls;
-  }
-  renderSectionAnchoredComparisonControls(containerEl, path, sectionInfo, activeForks, forkSignature, existingControls) {
-    const sectionText = sectionInfo?.text || "";
-    const markers = this.extractSegmentMarkers(sectionText);
-    if (markers.length === 0) {
-      return 0;
-    }
-    const lineOffset = this.sectionLineOffset(sectionInfo);
-    for (const marker of markers) {
-      marker.line += lineOffset;
-      marker.nextLine = marker.nextLine === null ? null : marker.nextLine + lineOffset;
-    }
-    if (markers.length === 1) {
-      const segmentId = markers[0].id;
-      const existing = existingControls.get(segmentId);
-      if (existing) {
-        this.renderSegmentComparisonControlIfNeeded(existing, path, segmentId, activeForks, forkSignature);
-        return 1;
-      }
-      const controlEl = document.createElement("div");
-      controlEl.className = "lacan-segment-compare-control";
-      controlEl.dataset.segmentId = segmentId;
-      containerEl.prepend(controlEl);
-      existingControls.set(segmentId, controlEl);
-      this.renderSegmentComparisonControl(controlEl, path, segmentId, activeForks, forkSignature);
-      return 1;
-    }
-    let insertedCount = 0;
-    const usedAnchors = /* @__PURE__ */ new Set();
-    const anchorIndex = this.buildRenderedAnchorIndex(containerEl);
-    for (const marker of markers) {
-      const existing = existingControls.get(marker.id);
-      if (existing) {
-        this.renderSegmentComparisonControlIfNeeded(existing, path, marker.id, activeForks, forkSignature);
-        insertedCount += 1;
-        continue;
-      }
-      const anchorEl = this.findRenderedSegmentAnchor(containerEl, marker, usedAnchors, anchorIndex);
-      if (!anchorEl?.parentNode) {
-        continue;
-      }
-      const controlEl = document.createElement("div");
-      controlEl.className = "lacan-segment-compare-control";
-      controlEl.dataset.segmentId = marker.id;
-      anchorEl.parentNode.insertBefore(controlEl, anchorEl);
-      usedAnchors.add(anchorEl);
-      existingControls.set(marker.id, controlEl);
-      this.renderSegmentComparisonControl(controlEl, path, marker.id, activeForks, forkSignature);
-      insertedCount += 1;
-    }
-    return insertedCount;
-  }
-  renderCommentAnchoredComparisonControls(containerEl, path, activeForks, forkSignature, existingControls) {
-    const walker = document.createTreeWalker(containerEl, NodeFilter.SHOW_COMMENT);
-    const commentNodes = [];
-    let node;
-    while ((node = walker.nextNode()) !== null) {
-      const segmentId = this.segmentIdFromComment(node.nodeValue);
-      if (segmentId) {
-        commentNodes.push({ node, segmentId });
-      }
-    }
-    let insertedCount = 0;
-    for (const { node: commentNode, segmentId } of commentNodes) {
-      const existing = existingControls.get(segmentId);
-      if (existing) {
-        this.renderSegmentComparisonControlIfNeeded(existing, path, segmentId, activeForks, forkSignature);
-        insertedCount += 1;
-        continue;
-      }
-      const parent = commentNode.parentNode;
-      if (!parent) {
-        continue;
-      }
-      const controlEl = document.createElement("div");
-      controlEl.className = "lacan-segment-compare-control";
-      controlEl.dataset.segmentId = segmentId;
-      parent.insertBefore(controlEl, commentNode.nextSibling);
-      existingControls.set(segmentId, controlEl);
-      this.renderSegmentComparisonControl(controlEl, path, segmentId, activeForks, forkSignature);
-      insertedCount += 1;
-    }
-    return insertedCount;
-  }
-  async renderSourceAnchoredComparisonControls(containerEl, path, activeForks, forkSignature, existingControls) {
-    if (!containerEl.isConnected) {
-      return;
-    }
-    const markers = await this.getComparisonSegmentMarkers(path);
-    if (markers.length === 0) {
-      return;
-    }
-    const usedAnchors = /* @__PURE__ */ new Set();
-    const anchorIndex = this.buildRenderedAnchorIndex(containerEl);
-    for (let index = 0; index < markers.length; index += 1) {
-      const marker = markers[index];
-      const existing = existingControls.get(marker.id);
-      if (existing) {
-        this.renderSegmentComparisonControlIfNeeded(existing, path, marker.id, activeForks, forkSignature);
-        continue;
-      }
-      const anchorEl = this.findRenderedSegmentAnchor(containerEl, marker, usedAnchors, anchorIndex);
-      if (!anchorEl?.parentNode) {
-        continue;
-      }
-      const controlEl = document.createElement("div");
-      controlEl.className = "lacan-segment-compare-control";
-      controlEl.dataset.segmentId = marker.id;
-      anchorEl.parentNode.insertBefore(controlEl, anchorEl);
-      usedAnchors.add(anchorEl);
-      existingControls.set(marker.id, controlEl);
-      this.renderSegmentComparisonControl(controlEl, path, marker.id, activeForks, forkSignature);
-    }
-  }
-  async getComparisonSegmentMarkers(path) {
-    const normalizedPath = normalizePath(path || "");
-    if (!this.comparisonSegmentIndexCache.has(normalizedPath)) {
-      const file = this.app.vault.getAbstractFileByPath(normalizedPath);
-      const promise = file instanceof TFile ? this.app.vault.cachedRead(file).then((text) => this.extractSegmentMarkers(text)) : Promise.resolve([]);
-      this.comparisonSegmentIndexCache.set(normalizedPath, promise);
-    }
-    return this.comparisonSegmentIndexCache.get(normalizedPath);
-  }
-  async loadForkFileContent(branch, path) {
-    return this.execGit(["show", `${branch}:${path}`]);
-  }
-  renderSegmentComparisonControlIfNeeded(controlEl, path, segmentId, activeForks, forkSignature) {
-    if (controlEl.dataset.forkSignature === forkSignature) {
-      return;
-    }
-    this.renderSegmentComparisonControl(controlEl, path, segmentId, activeForks, forkSignature);
-  }
-  renderSegmentComparisonControl(controlEl, path, segmentId, activeForks = this.getActiveComparisonForks(), forkSignature = this.comparisonForkSignature(activeForks)) {
-    const stateKey = this.segmentComparisonKey(path, segmentId);
-    const expanded = this.expandedComparisonSegments.has(stateKey);
-    this.unloadMarkdownRenderComponents(controlEl);
-    controlEl.dataset.segmentId = segmentId;
-    controlEl.dataset.forkSignature = forkSignature;
-    controlEl.empty();
-    const button = controlEl.createEl("button", {
-      cls: expanded ? "lacan-segment-compare-toggle is-active" : "lacan-segment-compare-toggle",
-      text: expanded ? `${segmentId} 收起对照` : `${segmentId} 对照`
-    });
-    button.setAttribute("type", "button");
-    button.setAttribute("aria-expanded", expanded ? "true" : "false");
-    button.setAttribute("aria-label", `${expanded ? "收起" : "展开"} ${segmentId} 的 fork 对照`);
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (this.expandedComparisonSegments.has(stateKey)) {
-        this.expandedComparisonSegments.delete(stateKey);
-      } else {
-        this.expandedComparisonSegments.add(stateKey);
-      }
-      this.renderSegmentComparisonControl(controlEl, path, segmentId);
-    });
-    if (!expanded) {
-      return;
-    }
-    const panelEl = controlEl.createDiv("lacan-segment-compare-panel");
-    for (const fork of activeForks) {
-      const itemEl = panelEl.createDiv("lacan-segment-compare-item");
-      itemEl.createDiv({
-        cls: "lacan-segment-compare-title",
-        text: `${fork.name || fork.localBranch} · ${fork.localBranch}`
-      });
-      const contentEl = itemEl.createDiv({
-        cls: "lacan-segment-compare-content",
-        text: "加载中..."
-      });
-      this.loadForkSegmentContent(fork, path, segmentId).then((content) => {
-        if (!contentEl.isConnected) {
-          return null;
-        }
-        return this.renderForkSegmentContent(contentEl, content, path);
-      }).catch((error) => {
-        if (contentEl.isConnected) {
-          contentEl.setText(`无法读取该段对照：${error.message}`);
-        }
-      });
-    }
-  }
-  async loadForkSegmentContent(fork, path, segmentId) {
-    const segments = await this.loadForkSegments(fork.localBranch, path);
-    return segments.get(segmentId) || "";
-  }
-  async loadForkSegments(branch, path) {
-    const cacheKey = `${branch}:${path}`;
-    if (!this.comparisonContentCache.has(cacheKey)) {
-      this.comparisonContentCache.set(
-        cacheKey,
-        this.loadForkFileContent(branch, path).then((content) => this.extractSegmentsById(content))
-      );
-    }
-    return this.comparisonContentCache.get(cacheKey);
-  }
-  async renderForkSegmentContent(contentEl, content, sourcePath) {
+  async renderSegmentMarkdownContent(contentEl, content, sourcePath) {
     this.unloadMarkdownRenderComponent(contentEl);
     contentEl.empty();
     const trimmed = String(content || "").trim();
@@ -11051,7 +10397,7 @@ ${section}`
       return;
     }
     this.unloadMarkdownRenderComponent(rootEl);
-    rootEl.querySelectorAll?.(".lacan-segment-compare-content, .lacan-segment-preview-content").forEach((element) => {
+    rootEl.querySelectorAll?.(".lacan-segment-preview-content").forEach((element) => {
       this.unloadMarkdownRenderComponent(element);
     });
   }
@@ -11181,13 +10527,13 @@ ${section}`
     return String(text || "").replace(/\s+/g, "");
   }
   buildRenderedAnchorIndex(containerEl) {
-    const lineAnchors = Array.from(containerEl.querySelectorAll("[data-line]")).filter((element) => !element.closest(".lacan-segment-compare-control")).map((element) => ({
+    const lineAnchors = Array.from(containerEl.querySelectorAll("[data-line]")).map((element) => ({
       element,
       line: Number(element.getAttribute("data-line"))
     })).filter((item) => Number.isFinite(item.line)).sort((a, b) => a.line - b.line);
     const blockAnchors = Array.from(
       containerEl.querySelectorAll("p, blockquote, ul, ol, pre, table, h1, h2, h3, h4, h5, h6")
-    ).filter((element) => !element.closest(".lacan-segment-compare-control")).map((element) => ({
+    ).map((element) => ({
       element,
       normalizedText: this.normalizeRenderedText(element.textContent)
     }));
@@ -11312,7 +10658,7 @@ ${section}`
     }
     return ids;
   }
-  segmentComparisonKey(path, segmentId) {
+  segmentCacheKey(path, segmentId) {
     return `${path}::${segmentId}`;
   }
   decorateRenderedReadingNoteLinks(rootEl, sourcePath) {
@@ -11529,7 +10875,7 @@ ${section}`
       if (token !== this.segmentPreviewRenderToken || !contentEl.isConnected) {
         return null;
       }
-      return this.renderForkSegmentContent(contentEl, content, sourcePath);
+      return this.renderSegmentMarkdownContent(contentEl, content, sourcePath);
     }).catch((error) => {
       if (token === this.segmentPreviewRenderToken && contentEl.isConnected) {
         contentEl.textContent = `无法读取对应${documentLabel}段落：${error.message}`;
@@ -11570,7 +10916,7 @@ ${section}`
       throw new Error(`不是有效的分段 ID：${segmentId}`);
     }
     const normalizedTargetPath = normalizePath(targetPath || "");
-    const cacheKey = this.segmentComparisonKey(
+    const cacheKey = this.segmentCacheKey(
       normalizedTargetPath || "auto",
       normalizedSegmentId
     );
@@ -12197,7 +11543,7 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
         "项目关系图打开失败"
       ));
     });
-    new Setting(containerEl).setName("模式").setDesc("只决定同步主项目时是否更新当前文件。Fork 对照在 Reader 和 Editer 中都可使用。").addDropdown((dropdown) => {
+    new Setting(containerEl).setName("模式").setDesc("决定同步主项目时是否更新当前文件。").addDropdown((dropdown) => {
       dropdown.addOption("reader", "Reader").addOption("editer", "Editer").setValue(this.plugin.settings.mode).onChange(async (value) => {
         this.plugin.settings.mode = value;
         if (value === "reader" && this.plugin.settings.autoSyncOnStartup && !this.plugin.confirmReaderAutoSyncEnable()) {
@@ -12205,7 +11551,7 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
           new Notice("已关闭 Reader 模式启动时自动同步。");
         }
         await this.plugin.saveSettings();
-        this.plugin.scheduleComparisonRender();
+        this.plugin.scheduleReadingToolbarRender();
         this.display();
       });
     });
@@ -12215,9 +11561,6 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
     });
     modeHelpEl.createEl("p", {
       text: "Editer：同步主仓库时只下载为对照版本，不覆盖你正在编辑的当前文件，适合参与翻译的人。"
-    });
-    modeHelpEl.createEl("p", {
-      text: "Fork 对照：两个模式都支持。先在页面顶部选择 fork 版本，再在阅读预览层用分段旁的开关展开该段对照；不会写入 markdown 原文件。"
     });
     new Setting(containerEl).setName("Lacan-Chinese-Translation-Project 仓库地址").setDesc("填写主项目在 GitHub 上的地址。Reader 会更新当前本地项目；Editer 会下载为主项目对照版本。").addText((text) => {
       text.setPlaceholder(DEFAULT_REPOSITORY_URL).setValue(this.plugin.settings.repositoryUrl || "").onChange(async (value) => {
@@ -12249,7 +11592,7 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
-    new Setting(containerEl).setName("启动时自动同步").setDesc("打开 Obsidian 时自动同步主项目和已启用 fork。Reader 默认建议关闭；Editer 只更新主项目对照版本。").addToggle((toggle) => {
+    new Setting(containerEl).setName("启动时自动同步").setDesc("打开 Obsidian 时自动同步主项目。Reader 默认建议关闭；Editer 只更新主项目对照版本。").addToggle((toggle) => {
       toggle.setValue(Boolean(this.plugin.settings.autoSyncOnStartup)).onChange(async (value) => {
         if (value && this.plugin.settings.mode === "reader" && !this.plugin.confirmReaderAutoSyncEnable()) {
           this.plugin.settings.autoSyncOnStartup = false;
@@ -12261,7 +11604,7 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
-    new Setting(containerEl).setName("立即同步").setDesc("立即获取主项目和已启用 fork 的最新内容。当前目录未初始化 Git 时会先自动执行 git init。Reader 会更新当前文件；Editer 不覆盖当前文件。").addButton((button) => {
+    new Setting(containerEl).setName("立即同步").setDesc("立即获取主项目的最新内容。当前目录未初始化 Git 时会先自动执行 git init。Reader 会更新当前文件；Editer 不覆盖当前文件。").addButton((button) => {
       button.setButtonText("同步").setCta().setDisabled(this.plugin.syncInProgress).onClick(async () => {
         button.setDisabled(true);
         button.setButtonText("同步中...");
@@ -12274,27 +11617,6 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
           button.setButtonText("同步");
           button.setDisabled(false);
         }
-      });
-    });
-    containerEl.createEl("h3", { text: "Fork 对照版本" });
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text: "Fork 是其他贡献者自己的项目副本。每个 fork 会保存为独立对照版本；查看 texts 文件时，先在顶部选择版本，再在阅读预览层的具体分段旁展开该段对照。"
-    });
-    this.renderForkSettings(containerEl);
-    new Setting(containerEl).setName("添加 fork").setDesc("添加一个新的 fork 仓库配置。").addButton((button) => {
-      button.setButtonText("添加").onClick(async () => {
-        const nextIndex = this.plugin.settings.forks.length + 1;
-        this.plugin.settings.forks.push({
-          id: this.createForkId(),
-          name: `fork-${nextIndex}`,
-          url: "",
-          remoteBranch: "main",
-          localBranch: `lacan-fork/fork-${nextIndex}`,
-          enabled: true
-        });
-        await this.plugin.saveSettings();
-        this.display();
       });
     });
   }
@@ -12726,74 +12048,6 @@ Agent：${this.plugin.settings.segmentAiCodexPath || "PATH 中的 Codex"}
         }
       });
     });
-  }
-  renderForkSettings(containerEl) {
-    for (const fork of this.plugin.settings.forks) {
-      const sectionEl = containerEl.createDiv("lacan-settings-fork");
-      sectionEl.createEl("h4", { text: fork.name || fork.localBranch || "未命名 fork" });
-      new Setting(sectionEl).setName("启用").setDesc("启用后会参与同步，并显示为文本对照按钮。").addToggle((toggle) => {
-        toggle.setValue(Boolean(fork.enabled)).onChange(async (value) => {
-          fork.enabled = value;
-          await this.plugin.saveSettings();
-          this.plugin.scheduleComparisonRender();
-        });
-      });
-      new Setting(sectionEl).setName("名称").addText((text) => {
-        text.setPlaceholder("fork 名称").setValue(fork.name || "").onChange(async (value) => {
-          fork.name = value.trim();
-          await this.plugin.saveSettings();
-          this.plugin.scheduleComparisonRender();
-        });
-      });
-      new Setting(sectionEl).setName("仓库地址").addText((text) => {
-        text.setPlaceholder("https://github.com/user/Lacan-Chinese-Translation-Project.git").setValue(fork.url || "").onChange(async (value) => {
-          fork.url = value.trim();
-          await this.plugin.saveSettings();
-        });
-      });
-      new Setting(sectionEl).setName("GitHub 上的版本").addText((text) => {
-        text.setPlaceholder("main").setValue(fork.remoteBranch || "main").onChange(async (value) => {
-          fork.remoteBranch = value.trim() || "main";
-          await this.plugin.saveSettings();
-        });
-      });
-      new Setting(sectionEl).setName("本地对照版本名称").setDesc("用于保存这个 fork 的对照内容。不要设置成你正在编辑的版本名称；不了解的话保持默认。").addText((text) => {
-        text.setPlaceholder("lacan-fork/user-main").setValue(fork.localBranch || "").onChange(async (value) => {
-          fork.localBranch = value.trim();
-          await this.plugin.saveSettings();
-          this.plugin.scheduleComparisonRender();
-        });
-      });
-      new Setting(sectionEl).setName("操作").addButton((button) => {
-        button.setButtonText("同步 fork").setDisabled(this.plugin.syncInProgress).onClick(async () => {
-          button.setDisabled(true);
-          button.setButtonText("同步中...");
-          try {
-            await this.plugin.runWithNotice(
-              async () => {
-                await this.plugin.syncForkRepository(fork);
-                new Notice(`已同步 fork：${fork.name || fork.localBranch}`);
-              },
-              "fork 同步失败"
-            );
-          } finally {
-            button.setButtonText("同步 fork");
-            button.setDisabled(false);
-          }
-        });
-      }).addButton((button) => {
-        button.setButtonText("删除").setWarning().onClick(async () => {
-          this.plugin.settings.forks = this.plugin.settings.forks.filter((item) => item.id !== fork.id);
-          this.plugin.activeComparisonForks.delete(fork.id);
-          await this.plugin.saveSettings();
-          this.plugin.scheduleComparisonRender();
-          this.display();
-        });
-      });
-    }
-  }
-  createForkId() {
-    return `fork-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }
 };
 var LacanLessonListBasesView = class extends ObsidianBasesView {

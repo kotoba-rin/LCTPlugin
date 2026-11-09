@@ -17,6 +17,7 @@ class Control {
   setPlaceholder() { return this; }
   setButtonText(text) { this.buttonText = text; return this; }
   setDisabled() { return this; }
+  setCta() { return this; }
   addOption() { return this; }
   onChange(callback) { this.change = callback; return this; }
   onClick(callback) { this.click = callback; return this; }
@@ -24,7 +25,7 @@ class Control {
 class MockSetting {
   constructor() { this.controls = []; settingRows.push(this); }
   setName(name) { this.name = name; return this; }
-  setDesc() { return this; }
+  setDesc(description) { this.description = description; return this; }
   addControl(callback) { const control = new Control(); this.controls.push(control); callback(control); return this; }
   addText(callback) { return this.addControl(callback); }
   addToggle(callback) { return this.addControl(callback); }
@@ -101,6 +102,7 @@ async function run() {
   };
   plugin.manifest = { version: "test-version" };
   plugin.loadData = async () => ({
+    forks: [{ id: "legacy", name: "旧 Fork", localBranch: "old-fork", enabled: true }],
     frenchLookupEnabled: false,
     frenchLookupTrigger: "double-click",
     frenchLookupAutoTranslate: false,
@@ -114,12 +116,15 @@ async function run() {
   plugin.registerEvent = () => {};
   plugin.registerDomEvent = () => {};
   plugin.getVaultBasePath = () => "/mock/vault";
-  for (const name of ["initializeSegmentAi", "scheduleSegmentAiMcpBackgroundCheck", "registerReadingNoteEditorExtension", "registerMarkdownPostProcessor", "registerProjectBasesView", "scheduleComparisonRender", "refreshSegmentAiEntrances", "removeSegmentAiPreviewControls", "hideSegmentPreview", "disconnectComparisonPreviewWatchers", "removeComparisonToolbars"]) {
+  for (const name of ["initializeSegmentAi", "scheduleSegmentAiMcpBackgroundCheck", "registerReadingNoteEditorExtension", "registerMarkdownPostProcessor", "registerProjectBasesView", "scheduleReadingToolbarRender", "refreshSegmentAiEntrances", "removeSegmentAiPreviewControls", "hideSegmentPreview", "removeReadingToolbars"]) {
     plugin[name] = () => {};
   }
   const previousDocument = global.document;
   global.document = {};
   try { await plugin.onload(); } finally { global.document = previousDocument; }
+  assert.strictEqual(Object.hasOwn(plugin.settings, "forks"), false, "startup must retire saved Fork settings");
+  assert.ok(settingsSaves.length > 0);
+  assert.ok(settingsSaves.every((settings) => !Object.hasOwn(settings, "forks")), "startup must persist the settings migration without restoring retired Forks");
   assert.ok(commands.has("open-pdf-reading"), "plugin startup must register the PDF reading command");
   assert.strictEqual(plugin.settings.frenchLookupEnabled, false, "startup must preserve an explicitly disabled selection trigger");
   assert.strictEqual(plugin.settings.frenchLookupTrigger, "double-click");
@@ -160,7 +165,16 @@ async function run() {
   assert.deepStrictEqual(popups[0].options.translate(lookup, { signal }), { lookup, options: { signal } });
 
   const createdElements = [];
-  const parentEl = { createEl(tag, options) { createdElements.push({ tag, ...options }); return this; }, createDiv() { return this; } };
+  const parentEl = {
+    createEl(tag, options) { createdElements.push({ tag, ...options }); return this; },
+    createDiv() { return this; }, empty() {}, setAttribute() {}, addEventListener() {},
+  };
+  settingTab.containerEl = parentEl;
+  settingTab.display();
+  assert.ok(settingRows.some((row) => row.name === "立即同步"), "project settings must retain upstream sync");
+  assert.ok(!/fork/i.test(JSON.stringify({ createdElements, settingRows })), "project settings must not expose retired Fork configuration or descriptions");
+  settingRows.length = 0;
+  createdElements.length = 0;
   let settingsRefreshes = 0;
   settingTab.display = () => { settingsRefreshes += 1; };
   settingTab.renderFrenchLookupSettings(parentEl);
