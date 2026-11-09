@@ -3544,6 +3544,7 @@ var require_domain = __commonJS({
 var require_json_line_rpc = __commonJS({
   "segment-ai/json-line-rpc.js"(exports2, module2) {
     var { EventEmitter } = require("events");
+    var { StringDecoder } = require("string_decoder");
     var AppServerProtocolError = class extends Error {
       constructor(code, message, details = {}) {
         super(message);
@@ -3563,6 +3564,7 @@ var require_json_line_rpc = __commonJS({
         this.nextRequestId = 1;
         this.pending = /* @__PURE__ */ new Map();
         this.stdoutBuffer = "";
+        this.stdoutDecoder = new StringDecoder("utf8");
         this.closed = false;
         this.exitHandled = false;
         this.onStdoutData = (chunk) => this.handleStdoutData(chunk);
@@ -3614,7 +3616,7 @@ var require_json_line_rpc = __commonJS({
         }
       }
       handleStdoutData(chunk) {
-        this.stdoutBuffer += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+        this.stdoutBuffer += Buffer.isBuffer(chunk) ? this.stdoutDecoder.write(chunk) : String(chunk);
         const lines = this.stdoutBuffer.split(/\r?\n/);
         this.stdoutBuffer = lines.pop() || "";
         for (const line of lines) {
@@ -4249,14 +4251,7 @@ var require_codex_app_server_runtime = __commonJS({
         return new Promise((resolve, reject) => {
           const key = turnEventKey(activeThreadId, turnId);
           const timeout = setTimeout(() => {
-            if (!this.activeTurns.has(key)) {
-              return;
-            }
-            this.activeTurns.delete(key);
-            reject(this.rememberError(new CodexRuntimeError(
-              "TurnTimeout",
-              "本地 Agent 生成超时，可重试该分段。"
-            )));
+            this.handleTurnTimeout(key);
           }, this.turnTimeoutMs);
           this.activeTurns.set(key, {
             key,
@@ -4615,6 +4610,10 @@ var require_codex_app_server_runtime = __commonJS({
         if (!active) {
           return;
         }
+        if (active.timeoutError && (message.method === "turn/completed" || message.method === "error" && message.params?.willRetry === false)) {
+          this.finishTurnWithError(active.key, active.timeoutError);
+          return;
+        }
         if (message.method === "item/agentMessage/delta") {
           const delta = String(message.params?.delta || "");
           active.text += delta;
@@ -4705,7 +4704,7 @@ var require_codex_app_server_runtime = __commonJS({
       }
       handleRuntimeExit(error) {
         for (const key of [...this.activeTurns.keys()]) {
-          this.finishTurnWithError(key, new CodexRuntimeError(
+          this.finishTurnWithError(key, this.activeTurns.get(key)?.timeoutError || new CodexRuntimeError(
             "AppServerExited",
             "本地 Agent 意外退出，可手动重试。",
             { cause: error }
@@ -4716,6 +4715,37 @@ var require_codex_app_server_runtime = __commonJS({
         this.diagnostics.initialized = false;
         this.diagnostics.authenticated = false;
         this.diagnostics.disallowedCapabilitiesIsolated = false;
+      }
+      handleTurnTimeout(key) {
+        const active = this.activeTurns.get(key);
+        if (!active || active.timeoutError) {
+          return;
+        }
+        active.timeoutError = new CodexRuntimeError(
+          "TurnTimeout",
+          "本地 Agent 生成超时，已停止本次解读，可重试该分段。"
+        );
+        active.timeout = setTimeout(() => this.closeAfterTurnTimeout(key), this.requestTimeoutMs);
+        if (!this.client || this.client.closed) {
+          this.closeAfterTurnTimeout(key);
+          return;
+        }
+        void this.client.request("turn/interrupt", {
+          threadId: active.threadId,
+          turnId: active.turnId
+        }).catch(() => this.closeAfterTurnTimeout(key));
+      }
+      closeAfterTurnTimeout(key) {
+        const active = this.activeTurns.get(key);
+        if (!active?.timeoutError) {
+          return;
+        }
+        this.finishTurnWithError(key, active.timeoutError);
+        this.closeProcess();
+        this.handleRuntimeExit(new CodexRuntimeError(
+          "AppServerExited",
+          "无法确认超时任务已停止，本地 Agent 已关闭，请重试。"
+        ));
       }
       finishTurnWithError(key, error) {
         const active = this.activeTurns.get(key);
@@ -8557,6 +8587,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.createdFileTimers = /* @__PURE__ */ new Set();
     this.projectGraphViews = /* @__PURE__ */ new WeakSet();
     this.progressWritePaths = /* @__PURE__ */ new Set();
+    this.progressDirtyPaths = /* @__PURE__ */ new Set();
     this.progressWriteSuppressTimers = /* @__PURE__ */ new Map();
     this.segmentPreviewCache = /* @__PURE__ */ new Map();
     this.segmentPreviewEl = null;
@@ -8791,6 +8822,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     }
     this.progressWriteSuppressTimers.clear();
     this.progressWritePaths.clear();
+    this.progressDirtyPaths.clear();
     this.removeSegmentAiPreviewControls();
     this.hideSegmentPreview();
     if (this.segmentPreviewHideTimer) {
@@ -9589,7 +9621,10 @@ module.exports = class LacanTranslationHelper extends Plugin {
     if (!this.isTranslationLessonPath(file.path)) {
       return;
     }
-    if (!this.progressWritePaths.has(normalizePath(file.path))) {
+    const normalized = normalizePath(file.path);
+    if (this.progressWritePaths.has(normalized)) {
+      this.progressDirtyPaths.add(normalized);
+    } else {
       this.scheduleProgressUpdate(file.path);
     }
   }
@@ -11233,15 +11268,21 @@ ${section}`
     }
     const originalText = await this.app.vault.read(originalFile);
     const skeleton = this.buildSkeleton(originalFile.path, originalText);
-    await this.app.vault.modify(translationFile, skeleton);
-    if (options.updateProgress !== false) {
+    let filled = false;
+    await this.app.vault.process(translationFile, (latestText) => {
+      filled = latestText.trim().length === 0;
+      return filled ? skeleton : latestText;
+    });
+    if (filled ? options.updateProgress !== false : options.updateProgress) {
       await this.updateTranslationProgress(translationFile);
     }
     if (options.openAfterCreate) {
       await this.openFile(translationFile);
     }
-    if (options.notify) {
+    if (options.notify && filled) {
       new Notice(`已填充译文骨架：${translationFile.path}`);
+    } else if (options.notify && options.notifyExisting) {
+      new Notice("译文文件已有内容，未覆盖。");
     }
     return translationFile;
   }
@@ -11315,6 +11356,9 @@ ${section}`
     const timer = window.setTimeout(() => {
       this.progressWritePaths.delete(normalized);
       this.progressWriteSuppressTimers.delete(normalized);
+      if (this.progressDirtyPaths.delete(normalized)) {
+        this.scheduleProgressUpdate(normalized);
+      }
     }, 1e3);
     this.progressWriteSuppressTimers.set(normalized, timer);
   }

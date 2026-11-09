@@ -1473,7 +1473,118 @@ const runShutdownActive = async () => {
   assert.strictEqual(fakeProcess.killed, true);
 };
 
+const runTurnTimeout = async (interruptBehavior, { concurrent = false } = {}) => {
+  let fakeProcess;
+  let threadCount = 0;
+  const runningTurnIds = new Set();
+  const events = [];
+  const runtime = new CodexAppServerRuntime({
+    vaultRoot: VAULT_ROOT,
+    cliPath: CLI_PATH,
+    spawnProcess: () => {
+      fakeProcess = new ScriptedAppServerProcess((message, process) => {
+        if (!Object.prototype.hasOwnProperty.call(message, "id")) return;
+        switch (message.method) {
+          case "initialize":
+            process.respond(message, initializeResponse);
+            break;
+          case "account/read":
+            process.respond(message, accountResponse);
+            break;
+          case "thread/start":
+            threadCount += 1;
+            process.respond(message, threadResponse(`thread-timeout-${threadCount}`));
+            break;
+          case "app/list":
+            process.respond(message, { data: [], nextCursor: null });
+            break;
+          case "turn/start": {
+            const suffix = message.params.threadId.split("-").at(-1);
+            const turnId = `turn-timeout-${suffix}`;
+            runningTurnIds.add(turnId);
+            process.respond(message, { turn: turn(turnId, "inProgress") });
+            process.notify("item/agentMessage/delta", {
+              delta: `partial ${suffix}`,
+              threadId: message.params.threadId,
+              turnId,
+            });
+            break;
+          }
+          case "turn/interrupt":
+            if (interruptBehavior === "refused") {
+              process.fail(message, -32000, "Cannot interrupt");
+              break;
+            }
+            if (interruptBehavior === "silent") break;
+            process.respond(message, {});
+            if (interruptBehavior === "ack-only") break;
+            if (concurrent) {
+              // The other turn completes normally while the timed-out turn stops.
+              runningTurnIds.delete("turn-timeout-2");
+              process.notify("turn/completed", {
+                threadId: "thread-timeout-2",
+                turn: turn("turn-timeout-2", "completed"),
+              });
+            }
+            setImmediate(() => {
+              runningTurnIds.delete(message.params.turnId);
+              process.notify("turn/completed", {
+                threadId: message.params.threadId,
+                turn: turn(message.params.turnId, "interrupted"),
+              });
+            });
+            break;
+          default:
+            process.fail(message, -32601, "Not expected");
+        }
+      });
+      const kill = fakeProcess.kill.bind(fakeProcess);
+      fakeProcess.kill = () => {
+        runningTurnIds.clear();
+        kill();
+      };
+      return fakeProcess;
+    },
+    requestTimeoutMs: 30,
+    turnTimeoutMs: 20,
+  });
+
+  const first = runtime.runTurn({
+    prompt: "Time out this turn.",
+    onEvent: (event) => events.push(event),
+  });
+  const promises = [first];
+  if (concurrent) promises.push(runtime.runTurn({ prompt: "Keep the other turn running." }));
+  const settled = await Promise.allSettled(promises);
+  assert.strictEqual(settled[0].status, "rejected");
+  assert.strictEqual(settled[0].reason.code, "TurnTimeout");
+  const interrupt = fakeProcess.messages.find((message) => message.method === "turn/interrupt");
+  assert.ok(interrupt, "a timeout must interrupt the actual Agent turn before ending local tracking");
+  assert.deepStrictEqual(interrupt.params, {
+    threadId: "thread-timeout-1",
+    turnId: "turn-timeout-1",
+  });
+  assert.strictEqual(runningTurnIds.size, 0, "no Agent turn may remain orphaned after a timeout");
+  assert.strictEqual(runtime.getDiagnostics().activeTurnCount, 0);
+  assert.strictEqual(events.at(-1).type, "failed");
+  assert.strictEqual(events.at(-1).code, "TurnTimeout");
+  assert.strictEqual(events.at(-1).text, "partial 1");
+  assert.strictEqual(fakeProcess.killed, interruptBehavior !== "completed",
+    "close the shared runtime only when cancellation cannot be confirmed");
+  if (concurrent && interruptBehavior === "completed") {
+    assert.strictEqual(settled[1].status, "fulfilled");
+    assert.strictEqual(settled[1].value.text, "partial 2");
+    assert.strictEqual(settled[1].value.status, "completed");
+  }
+  await runtime.shutdown();
+};
+
 const run = async () => {
+  await runTurnTimeout("completed");
+  await runTurnTimeout("completed", { concurrent: true });
+  await runTurnTimeout("refused");
+  await runTurnTimeout("silent");
+  await runTurnTimeout("ack-only");
   await runHappyPath();
   await runQuickTranslation();
   await runOriginalSkillRead();

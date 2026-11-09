@@ -49,6 +49,19 @@ class FakeProcess extends EventEmitter {
 
 const nextTask = () => new Promise((resolve) => setImmediate(resolve));
 
+const assertDecodedNotifications = (chunks, expected, description) => {
+  const process = new FakeProcess();
+  const client = new JsonLineRpcClient(process);
+  const notifications = [];
+  const errors = [];
+  client.on("notification", (message) => notifications.push(message));
+  client.on("protocolError", (error) => errors.push(error));
+  for (const chunk of chunks) process.stdout.emit("data", chunk);
+  client.close();
+  assert.deepStrictEqual(errors, [], description);
+  assert.deepStrictEqual(notifications, expected, description);
+};
+
 const run = async () => {
   const process = new FakeProcess();
   const client = new JsonLineRpcClient(process, { requestTimeoutMs: 100 });
@@ -95,6 +108,31 @@ const run = async () => {
   const [notification] = await notificationPromise;
   assert.strictEqual(notification.method, "item/agentMessage/delta");
   assert.strictEqual(notification.params.delta, "一段");
+
+  const multilingualNotifications = [
+    { method: "item/agentMessage/delta", params: { delta: "中文：éèœ" } },
+    { method: "item/agentMessage/delta", params: { delta: "naïve 🐈" } },
+  ];
+  const multilingualBytes = Buffer.from(
+    `${multilingualNotifications.map((message) => JSON.stringify(message)).join("\r\n")}\r\n`
+  );
+  for (let split = 1; split < multilingualBytes.length; split += 1) {
+    assertDecodedNotifications(
+      [multilingualBytes.subarray(0, split), multilingualBytes.subarray(split)],
+      multilingualNotifications,
+      `preserve UTF-8 notifications when stdout splits at byte ${split}`
+    );
+  }
+  assertDecodedNotifications(
+    Array.from(multilingualBytes, (byte) => Buffer.from([byte])),
+    multilingualNotifications,
+    "preserve UTF-8 notifications delivered one byte at a time"
+  );
+  assertDecodedNotifications(
+    multilingualNotifications.map((message) => `${JSON.stringify(message)}\n`),
+    multilingualNotifications,
+    "continue accepting already decoded string chunks"
+  );
 
   const serverRequestPromise = once(client, "serverRequest");
   process.send({

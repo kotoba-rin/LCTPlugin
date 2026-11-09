@@ -1,4 +1,5 @@
 const { EventEmitter } = require("events");
+const { StringDecoder } = require("string_decoder");
 
 class AppServerProtocolError extends Error {
   constructor(code, message, details = {}) {
@@ -20,6 +21,7 @@ class JsonLineRpcClient extends EventEmitter {
     this.nextRequestId = 1;
     this.pending = new Map();
     this.stdoutBuffer = "";
+    this.stdoutDecoder = new StringDecoder("utf8");
     this.closed = false;
     this.exitHandled = false;
 
@@ -75,7 +77,7 @@ class JsonLineRpcClient extends EventEmitter {
   }
 
   handleStdoutData(chunk) {
-    this.stdoutBuffer += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    this.stdoutBuffer += Buffer.isBuffer(chunk) ? this.stdoutDecoder.write(chunk) : String(chunk);
     const lines = this.stdoutBuffer.split(/\r?\n/);
     this.stdoutBuffer = lines.pop() || "";
     for (const line of lines) {

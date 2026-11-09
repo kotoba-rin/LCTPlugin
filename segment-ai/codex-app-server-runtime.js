@@ -439,14 +439,7 @@ class CodexAppServerRuntime {
     return new Promise((resolve, reject) => {
       const key = turnEventKey(activeThreadId, turnId);
       const timeout = setTimeout(() => {
-        if (!this.activeTurns.has(key)) {
-          return;
-        }
-        this.activeTurns.delete(key);
-        reject(this.rememberError(new CodexRuntimeError(
-          "TurnTimeout",
-          "本地 Agent 生成超时，可重试该分段。"
-        )));
+        this.handleTurnTimeout(key);
       }, this.turnTimeoutMs);
       this.activeTurns.set(key, {
         key,
@@ -847,6 +840,13 @@ class CodexAppServerRuntime {
     if (!active) {
       return;
     }
+    if (active.timeoutError && (
+      message.method === "turn/completed"
+      || (message.method === "error" && message.params?.willRetry === false)
+    )) {
+      this.finishTurnWithError(active.key, active.timeoutError);
+      return;
+    }
     if (message.method === "item/agentMessage/delta") {
       const delta = String(message.params?.delta || "");
       active.text += delta;
@@ -944,7 +944,7 @@ class CodexAppServerRuntime {
 
   handleRuntimeExit(error) {
     for (const key of [...this.activeTurns.keys()]) {
-      this.finishTurnWithError(key, new CodexRuntimeError(
+      this.finishTurnWithError(key, this.activeTurns.get(key)?.timeoutError || new CodexRuntimeError(
         "AppServerExited",
         "本地 Agent 意外退出，可手动重试。",
         { cause: error }
@@ -955,6 +955,41 @@ class CodexAppServerRuntime {
     this.diagnostics.initialized = false;
     this.diagnostics.authenticated = false;
     this.diagnostics.disallowedCapabilitiesIsolated = false;
+  }
+
+  handleTurnTimeout(key) {
+    const active = this.activeTurns.get(key);
+    if (!active || active.timeoutError) {
+      return;
+    }
+    active.timeoutError = new CodexRuntimeError(
+      "TurnTimeout",
+      "本地 Agent 生成超时，已停止本次解读，可重试该分段。"
+    );
+    // An interrupt ACK only accepts the request. Keep tracking the turn until
+    // its terminal event, and close the runtime if stopping cannot be confirmed.
+    active.timeout = setTimeout(() => this.closeAfterTurnTimeout(key), this.requestTimeoutMs);
+    if (!this.client || this.client.closed) {
+      this.closeAfterTurnTimeout(key);
+      return;
+    }
+    void this.client.request("turn/interrupt", {
+      threadId: active.threadId,
+      turnId: active.turnId,
+    }).catch(() => this.closeAfterTurnTimeout(key));
+  }
+
+  closeAfterTurnTimeout(key) {
+    const active = this.activeTurns.get(key);
+    if (!active?.timeoutError) {
+      return;
+    }
+    this.finishTurnWithError(key, active.timeoutError);
+    this.closeProcess();
+    this.handleRuntimeExit(new CodexRuntimeError(
+      "AppServerExited",
+      "无法确认超时任务已停止，本地 Agent 已关闭，请重试。"
+    ));
   }
 
   finishTurnWithError(key, error) {

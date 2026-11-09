@@ -297,6 +297,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.createdFileTimers = new Set();
     this.projectGraphViews = new WeakSet();
     this.progressWritePaths = new Set();
+    this.progressDirtyPaths = new Set();
     this.progressWriteSuppressTimers = new Map();
     this.segmentPreviewCache = new Map();
     this.segmentPreviewEl = null;
@@ -565,6 +566,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     }
     this.progressWriteSuppressTimers.clear();
     this.progressWritePaths.clear();
+    this.progressDirtyPaths.clear();
     this.removeSegmentAiPreviewControls();
     this.hideSegmentPreview();
     if (this.segmentPreviewHideTimer) {
@@ -1466,7 +1468,10 @@ module.exports = class LacanTranslationHelper extends Plugin {
       return;
     }
 
-    if (!this.progressWritePaths.has(normalizePath(file.path))) {
+    const normalized = normalizePath(file.path);
+    if (this.progressWritePaths.has(normalized)) {
+      this.progressDirtyPaths.add(normalized);
+    } else {
       this.scheduleProgressUpdate(file.path);
     }
   }
@@ -3443,16 +3448,22 @@ module.exports = class LacanTranslationHelper extends Plugin {
 
     const originalText = await this.app.vault.read(originalFile);
     const skeleton = this.buildSkeleton(originalFile.path, originalText);
-    await this.app.vault.modify(translationFile, skeleton);
-    if (options.updateProgress !== false) {
+    let filled = false;
+    await this.app.vault.process(translationFile, (latestText) => {
+      filled = latestText.trim().length === 0;
+      return filled ? skeleton : latestText;
+    });
+    if (filled ? options.updateProgress !== false : options.updateProgress) {
       await this.updateTranslationProgress(translationFile);
     }
 
     if (options.openAfterCreate) {
       await this.openFile(translationFile);
     }
-    if (options.notify) {
+    if (options.notify && filled) {
       new Notice(`已填充译文骨架：${translationFile.path}`);
+    } else if (options.notify && options.notifyExisting) {
+      new Notice("译文文件已有内容，未覆盖。");
     }
     return translationFile;
   }
@@ -3541,6 +3552,9 @@ module.exports = class LacanTranslationHelper extends Plugin {
     const timer = window.setTimeout(() => {
       this.progressWritePaths.delete(normalized);
       this.progressWriteSuppressTimers.delete(normalized);
+      if (this.progressDirtyPaths.delete(normalized)) {
+        this.scheduleProgressUpdate(normalized);
+      }
     }, 1000);
     this.progressWriteSuppressTimers.set(normalized, timer);
   }
