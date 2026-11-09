@@ -690,6 +690,49 @@
   margin: 4px 0;
 }
 
+.lacan-ai-cli-card {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  margin: 10px 0;
+  padding: 12px 16px;
+}
+
+.lacan-ai-cli-card summary {
+  cursor: pointer;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: baseline;
+  justify-content: space-between;
+  font-weight: var(--font-semibold);
+}
+
+.lacan-ai-cli-status {
+  color: var(--text-muted);
+  font-size: var(--font-smallest);
+  font-weight: normal;
+}
+
+.lacan-ai-cli-status[data-status="ready"] {
+  color: var(--text-success);
+}
+
+.lacan-ai-cli-status[data-status="failed"] {
+  color: var(--text-warning);
+}
+
+.lacan-ai-cli-resolved-path {
+  background: transparent;
+  display: block;
+  margin-top: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.lacan-ai-cli-card .setting-item {
+  padding-bottom: 0;
+}
+
 .lacan-ai-settings .lacan-ai-setting-wide {
   align-items: stretch;
   flex-direction: column;

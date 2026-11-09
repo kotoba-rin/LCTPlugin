@@ -4,7 +4,9 @@
 
 ## 来源与刷新
 
-当前插件使用设置中的 Codex CLI（留空则使用 PATH 中的 Codex）。以当前项目根目录作为 App Server 的 `cwd`，调用 `skills/list({ cwds: [vaultRoot], forceReload: true })`。清单来自该 Agent 自己的发现机制，不硬编码 Skill 名称，不扫描其他 Agent 的安装目录，不添加任意外部搜索路径。
+本节描述 Codex 提供方。Claude Code 与 DeepSeek Harness 的当前适配不提供 Skill 清单，返回空目录，不复用 Codex 的已保存目录。三种 CLI 的会话、模型和能力缓存分别保存，见 [CLI 适配说明](cli-providers.md)。
+
+Codex 使用此电脑配置的 CLI（留空则自动检测 PATH、登录 Shell 和常见安装目录）。以当前项目根目录作为 App Server 的 `cwd`，调用 `skills/list({ cwds: [vaultRoot], forceReload: true })`。清单来自该 Agent 自己的发现机制，不硬编码 Skill 名称，不扫描其他 Agent 的安装目录，不添加任意外部搜索路径。
 
 纳入范围：
 
@@ -21,11 +23,11 @@
 
 Agent 根据任务与描述决定是否读取 `SKILL.md` 及必要支持文件，遵守其原生隐式调用策略及 `allow_implicit_invocation` 限制。可用目录与实际使用记录不同：界面和会话字段只说明自动发现，不声称目录中的 Skills 全部已使用。
 
-Skills 不扩大当前模式的写入、网络、MCP 或业务文件访问权限。原文解析可只读 Skills 定义，但仍不主动扩展研究；独立的快速选文翻译继续使用原有无工具模式。依赖当前未开放能力的步骤不能执行。
+Skills 不扩大当前模式的写入、网络或业务文件访问权限。原文解析可只读 Skills 定义，但仍不主动扩展研究；独立的快速选文翻译继续使用原有无工具模式。依赖当前未开放能力的步骤不能执行。
 
 ## 界面与数据
 
-设置页保留一份全局解读提示词，并展示 Skills 来源、清单、状态、说明和路径；不再有方案名称、默认方案、主要/辅助下拉框或保存方案按钮。段落统一显示一个 `Ф`，没有方案菜单。
+设置页保留一份全局解读提示词；Codex 提供方展示 Skills 来源、清单、状态、说明和路径；不再有方案名称、默认方案、主要/辅助下拉框或保存方案按钮。段落统一显示一个 `Ф`，没有方案菜单。
 
 新会话使用 `skillMode: "automatic"` 和 `availableSkillSnapshot`（当轮可用目录快照）。同段复用只按 `segmentKey`，不再按 Skill 方案分组。Skills 安装或更新后，后续追问使用新目录，不因旧指纹阻止追问。
 

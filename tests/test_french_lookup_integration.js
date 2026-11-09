@@ -116,7 +116,7 @@ async function run() {
   plugin.registerEvent = () => {};
   plugin.registerDomEvent = () => {};
   plugin.getVaultBasePath = () => "/mock/vault";
-  for (const name of ["initializeSegmentAi", "scheduleSegmentAiMcpBackgroundCheck", "registerReadingNoteEditorExtension", "registerMarkdownPostProcessor", "registerProjectBasesView", "scheduleReadingToolbarRender", "refreshSegmentAiEntrances", "removeSegmentAiPreviewControls", "hideSegmentPreview", "removeReadingToolbars"]) {
+  for (const name of ["initializeSegmentAi", "registerReadingNoteEditorExtension", "registerMarkdownPostProcessor", "registerProjectBasesView", "scheduleReadingToolbarRender", "refreshSegmentAiEntrances", "removeSegmentAiPreviewControls", "hideSegmentPreview", "removeReadingToolbars"]) {
     plugin[name] = () => {};
   }
   const previousDocument = global.document;
@@ -157,8 +157,9 @@ async function run() {
 
   translators[0].options.createRuntime();
   assert.deepStrictEqual(runtimeOptions[0], {
+    provider: "codex",
     vaultRoot: "/mock/vault", pluginVersion: "test-version", cliPath: "/mock/codex", defaultModel: "test-model",
-    defaultReasoningEffort: "low", ephemeralThreads: true, requestTimeoutMs: 15000, turnTimeoutMs: 60000, mcpEnabled: false,
+    defaultReasoningEffort: "low", ephemeralThreads: true, requestTimeoutMs: 15000, turnTimeoutMs: 60000,
   });
   const lookup = { selection: "étaient", context: "Ils étaient ici." };
   const signal = new AbortController().signal;

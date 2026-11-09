@@ -34,9 +34,19 @@ const {
   normalizeCodexModelCatalog,
   resolveCodexReasoningProfile,
 } = require("../segment-ai/codex-app-server-runtime");
+const { CliAgentRuntime } = require("../segment-ai/cli-agent-runtime");
+const { discoverCli } = require("../segment-ai/cli-discovery");
 const {
-  normalizeServerNames,
-} = require("../segment-ai/mcp-capability-registry");
+  PROVIDER_DEFINITIONS,
+  normalizeProvider,
+  normalizeProviderSettings,
+  switchProviderSettings,
+} = require("../segment-ai/provider-settings");
+const {
+  getMachineCliPath,
+  setMachineCliPath,
+  migrateMachineCliPaths,
+} = require("../segment-ai/machine-cli-settings");
 const {
   InterpretationWorkspaceController,
 } = require("../segment-ai/workspace-controller");
@@ -110,13 +120,12 @@ const DEFAULT_SETTINGS = {
   githubProxyUrl: DEFAULT_GITHUB_PROXY_URL,
   autoSyncOnStartup: false,
   segmentAiEnabled: false,
+  segmentAiProvider: "codex",
   segmentAiCodexPath: "",
+  segmentAiClaudePath: "",
+  segmentAiDeepseekPath: "",
   segmentAiModel: "",
   segmentAiReasoningEffort: "",
-  segmentAiMcpEnabled: false,
-  segmentAiMcpEnabledServers: [],
-  segmentAiMcpServerCatalog: [],
-  segmentAiMcpServerCatalogUpdatedAt: 0,
   segmentAiPrompt: DEFAULT_INTERPRETATION_PROMPT,
   segmentAiModelCatalog: [],
   segmentAiModelCatalogUpdatedAt: 0,
@@ -266,29 +275,18 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.settings.segmentAiModel = String(
       this.settings.segmentAiModel || ""
     ).trim();
-    this.settings.segmentAiReasoningEffort = coerceCodexReasoningEffort(
+    this.settings.segmentAiReasoningEffort = normalizeProvider(this.settings.segmentAiProvider) === "codex" ? coerceCodexReasoningEffort(
       this.settings.segmentAiModelCatalog,
       this.settings.segmentAiModel,
       this.settings.segmentAiReasoningEffort
-    );
+    ) : String(this.settings.segmentAiReasoningEffort || "").trim();
     this.settings.segmentAiModelCatalogUpdatedAt = Number.isFinite(
       this.settings.segmentAiModelCatalogUpdatedAt
     )
       ? this.settings.segmentAiModelCatalogUpdatedAt
       : 0;
-    this.settings.segmentAiMcpEnabled =
-      this.settings.segmentAiMcpEnabled === true;
-    this.settings.segmentAiMcpEnabledServers = normalizeServerNames(
-      this.settings.segmentAiMcpEnabledServers
-    );
-    this.settings.segmentAiMcpServerCatalog = normalizeServerNames(
-      this.settings.segmentAiMcpServerCatalog
-    );
-    this.settings.segmentAiMcpServerCatalogUpdatedAt = Number.isFinite(
-      this.settings.segmentAiMcpServerCatalogUpdatedAt
-    )
-      ? this.settings.segmentAiMcpServerCatalogUpdatedAt
-      : 0;
+    normalizeProviderSettings(this.settings);
+    migrateMachineCliPaths(this.settings);
     this.progressTimers = new Map();
     this.readingToolbarRenderTimer = null;
     this.syncInProgress = false;
@@ -317,7 +315,6 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.segmentAiSkillChangeUnsubscribe = null;
     this.segmentAiModelDiscoveryPromise = null;
     this.segmentAiSkillDiscoveryPromise = null;
-    this.segmentAiMcpBackgroundPromise = null;
     this.segmentAiEphemeralPersistTimer = null;
 
     this.registerView?.(
@@ -329,7 +326,6 @@ module.exports = class LacanTranslationHelper extends Plugin {
       (leaf) => new LacanBilingualReadingView(leaf, this)
     );
     this.initializeSegmentAi();
-    this.scheduleSegmentAiMcpBackgroundCheck();
     this.initializeFrenchLookup();
     this.initializeTranslationInlineEditing();
     registerPdfReading(this);
@@ -675,15 +671,9 @@ module.exports = class LacanTranslationHelper extends Plugin {
         workspace: this.settings.segmentAiWorkspace,
         maxOpenSessions: this.settings.segmentAiMaxOpenSessions,
       });
-      this.segmentAiRuntime = new CodexAppServerRuntime({
-        vaultRoot: this.getVaultBasePath(),
-        pluginVersion: this.manifest?.version || "0.0.0",
-        cliPath: this.settings.segmentAiCodexPath || "",
-        defaultModel: this.settings.segmentAiModel || "",
-        defaultReasoningEffort: this.settings.segmentAiReasoningEffort || "",
-        mcpEnabled: this.settings.segmentAiMcpEnabled,
-        enabledMcpServerNames: this.settings.segmentAiMcpEnabledServers,
-      });
+      this.segmentAiRuntime = this.createSegmentAiRuntime();
+      const provider = normalizeProvider(this.settings.segmentAiProvider);
+      const runtime = this.segmentAiRuntime;
       this.segmentAiSkillCatalog = new CodexSkillCatalog({
         vaultRoot: this.getVaultBasePath(),
         runtime: this.segmentAiRuntime,
@@ -702,8 +692,12 @@ module.exports = class LacanTranslationHelper extends Plugin {
         store: this.segmentAiWorkspaceStore,
         runtime: this.segmentAiRuntime,
         skillCatalog: this.segmentAiSkillCatalog,
-        onState: (state) => this.updateSegmentAiState(state),
+        onState: (state) => {
+          if (this.segmentAiRuntime === runtime) this.updateSegmentAiState(state);
+        },
         persistWorkspace: async ({ conversations, workspace }) => {
+          if (this.segmentAiRuntime !== runtime
+            || normalizeProvider(this.settings.segmentAiProvider) !== provider) return;
           this.settings.segmentAiConversations = conversations;
           this.settings.segmentAiWorkspace = workspace;
           this.settings.segmentAiSchemaVersion = 2;
@@ -736,16 +730,12 @@ module.exports = class LacanTranslationHelper extends Plugin {
       getToken: () => this.getEudicToken(),
     });
     this.frenchLookupTranslator = new FrenchSelectionTranslator({
-      createRuntime: () => new CodexAppServerRuntime({
-        vaultRoot: this.getVaultBasePath(),
-        pluginVersion: this.manifest?.version || "0.0.0",
-        cliPath: this.settings.segmentAiCodexPath || "",
-        defaultModel: this.settings.segmentAiModel || "",
+      getReasoningEffort: () => normalizeProvider(this.settings.segmentAiProvider) === "deepseek" ? "" : "low",
+      createRuntime: () => this.createSegmentAiRuntime({
         defaultReasoningEffort: "low",
         ephemeralThreads: true,
         requestTimeoutMs: 15000,
         turnTimeoutMs: 60000,
-        mcpEnabled: false,
       }),
     });
     this.frenchLookupPopup = new FrenchLookupPopup(this, {
@@ -761,7 +751,114 @@ module.exports = class LacanTranslationHelper extends Plugin {
     return this.app.secretStorage?.getSecret(name) || this.eudicSessionToken || "";
   }
 
-  async resetSegmentAiRuntime({ scheduleMcpCheck = true } = {}) {
+  async setSegmentAiCodexPath(value) {
+    return this.setSegmentAiCliPath("codex", value);
+  }
+
+  getSegmentAiCliPath(provider = this.settings.segmentAiProvider) {
+    return getMachineCliPath(this.settings, normalizeProvider(provider));
+  }
+
+  createSegmentAiRuntime(overrides = {}) {
+    const provider = normalizeProvider(this.settings.segmentAiProvider);
+    const Runtime = provider === "codex" ? CodexAppServerRuntime : CliAgentRuntime;
+    return new Runtime({
+      provider,
+      vaultRoot: this.getVaultBasePath(),
+      pluginVersion: this.manifest?.version || "0.0.0",
+      cliPath: this.getSegmentAiCliPath(provider),
+      defaultModel: provider === "deepseek" ? "" : this.settings.segmentAiModel || "",
+      defaultReasoningEffort: this.settings.segmentAiReasoningEffort || "",
+      ...overrides,
+      ...(provider === "deepseek" ? { defaultModel: "", defaultReasoningEffort: "" } : {}),
+    });
+  }
+
+  setSegmentAiProvider(value) {
+    const task = (this.segmentAiProviderSwitchPromise || Promise.resolve())
+      .catch(() => {})
+      .then(() => this.performSegmentAiProviderSwitch(value));
+    this.segmentAiProviderSwitchPromise = task;
+    const clear = () => {
+      if (this.segmentAiProviderSwitchPromise === task) this.segmentAiProviderSwitchPromise = null;
+    };
+    task.then(clear, clear);
+    return task;
+  }
+
+  async performSegmentAiProviderSwitch(value) {
+    const provider = normalizeProvider(value);
+    if (provider === normalizeProvider(this.settings.segmentAiProvider)) return;
+    // Finish the old controller's last persistence before changing active profiles.
+    if (this.segmentAiEphemeralPersistTimer) {
+      clearTimeout(this.segmentAiEphemeralPersistTimer);
+      this.segmentAiEphemeralPersistTimer = null;
+    }
+    await this.segmentAiRuntime?.shutdown();
+    await this.persistSegmentAiWorkspaceSnapshot();
+    this.segmentAiRuntime = null;
+    switchProviderSettings(this.settings, provider);
+    await this.saveSettings();
+    this.frenchLookupTranslator?.destroy();
+    await this.resetSegmentAiRuntime();
+  }
+
+  setSegmentAiCliPath(provider, value) {
+    const task = (this.segmentAiProviderSwitchPromise || Promise.resolve())
+      .catch(() => {})
+      .then(() => this.performSetSegmentAiCliPath(provider, value));
+    this.segmentAiProviderSwitchPromise = task;
+    const clear = () => {
+      if (this.segmentAiProviderSwitchPromise === task) this.segmentAiProviderSwitchPromise = null;
+    };
+    task.then(clear, clear);
+    return task;
+  }
+
+  async performSetSegmentAiCliPath(provider, value) {
+    provider = normalizeProvider(provider);
+    const cliPath = String(value || "").trim();
+    if (cliPath === this.getSegmentAiCliPath(provider)) return;
+    setMachineCliPath(this.settings, provider, cliPath);
+    if (this.segmentAiCliDetections) delete this.segmentAiCliDetections[provider];
+    if (provider !== normalizeProvider(this.settings.segmentAiProvider)) {
+      const profile = this.settings.segmentAiProviderProfiles?.[provider];
+      if (profile) {
+        profile.segmentAiModelCatalog = [];
+        profile.segmentAiModelCatalogUpdatedAt = 0;
+        profile.segmentAiSkillCatalog = [];
+        profile.segmentAiSkillCatalogUpdatedAt = 0;
+      }
+      await this.saveSettings();
+      return;
+    }
+    this.segmentAiModelDiscoveryPromise = null;
+    this.settings.segmentAiModelCatalog = [];
+    this.settings.segmentAiModelCatalogUpdatedAt = 0;
+    this.settings.segmentAiSkillCatalog = [];
+    this.settings.segmentAiSkillCatalogUpdatedAt = 0;
+    await this.saveSettings();
+    this.frenchLookupTranslator?.destroy();
+    await this.resetSegmentAiRuntime();
+  }
+
+  async discoverSegmentAiCli(provider) {
+    provider = normalizeProvider(provider);
+    this.segmentAiCliDetections ||= {};
+    const configuredPath = this.getSegmentAiCliPath(provider);
+    const state = { status: "checking", configuredPath };
+    this.segmentAiCliDetections[provider] = state;
+    try {
+      const result = await discoverCli(provider, { configuredPath });
+      Object.assign(state, { status: "ready", path: result.path, version: result.version, source: result.source, versionError: result.versionError });
+    } catch (error) {
+      Object.assign(state, { status: "failed", message: error.message });
+    }
+    return state;
+  }
+
+  async resetSegmentAiRuntime() {
+    this.segmentAiModelDiscoveryPromise = null;
     if (this.segmentAiRuntime) {
       await this.segmentAiRuntime.shutdown();
     }
@@ -772,70 +869,8 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.segmentAiWorkspaceStore = null;
     this.segmentAiSkillCatalog = null;
     this.segmentAiSkillDiscoveryPromise = null;
-    this.segmentAiMcpBackgroundPromise = null;
     this.initializeSegmentAi();
-    if (scheduleMcpCheck) {
-      this.scheduleSegmentAiMcpBackgroundCheck();
-    }
     this.refreshSegmentAiEntrances();
-  }
-
-  getSegmentAiMcpServerCatalog() {
-    return normalizeServerNames([
-      ...this.settings.segmentAiMcpServerCatalog,
-      ...this.settings.segmentAiMcpEnabledServers,
-    ]);
-  }
-
-  scheduleSegmentAiMcpBackgroundCheck() {
-    if (!this.settings.segmentAiEnabled || !this.segmentAiRuntime) {
-      return null;
-    }
-    const task = this.runSegmentAiMcpBackgroundCheck();
-    void task.catch(() => {
-      // Startup preflight is intentionally silent; diagnostics retain the code.
-    });
-    return task;
-  }
-
-  runSegmentAiMcpBackgroundCheck() {
-    if (this.segmentAiMcpBackgroundPromise) {
-      return this.segmentAiMcpBackgroundPromise;
-    }
-    const runtime = this.segmentAiRuntime;
-    if (!runtime) {
-      return Promise.reject(new Error("本地 Agent 运行时尚未初始化。"));
-    }
-    const task = (async () => {
-      const report = await runtime.preflightMcpServers();
-      if (this.segmentAiRuntime !== runtime) {
-        return report;
-      }
-      this.settings.segmentAiMcpServerCatalog = normalizeServerNames(
-        report.configuredServerNames
-      );
-      this.settings.segmentAiMcpServerCatalogUpdatedAt = Number(
-        report.checkedAt || Date.now()
-      );
-      await this.saveSettings();
-      return report;
-    })();
-    this.segmentAiMcpBackgroundPromise = task;
-    const clear = () => {
-      if (this.segmentAiMcpBackgroundPromise === task) {
-        this.segmentAiMcpBackgroundPromise = null;
-      }
-    };
-    task.then(clear, clear);
-    return task;
-  }
-
-  async refreshSegmentAiMcpServers() {
-    if (!this.settings.segmentAiEnabled) {
-      throw new Error("请先启用分段 AI 功能。");
-    }
-    await this.resetSegmentAiRuntime({ scheduleMcpCheck: false });
-    return this.runSegmentAiMcpBackgroundCheck();
   }
 
   getSegmentAiModelCatalog() {
@@ -846,30 +881,40 @@ module.exports = class LacanTranslationHelper extends Plugin {
     if (this.segmentAiModelDiscoveryPromise) {
       return this.segmentAiModelDiscoveryPromise;
     }
-    this.segmentAiModelDiscoveryPromise = (async () => {
+    const discovery = (async () => {
       if (!this.segmentAiRuntime) {
         this.initializeSegmentAi();
       }
       if (!this.segmentAiRuntime) {
         throw new Error("本地 Agent 运行时尚未初始化。");
       }
-      const models = await this.segmentAiRuntime.listModels();
+      const runtime = this.segmentAiRuntime;
+      const models = await runtime.listModels();
+      if (
+        this.segmentAiRuntime !== runtime
+        || this.segmentAiModelDiscoveryPromise !== discovery
+      ) {
+        throw new Error("Agent 配置已变化，请刷新当前 Agent 的模型与推理强度。");
+      }
       this.settings.segmentAiModelCatalog = models;
       this.settings.segmentAiReasoningEffort = coerceCodexReasoningEffort(
         models,
         this.settings.segmentAiModel,
         this.settings.segmentAiReasoningEffort
       );
-      this.segmentAiRuntime.defaultReasoningEffort =
+      runtime.defaultReasoningEffort =
         this.settings.segmentAiReasoningEffort;
       this.settings.segmentAiModelCatalogUpdatedAt = Date.now();
       await this.saveSettings();
       return models;
     })();
+    this.segmentAiModelDiscoveryPromise = discovery;
     try {
-      return await this.segmentAiModelDiscoveryPromise;
+      return await discovery;
     } finally {
-      this.segmentAiModelDiscoveryPromise = null;
+      if (this.segmentAiModelDiscoveryPromise === discovery) {
+        this.segmentAiModelDiscoveryPromise = null;
+      }
     }
   }
 
@@ -1108,6 +1153,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
       pluginId: this.manifest?.id || "lacan-translation-helper",
       pluginVersion: this.manifest?.version || "unknown",
       enabled: Boolean(this.settings.segmentAiEnabled),
+      provider: normalizeProvider(this.settings.segmentAiProvider),
       status: activeConversation?.status || "empty",
       errorCode: activeConversation?.error?.code || null,
       openConversationCount:
@@ -4105,6 +4151,80 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
       }));
   }
 
+  renderSegmentAiProviderSettings(containerEl) {
+    const plugin = this.plugin;
+    const selected = normalizeProvider(plugin.settings.segmentAiProvider);
+    new Setting(containerEl)
+      .setName("CLI 工具")
+      .setDesc("分段解读和法语语境翻译使用此工具。每种工具独立保存会话、草稿和模型设置；切换时停止当前生成。")
+      .addDropdown((dropdown) => {
+        for (const provider of PROVIDER_DEFINITIONS) {
+          dropdown.addOption(provider.id, provider.label);
+        }
+        dropdown.setValue(selected).onChange(async (value) => {
+          dropdown.setDisabled(true);
+          try {
+            await plugin.setSegmentAiProvider(value);
+          } catch (error) {
+            new Notice(`切换 CLI 失败：${error.message}`);
+          } finally {
+            this.display();
+          }
+        });
+      })
+      .addButton((button) => button.setButtonText("重新检测").onClick(async () => {
+        button.setDisabled(true).setButtonText("检测中...");
+        await Promise.allSettled(PROVIDER_DEFINITIONS.map(({ id }) => plugin.discoverSegmentAiCli(id)));
+        this.display();
+      }));
+
+    const sourceLabels = { custom: "自定义路径", path: "PATH", "login-shell": "登录 Shell", common: "常见安装目录", application: "应用内置" };
+    for (const provider of PROVIDER_DEFINITIONS) {
+      const card = containerEl.createEl("details", { cls: "lacan-ai-cli-card" });
+      if (provider.id === selected) card.setAttribute("open", "");
+      const summary = card.createEl("summary");
+      summary.createSpan({ text: provider.label + (provider.id === selected ? " · 当前使用" : "") });
+      const status = summary.createSpan({ cls: "lacan-ai-cli-status" });
+      const resolvedPath = card.createEl("code", { cls: "lacan-ai-cli-resolved-path" });
+      const update = (state) => {
+        status.textContent = state?.status === "ready"
+          ? `${state.version || state.versionError || "已找到"} · ${sourceLabels[state.source] || "自动发现"}`
+          : state?.status === "failed" ? "未找到或无法启动" : "正在检测...";
+        status.setAttribute("data-status", state?.status || "checking");
+        resolvedPath.textContent = state?.status === "ready" ? state.path : state?.message || "";
+      };
+      let pathChangeTimer;
+      new Setting(card)
+        .setClass("lacan-ai-setting-wide")
+        .setName(`${provider.label} 路径`)
+        .setDesc("此电脑的可选 CLI 路径。留空自动检测 PATH、登录 Shell 和常见安装目录；支持 Windows 与 macOS。")
+        .addText((text) => text
+          .setPlaceholder(process.platform === "win32"
+            ? `C:\\Users\\用户名\\AppData\\Roaming\\npm\\${provider.id === "deepseek" ? "dsh" : provider.id}.cmd`
+            : provider.placeholder)
+          .setValue(plugin.getSegmentAiCliPath(provider.id))
+          .onChange((value) => {
+            clearTimeout(pathChangeTimer);
+            pathChangeTimer = setTimeout(async () => {
+              try {
+                await plugin.setSegmentAiCliPath(provider.id, value);
+                const state = await plugin.discoverSegmentAiCli(provider.id);
+                if (plugin.segmentAiCliDetections?.[provider.id] === state) update(state);
+              } catch (error) {
+                new Notice(`保存 CLI 路径失败：${error.message}`);
+              }
+            }, 500);
+          }));
+      const detection = plugin.segmentAiCliDetections?.[provider.id];
+      update(detection);
+      if (!detection || detection.configuredPath !== plugin.getSegmentAiCliPath(provider.id)) {
+        void plugin.discoverSegmentAiCli(provider.id).then((state) => {
+          if (plugin.segmentAiCliDetections?.[provider.id] === state) update(state);
+        });
+      }
+    }
+  }
+
   renderSegmentAiSettings(parentEl) {
     const containerEl = parentEl.createDiv("lacan-ai-settings");
     containerEl.createEl("h3", { text: "AI 功能（本地 Agent）" });
@@ -4113,18 +4233,18 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
       text: "点击译文分段旁的“Ф”运行 AI 解读；点击原文分段旁的同一按钮，直接显示该 ID 的项目译文、完整注释与建言，并快速生成原文试译。",
     });
     descriptionEl.createEl("p", {
-      text: "译文解读使用下方提示词，由 Agent 按任务选用当前项目和自身已安装的 Skills；原文解析使用专用翻译流程，先查看试译与项目版本，需要词义、双关或语境分析时可继续追问。两种功能分别保存会话。",
+      text: "译文解读使用下方提示词，Codex 可按任务选用已发现的 Skills；原文解析使用专用翻译流程，先查看试译与项目版本，需要词义、双关或语境分析时可继续追问。两种功能分别保存会话。",
     });
     descriptionEl.createEl("p", {
       text: "本地 Agent 指编排、文件检索和权限控制在本机运行，不等于使用本地模型。发送给模型的上下文和 Agent 读取的材料仍可能离开本机。",
     });
     descriptionEl.createEl("p", {
-      text: "所有 AI 功能保持只读，不创建或修改笔记。译文解读每次回答必须使用内置 Web Search，外部来源只接受法语、德语或英语网页；MCP 默认关闭，只能从下方白名单显式开启。原文解析只做翻译与直接对话，不预先检索。Apps、Plugins 保持禁用，不会自动回退到 OpenAI API。",
+      text: "所有 AI 功能保持只读，不创建或修改笔记。译文解读每次回答必须使用内置 Web Search，外部来源只接受法语、德语或英语网页；所选 CLI 未提供网页工具时，回答须明确说明。原文解析只做翻译与直接对话。各 CLI 的工具支持范围见下方说明。",
     });
 
     new Setting(containerEl)
       .setName("启用分段 AI 功能")
-      .setDesc("默认关闭。关闭后不会启动 Codex App Server，也不会影响原有插件功能。")
+      .setDesc("默认关闭。关闭后不会为分段解读启动 CLI；法语取词的语境翻译使用所选 CLI 单独运行。")
       .addToggle((toggle) => {
         toggle
           .setValue(Boolean(this.plugin.settings.segmentAiEnabled))
@@ -4157,261 +4277,188 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
           });
       });
 
-    new Setting(containerEl)
-      .setClass("lacan-ai-setting-wide")
-      .setName("Codex CLI 路径")
-      .setDesc("可选。填写 codex 可执行文件的绝对路径；留空时从 Obsidian 进程的 PATH 中查找。插件不会自动安装 Codex。")
-      .addText((text) => {
-        text
-          .setPlaceholder("/opt/homebrew/bin/codex")
-          .setValue(this.plugin.settings.segmentAiCodexPath || "")
-          .onChange(async (value) => {
-            const cliPath = value.trim();
-            if (cliPath === this.plugin.settings.segmentAiCodexPath) return;
-            this.plugin.settings.segmentAiCodexPath = cliPath;
-            this.plugin.settings.segmentAiSkillCatalog = [];
-            this.plugin.settings.segmentAiSkillCatalogUpdatedAt = 0;
-            await this.plugin.saveSettings();
-            await this.plugin.resetSegmentAiRuntime();
-          });
-      });
-
-    const modelCatalog = this.plugin.getSegmentAiModelCatalog();
-    const selectedModel = String(this.plugin.settings.segmentAiModel || "").trim();
-    const modelCatalogUpdatedAt = Number(
-      this.plugin.settings.segmentAiModelCatalogUpdatedAt || 0
-    );
-    const modelCatalogStatus = modelCatalog.length > 0
-      ? `已从本机 Codex 获取 ${modelCatalog.length} 个模型${
-          modelCatalogUpdatedAt
-            ? `，最近刷新：${new Date(modelCatalogUpdatedAt).toLocaleString()}`
-            : ""
-        }。`
-      : "尚未获取模型列表。";
-    new Setting(containerEl)
-      .setClass("lacan-ai-setting-wide")
-      .setName("Agent 模型")
-      .setDesc(
-        `列表由本机 Codex App Server 的 model/list 提供，不经过 Claudian。${modelCatalogStatus}`
-      )
-      .addDropdown((dropdown) => {
-        dropdown.addOption("", "使用 Codex 默认模型");
-        for (const model of modelCatalog) {
-          const label = model.displayName === model.model
-            ? model.displayName
-            : `${model.displayName} · ${model.model}`;
-          dropdown.addOption(
-            model.model,
-            model.isDefault ? `${label}（Codex 默认）` : label
-          );
-        }
-        if (
-          selectedModel
-          && !modelCatalog.some((model) => model.model === selectedModel)
-        ) {
-          dropdown.addOption(selectedModel, `${selectedModel}（已保存，当前未发现）`);
-        }
-        dropdown
-          .setValue(selectedModel)
-          .onChange(async (value) => {
-            this.plugin.settings.segmentAiModel = String(value || "").trim();
-            this.plugin.settings.segmentAiReasoningEffort =
-              coerceCodexReasoningEffort(
-                modelCatalog,
-                this.plugin.settings.segmentAiModel,
-                this.plugin.settings.segmentAiReasoningEffort
-              );
-            await this.plugin.saveSettings();
-            await this.plugin.resetSegmentAiRuntime();
-            this.display();
-          });
-      })
-      .addButton((button) => {
-        button
-          .setButtonText("刷新模型")
-          .onClick(async () => {
-            button.setDisabled(true);
-            button.setButtonText("获取中...");
-            try {
-              await this.plugin.resetSegmentAiRuntime();
-              const models = await this.plugin.discoverSegmentAiModels();
-              new Notice(`已从 Codex 获取 ${models.length} 个可用模型。`);
-            } catch (error) {
-              new Notice(
-                `模型列表获取失败：${error?.message || "请检查 Codex CLI 路径和登录状态。"}`
-              );
-            } finally {
-              button.setDisabled(false);
-              button.setButtonText("刷新模型");
-              this.display();
-            }
-          });
-      });
-
-    const reasoningProfile = resolveCodexReasoningProfile(
-      modelCatalog,
-      selectedModel
-    );
-    const selectedReasoningEffort = coerceCodexReasoningEffort(
-      modelCatalog,
-      selectedModel,
-      this.plugin.settings.segmentAiReasoningEffort
-    );
-    const defaultReasoningLabel = reasoningProfile?.defaultReasoningEffort
-      ? REASONING_EFFORT_LABELS[reasoningProfile.defaultReasoningEffort]
-        || reasoningProfile.defaultReasoningEffort
-      : "";
-    const reasoningDescription = reasoningProfile
-      ? `${reasoningProfile.model} 支持的强度来自 model/list；留空时使用模型默认值${
-          defaultReasoningLabel ? ` ${defaultReasoningLabel}` : ""
-        }。所选强度会作为 turn/start 的 effort 发送。`
-      : "尚未取得当前模型的推理强度目录；可先刷新模型。留空时由 Codex 选择默认值。";
-    new Setting(containerEl)
-      .setClass("lacan-ai-setting-wide")
-      .setName("推理强度")
-      .setDesc(reasoningDescription)
-      .addDropdown((dropdown) => {
-        dropdown.addOption(
-          "",
-          defaultReasoningLabel
-            ? `跟随模型默认值（${defaultReasoningLabel}）`
-            : "跟随模型默认值"
-        );
-        for (const effort of reasoningProfile?.supportedReasoningEfforts || []) {
-          dropdown.addOption(
-            effort.value,
-            REASONING_EFFORT_LABELS[effort.value] || effort.value
-          );
-        }
-        if (
-          selectedReasoningEffort
-          && !reasoningProfile?.supportedReasoningEfforts.some(
-            (effort) => effort.value === selectedReasoningEffort
-          )
-        ) {
-          dropdown.addOption(
-            selectedReasoningEffort,
-            `${REASONING_EFFORT_LABELS[selectedReasoningEffort]
-              || selectedReasoningEffort}（已保存，待刷新验证）`
-          );
-        }
-        dropdown
-          .setValue(selectedReasoningEffort)
-          .onChange(async (value) => {
-            this.plugin.settings.segmentAiReasoningEffort = String(
-              value || ""
-            ).trim();
-            await this.plugin.saveSettings();
-            await this.plugin.resetSegmentAiRuntime();
-            this.display();
-          });
-      });
-
-    const mcpCatalog = this.plugin.getSegmentAiMcpServerCatalog();
-    const mcpEnabledServerSet = new Set(
-      this.plugin.settings.segmentAiMcpEnabledServers
-    );
-    const mcpDiagnostics =
-      this.plugin.segmentAiRuntime?.getDiagnostics?.().mcpBackgroundCheck;
-    const mcpStatusLabels = {
-      idle: "等待后台检查",
-      checking: "正在后台检查",
-      disabled: "全部关闭，未连接任何 MCP",
-      ready: "已完成后台检查",
-      degraded: "检查完成，部分服务不可用",
-      unavailable: "白名单服务未在 Codex 配置中发现",
-      failed: "后台检查失败，可查看脱敏诊断",
-    };
-    const mcpStatus = mcpStatusLabels[mcpDiagnostics?.status]
-      || "尚未执行后台检查";
-    const mcpCatalogUpdatedAt = Number(
-      this.plugin.settings.segmentAiMcpServerCatalogUpdatedAt || 0
-    );
-    containerEl.createEl("h4", { text: "MCP 服务（默认关闭）" });
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text: "核心规则：任何没有在插件白名单中同时配置并开启的外部 MCP，在插件启动和 Agent thread 中都不会建立连接。插件只保存服务名称和开关，不保存命令、URL 或凭据；后台只读取 Codex 配置名称，并且只连接、检查白名单中已开启的服务。开启一个服务会让 Agent 看见该服务当前暴露的全部工具，插件不能替服务保证这些工具只读，因此只应开启你信任的服务。",
-    });
-    new Setting(containerEl)
-      .setName("启用 MCP 服务")
-      .setDesc(
-        `${mcpStatus}${
-          mcpCatalogUpdatedAt
-            ? `；清单刷新于 ${new Date(mcpCatalogUpdatedAt).toLocaleString()}`
-            : ""
-        }。总开关关闭时，即使下方保存了选择，也不会连接或检查任何 MCP。`
-      )
-      .addToggle((toggle) => {
-        toggle
-          .setValue(Boolean(this.plugin.settings.segmentAiMcpEnabled))
-          .onChange(async (value) => {
-            this.plugin.settings.segmentAiMcpEnabled = value;
-            await this.plugin.saveSettings();
-            await this.plugin.resetSegmentAiRuntime();
-            this.display();
-          });
-      })
-      .addButton((button) => {
-        button
-          .setButtonText("刷新清单")
-          .setDisabled(!this.plugin.settings.segmentAiEnabled)
-          .onClick(async () => {
-            button.setDisabled(true);
-            button.setButtonText("后台检查中...");
-            try {
-              const report = await this.plugin.refreshSegmentAiMcpServers();
-              new Notice(
-                `已发现 ${report.configuredServerNames.length} 个 MCP；检查 ${
-                  report.checkedServerNames.length
-                } 个已开启服务。`
-              );
-            } catch (error) {
-              new Notice(
-                `MCP 清单刷新失败：${error?.message || "请查看脱敏诊断。"}`
-              );
-            } finally {
-              button.setDisabled(false);
-              button.setButtonText("刷新清单");
-              this.display();
-            }
-          });
-      });
-
-    if (mcpCatalog.length === 0) {
-      containerEl.createEl("p", {
-        cls: "setting-item-description",
-        text: this.plugin.settings.segmentAiEnabled
-          ? "尚未发现本机 Codex 的 MCP 配置；后台完成后重新打开此设置页，或点击“刷新清单”。"
-          : "启用分段 AI 功能后，插件才会在后台读取本机 Codex 的 MCP 名称。",
-      });
-    }
-    for (const serverName of mcpCatalog) {
+    this.renderSegmentAiProviderSettings(containerEl);
+    const provider = normalizeProvider(this.plugin.settings.segmentAiProvider);
+    if (provider === "codex") {
+      const modelCatalog = this.plugin.getSegmentAiModelCatalog();
+      const selectedModel = String(this.plugin.settings.segmentAiModel || "").trim();
+      const modelCatalogUpdatedAt = Number(
+        this.plugin.settings.segmentAiModelCatalogUpdatedAt || 0
+      );
+      const modelCatalogCliPath = this.plugin.segmentAiRuntime?.getDiagnostics?.().cliPath
+        || this.plugin.segmentAiCliDetections?.codex?.path
+        || this.plugin.getSegmentAiCliPath("codex")
+        || "自动检测";
+      const modelCatalogStatus = modelCatalog.length > 0
+        ? `已从本机 Codex 获取 ${modelCatalog.length} 个模型${
+            modelCatalogUpdatedAt
+              ? `，最近刷新：${new Date(modelCatalogUpdatedAt).toLocaleString()}`
+              : ""
+          }。`
+        : "尚未获取模型列表。";
       new Setting(containerEl)
-        .setName(serverName)
-        .setDesc("关闭时会在每个 Agent thread 的配置中明确写入 enabled=false；开启时授权该服务的全部工具。")
-        .addToggle((toggle) => {
-          toggle
-            .setValue(mcpEnabledServerSet.has(serverName))
-            .setDisabled(!this.plugin.settings.segmentAiMcpEnabled)
+        .setClass("lacan-ai-setting-wide")
+        .setName("Agent 模型")
+        .setDesc(
+          `列表由本机 Codex App Server 的 model/list 提供，同时读取各模型支持的推理强度。CLI：${modelCatalogCliPath}。${modelCatalogStatus}`
+        )
+        .addDropdown((dropdown) => {
+          dropdown.addOption("", "使用 Codex 默认模型");
+          for (const model of modelCatalog) {
+            const label = model.displayName === model.model
+              ? model.displayName
+              : `${model.displayName} · ${model.model}`;
+            dropdown.addOption(
+              model.model,
+              model.isDefault ? `${label}（Codex 默认）` : label
+            );
+          }
+          if (
+            selectedModel
+            && !modelCatalog.some((model) => model.model === selectedModel)
+          ) {
+            dropdown.addOption(selectedModel, `${selectedModel}（已保存，当前未发现）`);
+          }
+          dropdown
+            .setValue(selectedModel)
             .onChange(async (value) => {
-              const next = new Set(
-                this.plugin.settings.segmentAiMcpEnabledServers
-              );
-              if (value) {
-                next.add(serverName);
-              } else {
-                next.delete(serverName);
+              this.plugin.settings.segmentAiModel = String(value || "").trim();
+              this.plugin.settings.segmentAiReasoningEffort =
+                coerceCodexReasoningEffort(
+                  modelCatalog,
+                  this.plugin.settings.segmentAiModel,
+                  this.plugin.settings.segmentAiReasoningEffort
+                );
+              await this.plugin.saveSettings();
+              await this.plugin.resetSegmentAiRuntime();
+              this.display();
+            });
+        })
+        .addButton((button) => {
+          button
+            .setButtonText("刷新模型")
+            .onClick(async () => {
+              button.setDisabled(true);
+              button.setButtonText("获取中...");
+              try {
+                await this.plugin.resetSegmentAiRuntime();
+                const models = await this.plugin.discoverSegmentAiModels();
+                new Notice(`已从 Codex 获取 ${models.length} 个可用模型及其推理强度。`);
+              } catch (error) {
+                new Notice(
+                  `模型列表获取失败：${error?.message || "请检查 Codex CLI 路径和登录状态。"}`
+                );
+              } finally {
+                button.setDisabled(false);
+                button.setButtonText("刷新模型");
+                this.display();
               }
-              this.plugin.settings.segmentAiMcpEnabledServers =
-                normalizeServerNames([...next]);
+            });
+        });
+
+      const reasoningProfile = resolveCodexReasoningProfile(
+        modelCatalog,
+        selectedModel
+      );
+      const selectedReasoningEffort = coerceCodexReasoningEffort(
+        modelCatalog,
+        selectedModel,
+        this.plugin.settings.segmentAiReasoningEffort
+      );
+      const defaultReasoningLabel = reasoningProfile?.defaultReasoningEffort
+        ? REASONING_EFFORT_LABELS[reasoningProfile.defaultReasoningEffort]
+          || reasoningProfile.defaultReasoningEffort
+        : "";
+      const reasoningDescription = reasoningProfile
+        ? `${reasoningProfile.model} 支持的强度来自 model/list；留空时使用模型默认值${
+            defaultReasoningLabel ? ` ${defaultReasoningLabel}` : ""
+          }。所选强度会作为 turn/start 的 effort 发送。`
+        : modelCatalog.length > 0
+          ? selectedModel
+            ? `当前 CLI 未返回已选模型 ${selectedModel}，无法确认其推理强度。请检查 CLI 路径与版本后刷新模型，或选择列表中的模型。`
+            : "当前模型列表未标明默认模型。请选择列表中的模型，以查看它支持的推理强度。"
+          : "尚未取得当前模型的推理强度目录；刷新模型时会一起读取。留空时由 Codex 选择默认值。";
+      new Setting(containerEl)
+        .setClass("lacan-ai-setting-wide")
+        .setName("推理强度")
+        .setDesc(reasoningDescription)
+        .addDropdown((dropdown) => {
+          dropdown.addOption(
+            "",
+            defaultReasoningLabel
+              ? `跟随模型默认值（${defaultReasoningLabel}）`
+              : "跟随模型默认值"
+          );
+          for (const effort of reasoningProfile?.supportedReasoningEfforts || []) {
+            dropdown.addOption(
+              effort.value,
+              REASONING_EFFORT_LABELS[effort.value] || effort.value
+            );
+          }
+          if (
+            selectedReasoningEffort
+            && !reasoningProfile?.supportedReasoningEfforts.some(
+              (effort) => effort.value === selectedReasoningEffort
+            )
+          ) {
+            dropdown.addOption(
+              selectedReasoningEffort,
+              `${REASONING_EFFORT_LABELS[selectedReasoningEffort]
+                || selectedReasoningEffort}（已保存，待刷新验证）`
+            );
+          }
+          dropdown
+            .setValue(selectedReasoningEffort)
+            .onChange(async (value) => {
+              this.plugin.settings.segmentAiReasoningEffort = String(
+                value || ""
+              ).trim();
               await this.plugin.saveSettings();
               await this.plugin.resetSegmentAiRuntime();
               this.display();
             });
         });
+
+    } else if (provider === "claude") {
+      new Setting(containerEl)
+        .setClass("lacan-ai-setting-wide")
+        .setName("Agent 模型")
+        .setDesc("留空使用 Claude Code 当前默认模型，也可填写 sonnet、opus 或完整模型名称。沿用 CLI 已有登录。")
+        .addText((text) => text
+          .setPlaceholder("使用 Claude Code 默认模型")
+          .setValue(this.plugin.settings.segmentAiModel || "")
+          .onChange(async (value) => {
+            this.plugin.settings.segmentAiModel = value.trim();
+            await this.plugin.saveSettings();
+            await this.plugin.resetSegmentAiRuntime();
+          }));
+      new Setting(containerEl)
+        .setName("推理强度")
+        .setDesc("使用 Claude Code 的 --effort 参数；可用强度取决于所选模型。")
+        .addDropdown((dropdown) => {
+          dropdown.addOption("", "跟随模型默认值");
+          for (const effort of ["low", "medium", "high", "max"]) {
+            dropdown.addOption(effort, REASONING_EFFORT_LABELS[effort]);
+          }
+          dropdown.setValue(this.plugin.settings.segmentAiReasoningEffort || "")
+            .onChange(async (value) => {
+              this.plugin.settings.segmentAiReasoningEffort = value;
+              await this.plugin.saveSettings();
+              await this.plugin.resetSegmentAiRuntime();
+            });
+        });
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text: "Claude Code 使用内置只读与网页工具，禁用文件写入、Shell、Hooks 和 Slash Commands；当前适配不提供 Skill 清单。",
+      });
+    } else {
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text: "DeepSeek Harness 使用 headless profile 中配置的模型、凭据和推理参数。请先在终端完成 dsh 配置；插件只向模型开放允许的只读／网页工具，profile 自带插件仍可能在启动时运行。当前适配不提供模型或 Skill 清单。",
+      });
     }
 
-    containerEl.createEl("h4", { text: "解读提示词与 Skills" });
+    containerEl.createEl("h4", { text: provider === "codex" ? "解读提示词与 Skills" : "解读提示词" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
       text: "默认功能：术语与符号对照 + 语境性解读。术语表只读，缺项或不一致只提示，由用户判断是否修改。",
@@ -4449,85 +4496,88 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
             this.display();
           });
       });
-    new Setting(containerEl)
-      .setName("Skills 来源")
-      .setDesc(`当前项目：${this.plugin.getVaultBasePath()}\nAgent：${this.plugin.settings.segmentAiCodexPath || "PATH 中的 Codex"}\n只使用当前项目与该 Agent 已安装、实际发现的 Skills，由 Agent 按请求自行选择，无需配置固定组合。`);
-    const skillCatalog = (
-      this.plugin.segmentAiSkillCatalog?.list?.()
-      || this.plugin.settings.segmentAiSkillCatalog
-      || []
-    ).map(normalizeSkillMetadata)
-      .filter(Boolean);
-    const skillCatalogUpdatedAt = Number(
-      this.plugin.settings.segmentAiSkillCatalogUpdatedAt || 0
-    );
-    new Setting(containerEl)
-      .setName("自动发现 Skills")
-      .setDesc(
-        skillCatalog.length > 0
-          ? `上次发现 ${skillCatalog.length} 个${
-              skillCatalogUpdatedAt
-                ? `，最近刷新：${new Date(skillCatalogUpdatedAt).toLocaleString()}`
-                : ""
-            }。`
-          : "尚未获取 Skills 清单。开启 AI 后自动发现，也可手动刷新。"
-      )
-      .addButton((button) => {
-        button
-          .setButtonText("刷新 Skills")
-          .onClick(async () => {
-            button.setDisabled(true);
-            button.setButtonText("获取中...");
-            try {
-              const skills = await this.plugin.discoverSegmentAiSkills({
-                forceReload: true,
-              });
-              new Notice(`已从 Codex 获取 ${skills.length} 个 Skill。`);
-            } catch (error) {
-              new Notice(
-                `Skill 清单获取失败：${error?.message || "请检查 Codex CLI 和登录状态。"}`
-              );
-            } finally {
-              button.setDisabled(false);
-              button.setButtonText("刷新 Skills");
-              this.display();
-            }
-          });
-      });
-
-    const skillSources = {
-      repo: "当前项目",
-      user: "Agent 已安装 · 用户",
-      system: "Agent 已安装 · 系统",
-      admin: "Agent 已安装 · 管理员",
-    };
-    if (skillCatalog.length > 0) {
-      const skillListEl = containerEl.createDiv("lacan-ai-skill-list");
-      for (const skill of skillCatalog) {
-        const available = skill.enabled && skill.errors.length === 0;
-        const source = skillSources[skill.scope] || `Agent 已安装 · ${skill.scope}`;
-        const details = [
-          `${source} · ${available ? "可用" : skill.enabled ? "加载失败" : "已禁用"}`,
-          skill.description,
-          skill.path,
-          ...skill.errors,
-        ].filter(Boolean).join("\n");
-        new Setting(skillListEl)
-          .setName(skill.name)
-          .setDesc(details);
-      }
-    }
-
-    const configuredAgent = this.plugin.settings.segmentAiCodexPath || "";
-    if (this.plugin.settings.segmentAiEnabled && this.skillsRequestedForAgent !== configuredAgent) {
-      this.skillsRequestedForAgent = configuredAgent;
-      void this.plugin.discoverSegmentAiSkills({ forceReload: true })
-        .then(() => {
-          if (this.activeSettingsTab === "ai") this.display();
-        })
-        .catch((error) => {
-          new Notice(`Skills 自动发现失败：${error?.message || "请检查 Codex CLI 和登录状态。"}`);
+    if (provider === "codex") {
+      new Setting(containerEl)
+        .setName("Skills 来源")
+        .setDesc(`当前项目：${this.plugin.getVaultBasePath()}\nAgent：${this.plugin.getSegmentAiCliPath("codex") || "自动检测"}\n只使用当前项目与该 Agent 已安装、实际发现的 Skills，由 Agent 按请求自行选择，无需配置固定组合。`);
+      const skillCatalog = (
+        this.plugin.segmentAiSkillCatalog?.list?.()
+        || this.plugin.settings.segmentAiSkillCatalog
+        || []
+      ).map(normalizeSkillMetadata)
+        .filter(Boolean);
+      const skillCatalogUpdatedAt = Number(
+        this.plugin.settings.segmentAiSkillCatalogUpdatedAt || 0
+      );
+      new Setting(containerEl)
+        .setName("自动发现 Skills")
+        .setDesc(
+          skillCatalog.length > 0
+            ? `上次发现 ${skillCatalog.length} 个${
+                skillCatalogUpdatedAt
+                  ? `，最近刷新：${new Date(skillCatalogUpdatedAt).toLocaleString()}`
+                  : ""
+              }。`
+            : "尚未获取 Skills 清单。开启 AI 后自动发现，也可手动刷新。"
+        )
+        .addButton((button) => {
+          button
+            .setButtonText("刷新 Skills")
+            .onClick(async () => {
+              button.setDisabled(true);
+              button.setButtonText("获取中...");
+              try {
+                const skills = await this.plugin.discoverSegmentAiSkills({
+                  forceReload: true,
+                });
+                new Notice(`已从 Codex 获取 ${skills.length} 个 Skill。`);
+              } catch (error) {
+                new Notice(
+                  `Skill 清单获取失败：${error?.message || "请检查 Codex CLI 和登录状态。"}`
+                );
+              } finally {
+                button.setDisabled(false);
+                button.setButtonText("刷新 Skills");
+                this.display();
+              }
+            });
         });
+
+      const skillSources = {
+        repo: "当前项目",
+        user: "Agent 已安装 · 用户",
+        system: "Agent 已安装 · 系统",
+        admin: "Agent 已安装 · 管理员",
+      };
+      if (skillCatalog.length > 0) {
+        const skillListEl = containerEl.createDiv("lacan-ai-skill-list");
+        for (const skill of skillCatalog) {
+          const available = skill.enabled && skill.errors.length === 0;
+          const source = skillSources[skill.scope] || `Agent 已安装 · ${skill.scope}`;
+          const details = [
+            `${source} · ${available ? "可用" : skill.enabled ? "加载失败" : "已禁用"}`,
+            skill.description,
+            skill.path,
+            ...skill.errors,
+          ].filter(Boolean).join("\n");
+          new Setting(skillListEl)
+            .setName(skill.name)
+            .setDesc(details);
+        }
+      }
+
+      const configuredAgent = this.plugin.getSegmentAiCliPath("codex");
+      if (this.plugin.settings.segmentAiEnabled && this.skillsRequestedForAgent !== configuredAgent) {
+        this.skillsRequestedForAgent = configuredAgent;
+        void this.plugin.discoverSegmentAiSkills({ forceReload: true })
+          .then(() => {
+            if (this.activeSettingsTab === "ai") this.display();
+          })
+          .catch((error) => {
+            new Notice(`Skills 自动发现失败：${error?.message || "请检查 Codex CLI 和登录状态。"}`);
+          });
+      }
+
     }
 
     const diagnostics = this.plugin.getSegmentAiDiagnostics();

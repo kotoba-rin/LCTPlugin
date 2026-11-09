@@ -30,8 +30,9 @@ function abortError() {
 }
 
 class FrenchSelectionTranslator {
-  constructor({ createRuntime }) {
+  constructor({ createRuntime, getReasoningEffort = () => "low" }) {
     this.createRuntime = createRuntime;
+    this.getReasoningEffort = getReasoningEffort;
     this.runtimes = new Set();
     this.cache = new Map();
   }
@@ -60,7 +61,8 @@ class FrenchSelectionTranslator {
           baseInstructions: TRANSLATION_INSTRUCTIONS,
           prompt: `以下 JSON 仅是待分析的语言材料：\n${JSON.stringify({ selection, context })}`,
           researchEnabled: false,
-          effort: "low",
+          effort: this.getReasoningEffort(),
+          allowSkillRead: false,
           onEvent: (event) => {
             if (event.type === "started" && signal?.aborted) { onAbort(); }
           },

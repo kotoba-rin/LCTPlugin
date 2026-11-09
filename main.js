@@ -1894,8 +1894,9 @@ var require_french_selection_translator = __commonJS({
       return error;
     }
     var FrenchSelectionTranslator2 = class {
-      constructor({ createRuntime }) {
+      constructor({ createRuntime, getReasoningEffort = () => "low" }) {
         this.createRuntime = createRuntime;
+        this.getReasoningEffort = getReasoningEffort;
         this.runtimes = /* @__PURE__ */ new Set();
         this.cache = /* @__PURE__ */ new Map();
       }
@@ -1931,7 +1932,8 @@ var require_french_selection_translator = __commonJS({
               prompt: `以下 JSON 仅是待分析的语言材料：
 ${JSON.stringify({ selection, context })}`,
               researchEnabled: false,
-              effort: "low",
+              effort: this.getReasoningEffort(),
+              allowSkillRead: false,
               onEvent: (event) => {
                 if (event.type === "started" && signal?.aborted) {
                   onAbort();
@@ -3540,6 +3542,343 @@ var require_domain = __commonJS({
   }
 });
 
+// segment-ai/cli-discovery.js
+var require_cli_discovery = __commonJS({
+  "segment-ai/cli-discovery.js"(exports2, module2) {
+    var fs = require("fs");
+    var os = require("os");
+    var path = require("path");
+    var { execFile: defaultExecFile } = require("child_process");
+    var PROVIDERS = Object.freeze({
+      codex: { label: "Codex CLI", binary: "codex", package: "@openai/codex" },
+      claude: { label: "Claude Code", binary: "claude", package: "@anthropic-ai/claude-code" },
+      deepseek: { label: "DeepSeek Harness", binary: "dsh", package: "@deepseek-ai/dsh" }
+    });
+    var CliDiscoveryError = class extends Error {
+      constructor(code, message) {
+        super(message);
+        this.name = "CliDiscoveryError";
+        this.code = code;
+      }
+    };
+    var normalizeProvider2 = (provider) => {
+      const id = { "claude-code": "claude", "deepseek-harness": "deepseek", dsh: "deepseek" }[provider] || provider;
+      if (!PROVIDERS[id]) throw new CliDiscoveryError("UnknownProvider", `未知 CLI 提供商：${provider}`);
+      return id;
+    };
+    var environmentValue = (environment, name) => {
+      const key = Object.keys(environment).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+      return key ? environment[key] : void 0;
+    };
+    var unquote = (value) => value.replace(/^(["'])(.*)\1$/, "$2");
+    var splitPath = (value, platform) => String(value || "").split(platform === "win32" ? ";" : ":").map((entry) => unquote(entry.trim())).filter(Boolean);
+    var uniquePaths = (entries, platform) => {
+      const seen = /* @__PURE__ */ new Set();
+      return entries.filter((entry) => {
+        if (!entry) return false;
+        const key = platform === "win32" ? entry.toLowerCase() : entry;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    };
+    var fileExists = (candidate, fileSystem, executable = false, platform = process.platform) => {
+      try {
+        if (!fileSystem.statSync(candidate).isFile()) return false;
+        fileSystem.accessSync(candidate, executable && platform !== "win32" ? fs.constants.X_OK : fs.constants.R_OK);
+        return true;
+      } catch (_error) {
+        return false;
+      }
+    };
+    var readDirectories = (directory, fileSystem) => {
+      try {
+        return fileSystem.readdirSync(directory).filter((entry) => !entry.startsWith("."));
+      } catch (_error) {
+        return [];
+      }
+    };
+    var normalizeConfiguredPath = (value, home, platform, environment) => {
+      let raw = unquote(String(value || "").trim());
+      if (platform === "win32") {
+        raw = raw.replace(/%([^%]+)%/g, (match, name) => environmentValue(environment, name) || match);
+      }
+      if (/^~(?:[\\/]|$)/.test(raw)) return (platform === "win32" ? path.win32 : path.posix).join(home, raw.slice(2));
+      return raw;
+    };
+    var commonDirectoriesFor = (home, environment, platform, fileSystem) => {
+      const paths = platform === "win32" ? path.win32 : path.posix;
+      const join = (...segments) => paths.join(...segments);
+      const npmPrefix = environmentValue(environment, "npm_config_prefix");
+      const entries = [
+        join(home, ".local", "bin"),
+        join(home, ".claude", "local"),
+        join(home, ".npm-global", "bin"),
+        join(home, ".volta", "bin"),
+        join(home, ".asdf", "shims"),
+        join(home, ".local", "share", "mise", "shims"),
+        environment.NVM_BIN,
+        environment.VOLTA_HOME && join(environment.VOLTA_HOME, "bin"),
+        environment.PNPM_HOME,
+        environment.NVM_SYMLINK,
+        npmPrefix && (platform === "win32" ? npmPrefix : join(npmPrefix, "bin"))
+      ];
+      if (platform === "win32") {
+        const local = environment.LOCALAPPDATA || join(home, "AppData", "Local");
+        entries.push(
+          join(environment.APPDATA || join(home, "AppData", "Roaming"), "npm"),
+          join(local, "pnpm"),
+          join(local, "Microsoft", "WinGet", "Links"),
+          join(local, "Programs", "OpenAI", "Codex", "bin"),
+          join(environment.ProgramFiles || "C:\\Program Files", "nodejs"),
+          join(local, "Programs", "nodejs")
+        );
+        const runtimeRoot = join(local, "OpenAI", "Codex", "bin");
+        entries.push(...readDirectories(runtimeRoot, fileSystem).sort().reverse().map((version) => join(runtimeRoot, version)));
+      } else {
+        entries.push("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/opt/local/bin", join(home, "Library", "pnpm"));
+        const nvmVersions = join(environment.NVM_DIR || join(home, ".nvm"), "versions", "node");
+        entries.push(...readDirectories(nvmVersions, fileSystem).filter((version) => /^v\d/.test(version)).sort((a, b) => b.localeCompare(a, void 0, { numeric: true })).map((version) => join(nvmVersions, version, "bin")));
+        const asdfVersions = join(environment.ASDF_DATA_DIR || join(home, ".asdf"), "installs", "nodejs");
+        entries.push(...readDirectories(asdfVersions, fileSystem).sort((a, b) => b.localeCompare(a, void 0, { numeric: true })).map((version) => join(asdfVersions, version, "bin")));
+      }
+      return uniquePaths(entries, platform);
+    };
+    var readLoginShellPath = async ({ environment, platform, home, execFile, timeoutMs }) => {
+      if (platform === "win32") return [];
+      const shell = environment.SHELL || (() => {
+        try {
+          return os.userInfo().shell;
+        } catch (_error) {
+          return "";
+        }
+      })();
+      if (!shell || !path.posix.isAbsolute(shell)) return [];
+      try {
+        const marker = "__LCTPLUGIN_LOGIN_PATH__";
+        const output = await runProbe(
+          execFile,
+          shell,
+          ["-i", "-l", "-c", `printf '%s' '${marker}'; /usr/bin/printenv PATH; printf '%s' '${marker}'`],
+          { env: { ...environment }, cwd: home, windowsHide: true },
+          timeoutMs
+        );
+        return splitPath(output.split(marker)[1] || "", platform).filter((entry) => path.posix.isAbsolute(entry));
+      } catch (_error) {
+        return [];
+      }
+    };
+    var runProbe = (execFile, command, args, options, timeoutMs) => new Promise((resolve, reject) => {
+      let settled = false;
+      let child;
+      const finish = (error, stdout = "", stderr = "") => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) reject(error);
+        else resolve(`${stdout || ""}${stderr ? `
+${stderr}` : ""}`);
+      };
+      const timer = setTimeout(() => {
+        try {
+          child?.kill("SIGKILL");
+        } catch (_error) {
+        }
+        const error = new Error("CLI 检测超时");
+        error.code = "CliProbeTimeout";
+        finish(error);
+      }, timeoutMs);
+      try {
+        child = execFile(command, args, {
+          ...options,
+          encoding: "utf8",
+          timeout: timeoutMs,
+          killSignal: "SIGKILL",
+          maxBuffer: 256 * 1024
+        }, finish);
+      } catch (error) {
+        finish(error);
+      }
+    });
+    var packageEntry = (packageRoot, definition, fileSystem, paths) => {
+      try {
+        const metadata = JSON.parse(fileSystem.readFileSync(paths.join(packageRoot, "package.json"), "utf8"));
+        if (metadata.name !== definition.package) return null;
+        const relative = typeof metadata.bin === "string" ? metadata.bin : metadata.bin?.[definition.binary];
+        if (typeof relative !== "string") return null;
+        const candidate = paths.resolve(packageRoot, relative);
+        const relation = paths.relative(packageRoot, candidate);
+        if (relation.startsWith("..") || paths.isAbsolute(relation)) return null;
+        return fileExists(candidate, fileSystem) ? candidate : null;
+      } catch (_error) {
+        return null;
+      }
+    };
+    var nearbyPackageEntry = (directory, definition, fileSystem, paths) => {
+      const roots = [paths.join(directory, "node_modules", definition.package)];
+      if (paths.basename(directory).toLowerCase() === "bin") {
+        roots.push(paths.join(paths.dirname(directory), "lib", "node_modules", definition.package));
+        roots.push(paths.join(paths.dirname(directory), "node_modules", definition.package));
+      }
+      for (const root of roots) {
+        const entry = packageEntry(root, definition, fileSystem, paths);
+        if (entry) return entry;
+      }
+      return null;
+    };
+    var windowsShimEntry = (candidate, fileSystem, paths) => {
+      try {
+        const contents = fileSystem.readFileSync(candidate.replace(/\.ps1$/i, ".cmd"), "utf8");
+        for (const line of contents.split(/\r?\n/)) {
+          const match = line.match(/"%(?:~dp0|dp0%)[\\/]?([^"\r\n]+\.(?:[cm]?js))"\s+%\*\s*$/i);
+          if (match && /(?:node|%_prog%)/i.test(line.slice(0, match.index))) {
+            const target = paths.resolve(paths.dirname(candidate), match[1]);
+            if (fileExists(target, fileSystem)) return target;
+          }
+        }
+      } catch (_error) {
+      }
+      return null;
+    };
+    var desktopInstallations = (provider, home, environment, platform, applicationDirectories) => {
+      const paths = platform === "win32" ? path.win32 : path.posix;
+      const roots = applicationDirectories || (platform === "darwin" ? [paths.join(home, "Applications"), "/Applications"] : []);
+      if (provider === "codex" && platform === "darwin") {
+        return roots.flatMap((root) => [
+          paths.join(root, "Codex.app", "Contents", "Resources", "codex"),
+          paths.join(root, "Codex.app", "Contents", "MacOS", "codex"),
+          paths.join(root, "ChatGPT.app", "Contents", "Resources", "codex"),
+          paths.join(root, "ChatGPT.app", "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex")
+        ]);
+      }
+      if (provider === "deepseek") {
+        if (platform === "darwin") return roots.map((root) => paths.join(root, "DeepSeek Harness.app", "Contents", "Resources", "runtime", "cli", "bin", "dsh"));
+        if (platform === "win32") return [paths.join(environment.LOCALAPPDATA || paths.join(home, "AppData", "Local"), "Programs", "DeepSeek Harness", "resources", "runtime", "cli", "bin", "dsh.cmd")];
+      }
+      return [];
+    };
+    var deepseekDesktopLaunch = (candidate, definition, context) => {
+      const { platform, paths, fileSystem } = context;
+      const canonical = (() => {
+        try {
+          return fileSystem.realpathSync(candidate);
+        } catch (_error) {
+          return candidate;
+        }
+      })();
+      const match = platform === "win32" ? canonical.match(/^(.*?)(?:[\\/]resources[\\/]runtime[\\/]cli[\\/]bin[\\/]dsh\.cmd|[\\/]DeepSeek Harness\.exe)$/i) : canonical.match(/^(.*\.app)(?:\/Contents\/Resources\/runtime\/cli\/bin\/dsh)?$/);
+      if (!match) return null;
+      const resources = platform === "win32" ? paths.join(match[1], "resources") : paths.join(match[1], "Contents", "Resources");
+      const command = platform === "win32" ? paths.join(match[1], "DeepSeek Harness.exe") : paths.join(match[1], "Contents", "MacOS", "DeepSeek Harness");
+      const entry = packageEntry(paths.join(resources, "app.asar", "dsh", "node_modules", definition.package), definition, fileSystem, paths);
+      if (!entry || !fileExists(command, fileSystem, true, platform)) return null;
+      return { command, args: ["--expose-internals", entry], environment: { ...context.environment, ELECTRON_RUN_AS_NODE: "1" } };
+    };
+    var launchFor = (candidate, definition, context) => {
+      const { platform, paths, fileSystem, directories } = context;
+      if (definition.binary === "dsh") {
+        const desktop = deepseekDesktopLaunch(candidate, definition, context);
+        if (desktop) return desktop;
+      }
+      let entry = candidate;
+      if (platform === "win32" && /\.(?:cmd|bat|ps1)$/i.test(entry)) {
+        if (!fileExists(entry, fileSystem)) return null;
+        entry = windowsShimEntry(entry, fileSystem, paths) || nearbyPackageEntry(paths.dirname(entry), definition, fileSystem, paths);
+        if (!entry) throw new CliDiscoveryError("UnsupportedCliWrapper", "无法解析此 Windows CLI 包装脚本，请选择该工具的 .exe 或 Node.js 入口（.js/.cjs/.mjs）。");
+      }
+      let resolved = entry;
+      try {
+        resolved = fileSystem.realpathSync(entry);
+      } catch (_error) {
+      }
+      const isNodeEntry = /\.[cm]?js$/i.test(resolved);
+      if (!fileExists(resolved, fileSystem, !isNodeEntry, platform)) return null;
+      if (!isNodeEntry) return { command: entry, args: [], environment: context.environment };
+      const nodeName = platform === "win32" ? "node.exe" : "node";
+      const node = [paths.join(paths.dirname(entry), nodeName), ...directories.map((directory) => paths.join(directory, nodeName))].find((file) => fileExists(file, fileSystem, true, platform));
+      const command = node || process.execPath;
+      const environment = { ...context.environment };
+      if (!node && process.versions.electron) environment.ELECTRON_RUN_AS_NODE = "1";
+      return { command, args: [resolved], environment };
+    };
+    var buildEnvironment = (source, directories, cliPath, platform) => {
+      const paths = platform === "win32" ? path.win32 : path.posix;
+      const key = Object.keys(source).find((name) => name.toLowerCase() === "path") || "PATH";
+      return { ...source, [key]: uniquePaths([paths.dirname(cliPath), ...directories], platform).join(platform === "win32" ? ";" : ":") };
+    };
+    var buildCliInvocation = (cli, args = []) => ({ command: cli.command, args: [...cli.args || [], ...args] });
+    async function discoverCli2(provider, options = {}) {
+      const id = normalizeProvider2(provider);
+      const definition = PROVIDERS[id];
+      const platform = options.platform || process.platform;
+      const paths = platform === "win32" ? path.win32 : path.posix;
+      const environment = options.environment || process.env;
+      const home = options.homeDirectory || (platform === "win32" ? environment.USERPROFILE || environment.HOME : environment.HOME || environment.USERPROFILE) || os.homedir();
+      const fileSystem = options.fileSystem || fs;
+      const execFile = options.execFile || defaultExecFile;
+      const custom = normalizeConfiguredPath(options.configuredPath, home, platform, environment);
+      if (custom && !paths.isAbsolute(custom)) throw new CliDiscoveryError("InvalidCliPath", `${definition.label} 路径必须是绝对路径。`);
+      const inherited = splitPath(environmentValue(environment, "PATH"), platform).filter((entry) => paths.isAbsolute(entry));
+      const common = options.commonDirectories || commonDirectoriesFor(home, environment, platform, fileSystem);
+      let login = [];
+      const candidatesFor = (directories2, source) => directories2.flatMap((directory) => {
+        const names = platform === "win32" ? [`${definition.binary}.exe`, `${definition.binary}.cmd`] : [definition.binary];
+        const candidates = names.map((name) => ({ path: paths.join(directory, name), source }));
+        const entry = nearbyPackageEntry(directory, definition, fileSystem, paths);
+        if (entry) candidates.push({ path: entry, source });
+        return candidates;
+      });
+      let chosen;
+      const choose = (candidates) => {
+        for (const candidate of candidates) {
+          try {
+            const context = { platform, paths, fileSystem, directories: uniquePaths([...inherited, ...login, ...common], platform), environment };
+            const launch = launchFor(candidate.path, definition, context);
+            if (launch) return { ...candidate, ...launch };
+          } catch (error) {
+            if (custom) throw error;
+          }
+        }
+        return null;
+      };
+      if (custom) {
+        chosen = choose([{ path: custom, source: "custom" }]);
+        if (!chosen) throw new CliDiscoveryError("CliNotFound", `设置中的 ${definition.label} 路径无效，请选择可执行文件或 Node.js 入口的绝对路径。`);
+      } else {
+        chosen = choose(candidatesFor(inherited, "path"));
+        if (!chosen && options.loginShell !== false) {
+          login = options.loginShellPath !== void 0 ? splitPath(options.loginShellPath, platform) : await readLoginShellPath({ environment, platform, home, execFile, timeoutMs: options.shellTimeoutMs || 2500 });
+          chosen = choose(candidatesFor(login, "login-shell"));
+        }
+        if (!chosen) chosen = choose(candidatesFor(common, "common"));
+        if (!chosen) chosen = choose(desktopInstallations(id, home, environment, platform, options.applicationDirectories).map((candidate) => ({ path: candidate, source: "application" })));
+        if (!chosen) throw new CliDiscoveryError("CliNotFound", `未找到本地 ${definition.label}。请安装该 CLI，或在插件设置中填写其绝对路径。`);
+      }
+      const directories = uniquePaths([...inherited, ...login, ...common], platform);
+      chosen.environment = buildEnvironment(chosen.environment, directories, chosen.path, platform);
+      chosen.provider = id;
+      chosen.version = null;
+      if (options.readVersion !== false) {
+        try {
+          const invocation = buildCliInvocation(chosen, ["--version"]);
+          const output = await runProbe(
+            execFile,
+            invocation.command,
+            invocation.args,
+            { env: chosen.environment, windowsHide: true, cwd: home },
+            options.versionTimeoutMs || 3e3
+          );
+          chosen.version = output.match(/(?:^|[^\w.])v?(\d+\.\d+(?:\.\d+)?(?:[-+][\w.-]+)?)(?![\w.])/m)?.[1] || null;
+        } catch (error) {
+          chosen.versionError = error.code === "CliProbeTimeout" ? "版本检测超时" : "无法读取 CLI 版本";
+        }
+      }
+      return chosen;
+    }
+    module2.exports = { PROVIDERS, CliDiscoveryError, discoverCli: discoverCli2, buildCliInvocation };
+  }
+});
+
 // segment-ai/json-line-rpc.js
 var require_json_line_rpc = __commonJS({
   "segment-ai/json-line-rpc.js"(exports2, module2) {
@@ -3746,93 +4085,13 @@ var require_json_line_rpc = __commonJS({
 // segment-ai/mcp-capability-registry.js
 var require_mcp_capability_registry = __commonJS({
   "segment-ai/mcp-capability-registry.js"(exports2, module2) {
-    var MCP_POLICY_VERSION = "2";
-    var McpCapabilityError = class extends Error {
-      constructor(code, message, details = {}) {
-        super(message);
-        this.name = "McpCapabilityError";
-        this.code = code;
-        Object.assign(this, details);
-      }
-    };
-    var McpCapabilityRegistry = class {
-      constructor({
-        enabled = false,
-        allowedServerNames = []
-      } = {}) {
-        this.enabled = enabled === true;
-        this.allowedServerNames = this.enabled ? normalizeServerNames2(allowedServerNames) : [];
-        this.allowedServerNameSet = new Set(this.allowedServerNames);
-      }
-      describePolicy() {
-        return {
-          version: MCP_POLICY_VERSION,
-          mode: this.allowedServerNames.length > 0 ? "allowlist" : "disabled",
-          allowedServers: [...this.allowedServerNames],
-          allowedTools: this.allowedServerNames.map((name) => `${name}:*`)
-        };
-      }
-      buildServerConfig(serverNames) {
-        return Object.fromEntries(
-          normalizeServerNames2(serverNames).map((name) => [
-            name,
-            { enabled: this.allowedServerNameSet.has(name) }
-          ])
-        );
-      }
-      buildDisabledServerConfig(serverNames) {
-        return Object.fromEntries(
-          normalizeServerNames2(serverNames).map((name) => [
-            name,
-            { enabled: false }
-          ])
-        );
-      }
-      assertOnlyAllowedServers(inventory) {
-        const exposedServerNames = normalizeServerNames2(
-          (Array.isArray(inventory) ? inventory : []).filter(hasRuntimeExposure).map((server) => server?.name)
-        );
-        const disallowedServerNames = exposedServerNames.filter(
-          (name) => !this.allowedServerNameSet.has(name)
-        );
-        if (disallowedServerNames.length > 0) {
-          throw new McpCapabilityError(
-            "ExternalToolsAvailable",
-            "当前解读 thread 暴露了未在插件白名单中的 MCP 服务。",
-            { exposedServerNames: disallowedServerNames }
-          );
-        }
-        return {
-          isolated: true,
-          exposedServerNames
-        };
-      }
-      assertNoExposedCapabilities(inventory) {
-        const exposed = (Array.isArray(inventory) ? inventory : []).filter(hasRuntimeExposure);
-        const exposedServerNames = exposed.map((server) => String(server?.name || "")).filter(Boolean);
-        if (exposed.length > 0) {
-          throw new McpCapabilityError(
-            "ExternalToolsAvailable",
-            "当前解读 thread 仍可见 MCP 能力。",
-            { exposedServerNames }
-          );
-        }
-        return {
-          isolated: true,
-          exposedServerNames: []
-        };
-      }
-    };
-    var normalizeServerNames2 = (serverNames) => Array.from(new Set(
+    var normalizeServerNames = (serverNames) => Array.from(new Set(
       (Array.isArray(serverNames) ? serverNames : []).map((name) => String(name || "")).filter((name) => name.trim().length > 0)
     )).sort();
-    var hasRuntimeExposure = (server) => Boolean(server?.serverInfo) || Object.keys(server?.tools || {}).length > 0 || (server?.resources || []).length > 0 || (server?.resourceTemplates || []).length > 0;
-    module2.exports = {
-      MCP_POLICY_VERSION,
-      McpCapabilityError,
-      McpCapabilityRegistry,
-      normalizeServerNames: normalizeServerNames2
-    };
+    var buildDisabledMcpServerConfig = (serverNames) => Object.fromEntries(
+      normalizeServerNames(serverNames).map((name) => [name, { enabled: false }])
+    );
+    module2.exports = { buildDisabledMcpServerConfig, normalizeServerNames };
   }
 });
 
@@ -3842,13 +4101,14 @@ var require_codex_app_server_runtime = __commonJS({
     var { spawn } = require("child_process");
     var fs = require("fs");
     var path = require("path");
+    var { discoverCli: discoverCli2, buildCliInvocation } = require_cli_discovery();
     var {
       AppServerProtocolError,
       JsonLineRpcClient
     } = require_json_line_rpc();
     var {
-      McpCapabilityRegistry,
-      normalizeServerNames: normalizeServerNames2
+      buildDisabledMcpServerConfig,
+      normalizeServerNames
     } = require_mcp_capability_registry();
     var READ_ONLY_SANDBOX_POLICY = Object.freeze({
       type: "readOnly",
@@ -3883,9 +4143,7 @@ var require_codex_app_server_runtime = __commonJS({
         turnTimeoutMs = 10 * 60 * 1e3,
         ephemeralThreads = false,
         environment = process.env,
-        mcpEnabled = false,
-        enabledMcpServerNames = [],
-        mcpCapabilityRegistry = null
+        discoverCli: discoverCliProcess = discoverCli2
       } = {}) {
         if (!path.isAbsolute(String(vaultRoot || ""))) {
           throw new TypeError("CodexAppServerRuntime requires an absolute vaultRoot.");
@@ -3900,22 +4158,17 @@ var require_codex_app_server_runtime = __commonJS({
         this.turnTimeoutMs = turnTimeoutMs;
         this.ephemeralThreads = ephemeralThreads === true;
         this.environment = environment;
-        this.mcpCapabilityRegistry = mcpCapabilityRegistry || new McpCapabilityRegistry({
-          enabled: mcpEnabled,
-          allowedServerNames: enabledMcpServerNames
-        });
+        this.discoverCli = discoverCliProcess;
         this.childProcess = null;
         this.client = null;
         this.startupPromise = null;
-        this.mcpPreflightPromise = null;
+        this.lifecycleVersion = 0;
         this.activeTurns = /* @__PURE__ */ new Map();
         this.earlyTurnEvents = /* @__PURE__ */ new Map();
         this.skillChangeListeners = /* @__PURE__ */ new Set();
         this.threadPreparationQueue = Promise.resolve();
         this.globalMcpServerNames = [];
-        this.mcpStartupStatuses = /* @__PURE__ */ new Map();
-        this.mcpPolicyViolation = null;
-        const mcpPolicy = this.mcpCapabilityRegistry.describePolicy();
+        this.externalCapabilityError = null;
         this.diagnostics = {
           cliPath: null,
           userAgent: null,
@@ -3924,19 +4177,6 @@ var require_codex_app_server_runtime = __commonJS({
           authenticated: false,
           disallowedCapabilitiesIsolated: false,
           webSearchMode: "live",
-          mcpPolicy,
-          mcpConfigDiscovery: {
-            status: "idle",
-            configuredServerNames: [],
-            discoveredAt: null
-          },
-          mcpBackgroundCheck: {
-            status: mcpPolicy.mode === "disabled" ? "disabled" : "idle",
-            enabledServerNames: [...mcpPolicy.allowedServers],
-            checkedServerNames: [],
-            unavailableServerNames: [],
-            checkedAt: null
-          },
           lastErrorCode: null
         };
       }
@@ -3955,14 +4195,33 @@ var require_codex_app_server_runtime = __commonJS({
         }
       }
       async startServer() {
-        const cliPath = resolveCodexCli(this.configuredCliPath, this.environment);
-        this.diagnostics.cliPath = cliPath;
-        const args = buildAppServerArgs();
+        const lifecycleVersion = this.lifecycleVersion;
+        let installation;
+        try {
+          installation = await this.discoverCli("codex", {
+            configuredPath: this.configuredCliPath,
+            environment: this.environment,
+            readVersion: false
+          });
+        } catch (error) {
+          throw this.rememberError(new CodexRuntimeError(
+            "CodexNotFound",
+            error.message,
+            { cause: error }
+          ));
+        }
+        if (lifecycleVersion !== this.lifecycleVersion) {
+          throw new CodexRuntimeError("TurnInterrupted", "CLI 检测期间任务已取消。");
+        }
+        this.diagnostics.cliPath = installation.path;
+        this.diagnostics.cliVersion = installation.version;
+        this.diagnostics.cliSource = installation.source;
+        const invocation = buildCliInvocation(installation, buildAppServerArgs());
         let childProcess;
         try {
-          childProcess = this.spawnProcess(cliPath, args, {
+          childProcess = this.spawnProcess(invocation.command, invocation.args, {
             cwd: this.vaultRoot,
-            env: buildCodexProcessEnvironment(this.environment, cliPath),
+            env: installation.environment,
             stdio: ["pipe", "pipe", "pipe"],
             windowsHide: true
           });
@@ -4018,6 +4277,8 @@ var require_codex_app_server_runtime = __commonJS({
           throw this.rememberError(mapped);
         }
       }
+      // Reading names does not start servers; these names are used only to disable
+      // inherited Codex configuration before creating or resuming a thread.
       async refreshMcpServerCatalog() {
         if (!this.client || this.client.closed) {
           throw new CodexRuntimeError(
@@ -4025,10 +4286,6 @@ var require_codex_app_server_runtime = __commonJS({
             "Codex App Server 尚未准备好读取 MCP 配置。"
           );
         }
-        this.diagnostics.mcpConfigDiscovery = {
-          ...this.diagnostics.mcpConfigDiscovery,
-          status: "discovering"
-        };
         let response;
         try {
           response = await this.client.request("config/read", {
@@ -4036,157 +4293,11 @@ var require_codex_app_server_runtime = __commonJS({
             includeLayers: false
           });
         } catch (error) {
-          this.diagnostics.mcpConfigDiscovery = {
-            ...this.diagnostics.mcpConfigDiscovery,
-            status: "failed"
-          };
-          throw this.rememberError(this.mapProtocolError(error, "McpDiscoveryFailed"));
+          throw this.rememberError(this.mapProtocolError(error, "CapabilityIsolationFailed"));
         }
         const names = extractMcpServerNamesFromConfigRead(response);
         this.globalMcpServerNames = names;
-        this.diagnostics.mcpConfigDiscovery = {
-          status: "ready",
-          configuredServerNames: [...names],
-          discoveredAt: Date.now()
-        };
         return [...names];
-      }
-      preflightMcpServers() {
-        if (this.mcpPreflightPromise) {
-          return this.mcpPreflightPromise;
-        }
-        this.mcpPreflightPromise = this.performMcpPreflight();
-        return this.mcpPreflightPromise;
-      }
-      async performMcpPreflight() {
-        const allowedServerNames = [
-          ...this.mcpCapabilityRegistry.allowedServerNames
-        ];
-        this.diagnostics.mcpBackgroundCheck = {
-          status: allowedServerNames.length > 0 ? "checking" : "disabled",
-          enabledServerNames: allowedServerNames,
-          checkedServerNames: [],
-          unavailableServerNames: [],
-          checkedAt: null
-        };
-        try {
-          await this.ensureServer();
-          const configuredServerNameSet = new Set(this.globalMcpServerNames);
-          const enabledServerNames = allowedServerNames.filter(
-            (name) => configuredServerNameSet.has(name)
-          );
-          const unavailableServerNames = allowedServerNames.filter(
-            (name) => !configuredServerNameSet.has(name)
-          );
-          if (enabledServerNames.length === 0) {
-            const status2 = allowedServerNames.length === 0 ? "disabled" : "unavailable";
-            const report2 = this.buildMcpPreflightReport({
-              status: status2,
-              enabledServerNames,
-              checkedServerNames: [],
-              unavailableServerNames
-            });
-            this.diagnostics.mcpBackgroundCheck = {
-              status: status2,
-              enabledServerNames: allowedServerNames,
-              checkedServerNames: [],
-              unavailableServerNames,
-              checkedAt: report2.checkedAt
-            };
-            this.diagnostics.disallowedCapabilitiesIsolated = true;
-            return report2;
-          }
-          const response = await this.startMcpPreflightThread();
-          const threadId = response.thread.id;
-          const inventory = await this.listMcpInventory(threadId);
-          this.assertNoUnexpectedMcpStartup(threadId);
-          const capabilityState = this.mcpCapabilityRegistry.assertOnlyAllowedServers(inventory);
-          const checkedServerNames = capabilityState.exposedServerNames;
-          const failedServerNames = enabledServerNames.filter((name) => {
-            const startup = this.mcpStartupStatuses.get(
-              mcpStartupStatusKey(threadId, name)
-            );
-            return startup === "failed" || startup === "cancelled";
-          });
-          const missingServerNames = enabledServerNames.filter(
-            (name) => !checkedServerNames.includes(name)
-          );
-          const unavailable = normalizeServerNames2([
-            ...unavailableServerNames,
-            ...failedServerNames,
-            ...missingServerNames
-          ]);
-          const status = unavailable.length > 0 ? "degraded" : "ready";
-          const report = this.buildMcpPreflightReport({
-            status,
-            enabledServerNames,
-            checkedServerNames,
-            unavailableServerNames: unavailable
-          });
-          this.diagnostics.mcpBackgroundCheck = {
-            status,
-            enabledServerNames: allowedServerNames,
-            checkedServerNames,
-            unavailableServerNames: unavailable,
-            checkedAt: report.checkedAt
-          };
-          this.diagnostics.disallowedCapabilitiesIsolated = true;
-          return report;
-        } catch (error) {
-          const mapped = error?.code === "ExternalToolsAvailable" ? new CodexRuntimeError(
-            "ExternalToolsAvailable",
-            "MCP 后台检查发现了未获插件授权的服务。",
-            {
-              cause: error,
-              exposedServerNames: error.exposedServerNames || []
-            }
-          ) : this.mapProtocolError(error, "McpPreflightFailed");
-          if (mapped.code === "ExternalToolsAvailable") {
-            this.mcpPolicyViolation = mapped;
-          }
-          this.diagnostics.mcpBackgroundCheck = {
-            ...this.diagnostics.mcpBackgroundCheck,
-            status: "failed",
-            checkedAt: Date.now()
-          };
-          throw this.rememberError(mapped);
-        }
-      }
-      buildMcpPreflightReport({
-        status,
-        enabledServerNames,
-        checkedServerNames,
-        unavailableServerNames
-      }) {
-        return {
-          status,
-          configuredServerNames: [...this.globalMcpServerNames],
-          enabledServerNames: [...enabledServerNames],
-          checkedServerNames: [...checkedServerNames],
-          unavailableServerNames: [...unavailableServerNames],
-          checkedAt: Date.now()
-        };
-      }
-      async startMcpPreflightThread() {
-        try {
-          const response = await this.client.request("thread/start", {
-            approvalPolicy: "never",
-            baseInstructions: "MCP startup preflight only. Do not start a turn.",
-            config: this.restrictedThreadConfig(),
-            cwd: this.vaultRoot,
-            dynamicTools: [],
-            environments: [],
-            ephemeral: true,
-            runtimeWorkspaceRoots: [this.vaultRoot],
-            sandbox: "read-only",
-            selectedCapabilityRoots: [],
-            ...this.defaultModel ? { model: this.defaultModel } : {}
-          });
-          validateRestrictedThread(response, this.vaultRoot);
-          return response;
-        } catch (error) {
-          throw this.rememberError(this.mapProtocolError(error, "McpPreflightFailed"));
-        }
       }
       async runTurn({
         threadId,
@@ -4208,12 +4319,7 @@ var require_codex_app_server_runtime = __commonJS({
           throw new CodexRuntimeError("EmptyPrompt", "没有可发送的解读请求。");
         }
         await this.ensureServer();
-        if (researchEnabled && this.mcpCapabilityRegistry.allowedServerNames.length > 0) {
-          await this.preflightMcpServers();
-        }
-        if (this.mcpPolicyViolation) {
-          throw this.mcpPolicyViolation;
-        }
+        this.assertExternalCapabilitiesDisabled();
         const prepared = await this.prepareRestrictedThread({
           threadId: String(threadId || "").trim(),
           baseInstructions,
@@ -4221,9 +4327,7 @@ var require_codex_app_server_runtime = __commonJS({
           researchEnabled,
           allowSkillRead
         });
-        if (this.mcpPolicyViolation) {
-          throw this.mcpPolicyViolation;
-        }
+        this.assertExternalCapabilitiesDisabled();
         const activeThreadId = prepared.thread.id;
         let response;
         try {
@@ -4334,31 +4438,27 @@ var require_codex_app_server_runtime = __commonJS({
       prepareRestrictedThread({ threadId, baseInstructions, model, researchEnabled = true, allowSkillRead = false } = {}) {
         const prepare = this.threadPreparationQueue.then(async () => {
           await this.refreshMcpServerCatalog();
-          if (this.mcpPolicyViolation) {
-            throw this.mcpPolicyViolation;
-          }
+          this.assertExternalCapabilitiesDisabled();
           const response = String(threadId || "").trim() ? await this.resumeThread(String(threadId).trim(), {
             baseInstructions,
             model,
             researchEnabled,
             allowSkillRead
           }) : await this.startThread({ baseInstructions, model, researchEnabled, allowSkillRead });
-          this.assertNoUnexpectedMcpStartup(response.thread.id, researchEnabled);
+          this.assertExternalCapabilitiesDisabled();
           await this.assertAppsIsolated(response.thread.id);
           this.diagnostics.disallowedCapabilitiesIsolated = true;
           return response;
         }, async () => {
           await this.refreshMcpServerCatalog();
-          if (this.mcpPolicyViolation) {
-            throw this.mcpPolicyViolation;
-          }
+          this.assertExternalCapabilitiesDisabled();
           const response = String(threadId || "").trim() ? await this.resumeThread(String(threadId).trim(), {
             baseInstructions,
             model,
             researchEnabled,
             allowSkillRead
           }) : await this.startThread({ baseInstructions, model, researchEnabled, allowSkillRead });
-          this.assertNoUnexpectedMcpStartup(response.thread.id, researchEnabled);
+          this.assertExternalCapabilitiesDisabled();
           await this.assertAppsIsolated(response.thread.id);
           this.diagnostics.disallowedCapabilitiesIsolated = true;
           return response;
@@ -4368,7 +4468,6 @@ var require_codex_app_server_runtime = __commonJS({
         return prepare;
       }
       restrictedThreadConfig({ researchEnabled = true, allowSkillRead = false } = {}) {
-        const mcpServers = researchEnabled ? this.mcpCapabilityRegistry.buildServerConfig(this.globalMcpServerNames) : this.mcpCapabilityRegistry.buildDisabledServerConfig(this.globalMcpServerNames);
         return {
           apps: {
             _default: {
@@ -4381,7 +4480,7 @@ var require_codex_app_server_runtime = __commonJS({
             result[feature] = false;
             return result;
           }, researchEnabled || allowSkillRead ? {} : { shell_tool: false }),
-          mcp_servers: mcpServers,
+          mcp_servers: buildDisabledMcpServerConfig(this.globalMcpServerNames),
           web_search: researchEnabled ? "live" : "disabled"
         };
       }
@@ -4462,51 +4561,8 @@ var require_codex_app_server_runtime = __commonJS({
         this.skillChangeListeners.add(listener);
         return () => this.skillChangeListeners.delete(listener);
       }
-      async listMcpInventory(threadId) {
-        const scopedThreadId = String(threadId || "").trim();
-        if (!scopedThreadId) {
-          throw new CodexRuntimeError(
-            "McpGlobalInventoryRejected",
-            "插件拒绝在没有受限 thread 的情况下枚举全局 MCP。"
-          );
-        }
-        const inventory = [];
-        let cursor;
-        do {
-          const response = await this.client.request("mcpServerStatus/list", {
-            detail: "toolsAndAuthOnly",
-            limit: 100,
-            threadId: scopedThreadId,
-            ...cursor ? { cursor } : {}
-          });
-          if (!Array.isArray(response?.data)) {
-            throw new CodexRuntimeError(
-              "AppServerIncompatible",
-              "App Server 无法提供 MCP 工具清单。"
-            );
-          }
-          inventory.push(...response.data);
-          cursor = response.nextCursor || null;
-        } while (cursor);
-        return inventory;
-      }
-      assertNoUnexpectedMcpStartup(threadId, researchEnabled = true) {
-        const allowedServerNameSet = new Set(
-          researchEnabled ? this.mcpCapabilityRegistry.allowedServerNames : []
-        );
-        const unexpectedServerNames = this.globalMcpServerNames.filter(
-          (name) => !allowedServerNameSet.has(name) && this.mcpStartupStatuses.has(mcpStartupStatusKey(threadId, name))
-        );
-        if (unexpectedServerNames.length === 0) {
-          return;
-        }
-        const error = new CodexRuntimeError(
-          "ExternalToolsAvailable",
-          "未获插件授权的 MCP 出现了启动事件。",
-          { exposedServerNames: unexpectedServerNames }
-        );
-        this.mcpPolicyViolation = error;
-        throw this.rememberError(error);
+      assertExternalCapabilitiesDisabled() {
+        if (this.externalCapabilityError) throw this.externalCapabilityError;
       }
       async assertAppsIsolated(threadId) {
         try {
@@ -4546,30 +4602,19 @@ var require_codex_app_server_runtime = __commonJS({
         }
         if (method === "mcpServer/startupStatus/updated") {
           const threadId2 = String(params.threadId || "").trim();
-          const name = String(params.name || "");
-          const status = String(params.status || "").trim().toLowerCase();
-          if (threadId2 && name.trim() && status) {
-            this.mcpStartupStatuses.set(
-              mcpStartupStatusKey(threadId2, name),
-              status
-            );
-            if (!this.mcpCapabilityRegistry.allowedServerNameSet.has(name)) {
-              const error = new CodexRuntimeError(
-                "ExternalToolsAvailable",
-                "未获插件授权的 MCP 出现了启动事件。",
-                { exposedServerNames: [name] }
-              );
-              this.mcpPolicyViolation = this.rememberError(error);
-              for (const [key2, active2] of this.activeTurns.entries()) {
-                if (active2.threadId === threadId2) {
-                  void this.client?.request("turn/interrupt", {
-                    threadId: active2.threadId,
-                    turnId: active2.turnId
-                  }).catch(() => {
-                  });
-                  this.finishTurnWithError(key2, error);
-                }
-              }
+          const error = new CodexRuntimeError(
+            "ExternalToolsAvailable",
+            "本地 Agent 尝试启动已禁用的外部工具，本次解读已停止。"
+          );
+          this.externalCapabilityError = this.rememberError(error);
+          for (const [key2, active2] of this.activeTurns.entries()) {
+            if (!threadId2 || active2.threadId === threadId2) {
+              void this.client?.request("turn/interrupt", {
+                threadId: active2.threadId,
+                turnId: active2.turnId
+              }).catch(() => {
+              });
+              this.finishTurnWithError(key2, error);
             }
           }
           return;
@@ -4784,6 +4829,7 @@ var require_codex_app_server_runtime = __commonJS({
         return true;
       }
       async shutdown() {
+        this.lifecycleVersion += 1;
         if (this.activeTurns.size > 0 && this.client && !this.client.closed) {
           await Promise.allSettled(
             [...this.activeTurns.values()].map((active) => this.interrupt({
@@ -4814,29 +4860,6 @@ var require_codex_app_server_runtime = __commonJS({
       getDiagnostics() {
         return {
           ...this.diagnostics,
-          mcpPolicy: {
-            ...this.diagnostics.mcpPolicy,
-            allowedServers: [...this.diagnostics.mcpPolicy.allowedServers],
-            allowedTools: [...this.diagnostics.mcpPolicy.allowedTools]
-          },
-          mcpConfigDiscovery: {
-            ...this.diagnostics.mcpConfigDiscovery,
-            configuredServerNames: [
-              ...this.diagnostics.mcpConfigDiscovery.configuredServerNames
-            ]
-          },
-          mcpBackgroundCheck: {
-            ...this.diagnostics.mcpBackgroundCheck,
-            enabledServerNames: [
-              ...this.diagnostics.mcpBackgroundCheck.enabledServerNames
-            ],
-            checkedServerNames: [
-              ...this.diagnostics.mcpBackgroundCheck.checkedServerNames
-            ],
-            unavailableServerNames: [
-              ...this.diagnostics.mcpBackgroundCheck.unavailableServerNames
-            ]
-          },
           activeTurnCount: this.activeTurns.size
         };
       }
@@ -4866,8 +4889,7 @@ var require_codex_app_server_runtime = __commonJS({
         }
         const fallbackMessages = {
           AppServerIncompatible: "本地 Agent 初始化失败，请查看脱敏诊断后重试。",
-          McpDiscoveryFailed: "无法读取本机 Codex 的 MCP 配置清单。",
-          McpPreflightFailed: "插件启动时的 MCP 后台检查失败。",
+          CapabilityIsolationFailed: "无法确认本地 Agent 已禁用外部工具。",
           ModelDiscoveryFailed: "无法从本机 Codex 获取模型列表，请检查 CLI 路径和登录状态。",
           SkillDiscoveryFailed: "无法从本机 Codex 获取 Skill 清单，请检查 CLI 路径和登录状态。",
           TurnFailed: "本地 Agent 未能启动本次解读，可重试或复制脱敏诊断。"
@@ -5084,9 +5106,8 @@ var require_codex_app_server_runtime = __commonJS({
           "Codex App Server 返回的 MCP 配置格式无效。"
         );
       }
-      return normalizeServerNames2(Object.keys(mcpServers));
+      return normalizeServerNames(Object.keys(mcpServers));
     };
-    var mcpStartupStatusKey = (threadId, serverName) => `${threadId}::${serverName}`;
     module2.exports = {
       CodexAppServerRuntime: CodexAppServerRuntime2,
       CodexRuntimeError,
@@ -5102,6 +5123,765 @@ var require_codex_app_server_runtime = __commonJS({
       resolveCodexReasoningProfile: resolveCodexReasoningProfile2,
       validateRestrictedThread
     };
+  }
+});
+
+// segment-ai/cli-agent-runtime.js
+var require_cli_agent_runtime = __commonJS({
+  "segment-ai/cli-agent-runtime.js"(exports2, module2) {
+    var { spawn } = require("child_process");
+    var { randomUUID } = require("crypto");
+    var fs = require("fs/promises");
+    var os = require("os");
+    var path = require("path");
+    var { discoverCli: discoverCli2, buildCliInvocation } = require_cli_discovery();
+    var PROVIDER_NAMES = { claude: "Claude Code", deepseek: "DeepSeek Harness" };
+    var MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+    var CliAgentRuntimeError = class extends Error {
+      constructor(code, message, details = {}) {
+        super(message);
+        this.name = "CliAgentRuntimeError";
+        this.code = code;
+        Object.assign(this, details);
+      }
+    };
+    var DEEPSEEK_POLICY_PLUGIN = `
+import { readFileSync } from 'node:fs';
+export const name = 'lctp-read-only-policy';
+export const inject = ['systemPrompt', 'tools'];
+export function apply(ctx, config) {
+  const instructions = readFileSync(config.instructionsPath, 'utf8');
+  ctx.effect(() => ctx.systemPrompt.section({
+    name: 'lctp:instructions', order: 0, text: instructions,
+    interpolate: false, complete: true,
+  }));
+  ctx.on('agent/created', ({ agent }) => {
+    if (typeof agent.ctx.tools.restrict !== 'function') {
+      throw new Error('This dsh version does not support the required read-only tool restriction.');
+    }
+    const allow = config.allowedTools.filter(name => ctx.tools.get(name) !== undefined);
+    agent.ctx.tools.restrict({ allow });
+    process.stdout.write(JSON.stringify({ type: 'lctp_policy', nonce: config.nonce }) + '\\n');
+  });
+}
+`;
+    var CliAgentRuntime2 = class {
+      constructor({
+        provider,
+        vaultRoot,
+        cliPath = "",
+        defaultModel = "",
+        defaultReasoningEffort = "",
+        environment = process.env,
+        platform = process.platform,
+        spawnProcess = spawn,
+        discoverCli: discover = discoverCli2,
+        turnTimeoutMs = 10 * 60 * 1e3,
+        stopTimeoutMs = 1500,
+        terminateProcess = terminateProcessTree
+      } = {}) {
+        if (!PROVIDER_NAMES[provider] || !path.isAbsolute(String(vaultRoot || ""))) {
+          throw new TypeError("CliAgentRuntime requires a supported provider and absolute vaultRoot.");
+        }
+        this.provider = provider;
+        this.vaultRoot = path.resolve(vaultRoot);
+        this.configuredCliPath = String(cliPath || "").trim();
+        this.defaultModel = String(defaultModel || "").trim();
+        this.defaultReasoningEffort = String(defaultReasoningEffort || "").trim();
+        this.environment = environment;
+        this.platform = platform;
+        this.spawnProcess = spawnProcess;
+        this.discoverCli = discover;
+        this.turnTimeoutMs = turnTimeoutMs;
+        this.stopTimeoutMs = stopTimeoutMs;
+        this.terminateProcess = terminateProcess;
+        this.activeTurns = /* @__PURE__ */ new Map();
+        this.completedThreads = /* @__PURE__ */ new Map();
+        this.closed = false;
+        this.diagnostics = {
+          provider,
+          cliPath: null,
+          version: null,
+          userAgent: null,
+          initialized: false,
+          authenticated: false,
+          disallowedCapabilitiesIsolated: false,
+          modelDiscoverySupported: false,
+          skillDiscoverySupported: false,
+          lastErrorCode: null
+        };
+      }
+      async ensureServer() {
+        if (this.closed) throw this.error("RuntimeClosed", "本地 Agent 已关闭，请重新启用 AI 功能。");
+        const cli = await this.discoverCli(this.provider, {
+          configuredPath: this.configuredCliPath,
+          environment: this.environment,
+          platform: this.platform,
+          readVersion: false
+        });
+        this.diagnostics.cliPath = cli.path;
+        this.diagnostics.version = cli.version || null;
+        this.diagnostics.userAgent = `${PROVIDER_NAMES[this.provider]}${cli.version ? ` ${cli.version}` : ""}`;
+        this.diagnostics.initialized = true;
+        return cli;
+      }
+      async listModels() {
+        await this.ensureServer();
+        return [];
+      }
+      async listSkills() {
+        return [];
+      }
+      onSkillsChanged() {
+        return () => {
+        };
+      }
+      async restoreThread({ threadId } = {}) {
+        this.nativeSessionId(threadId);
+        const cached = this.completedThreads.get(threadId);
+        return cached ? { ...cached } : { threadId, text: "", status: "unknown" };
+      }
+      nativeSessionId(threadId) {
+        const value = String(threadId || "");
+        const prefix = `${this.provider}:`;
+        if (!value.startsWith(prefix) || !value.slice(prefix.length).trim() || value.includes("\0") || value.length > 1024) {
+          throw this.error("ThreadUnavailable", "这个会话属于其他 CLI，或会话标识无效，请新建解读。");
+        }
+        return value.slice(prefix.length);
+      }
+      async runTurn({
+        threadId = "",
+        baseInstructions = "",
+        prompt,
+        model,
+        effort,
+        researchEnabled = true,
+        allowSkillRead = false,
+        onEvent = () => {
+        }
+      } = {}) {
+        const task = String(prompt || "");
+        if (!task.trim()) throw this.error("EmptyPrompt", "没有可发送的解读请求。");
+        const nativeId = threadId ? this.nativeSessionId(threadId) : "";
+        if (threadId && [...this.activeTurns.values()].some((turn) => turn.threadId === threadId)) {
+          throw this.error("TurnBusy", "这个会话仍在生成，请等待或停止后继续。");
+        }
+        const selectedModel = String(model || this.defaultModel || "").trim();
+        const selectedEffort = String(effort || this.defaultReasoningEffort || "").trim();
+        if (this.provider === "deepseek" && (selectedModel || selectedEffort)) {
+          throw this.error("UnsupportedModelOverride", "DeepSeek Harness 使用本机 headless profile 的模型与推理设置；请在该 CLI 中配置。");
+        }
+        const active = {
+          turnId: randomUUID(),
+          threadId: String(threadId || ""),
+          nativeId,
+          text: "",
+          messages: /* @__PURE__ */ new Map(),
+          streamText: "",
+          onEvent,
+          interrupted: false,
+          failure: null,
+          terminal: false,
+          started: false,
+          child: null,
+          closed: false,
+          settled: false
+        };
+        active.exited = new Promise((resolve) => {
+          active.resolveExit = resolve;
+        });
+        active.finished = new Promise((resolve) => {
+          active.resolveFinished = resolve;
+        });
+        this.activeTurns.set(active.turnId, active);
+        let artifacts;
+        try {
+          const cli = await this.ensureServer();
+          if (active.interrupted || this.closed) return this.result(active, "interrupted");
+          artifacts = await createInvocationArtifacts({
+            provider: this.provider,
+            baseInstructions: String(baseInstructions || ""),
+            researchEnabled,
+            allowSkillRead
+          });
+          if (active.interrupted || this.closed) return this.result(active, "interrupted");
+          const args = this.provider === "claude" ? buildClaudeArgs({ nativeId, selectedModel, selectedEffort, artifacts, researchEnabled, allowSkillRead }) : [
+            "--profile",
+            "headless",
+            "--patch",
+            artifacts.patchPath,
+            "--json",
+            "--permission-mode",
+            "read-only",
+            "--approval-policy",
+            "never",
+            ...nativeId ? ["--session-id", nativeId] : [],
+            "-"
+          ];
+          const invocation = buildCliInvocation(cli, args);
+          active.policyNonce = artifacts.nonce;
+          const result = await this.execute(active, invocation, cli.environment || this.environment, task);
+          if (result.threadId) this.completedThreads.set(result.threadId, result);
+          return { ...result, model: selectedModel, effort: selectedEffort };
+        } catch (error) {
+          this.diagnostics.lastErrorCode = error.code || "CliTurnFailed";
+          throw error;
+        } finally {
+          if (!active.child || active.closed) this.activeTurns.delete(active.turnId);
+          if (!active.child || active.closed) active.resolveExit();
+          try {
+            if (artifacts && (!active.child || active.closed)) await artifacts.dispose();
+            else if (artifacts) active.disposeArtifacts = artifacts.dispose;
+          } finally {
+            active.resolveFinished();
+          }
+        }
+      }
+      execute(active, invocation, environment, task) {
+        return new Promise((resolve, reject) => {
+          let buffer = "";
+          let stderr = "";
+          const finish = (error, result) => {
+            if (active.settled) return;
+            active.settled = true;
+            clearTimeout(active.timeout);
+            clearTimeout(active.killTimeout);
+            clearTimeout(active.stopDeadline);
+            if (error) reject(error);
+            else resolve(result);
+          };
+          const consume = (line) => {
+            if (!line.trim() || active.failure) return;
+            let event;
+            try {
+              event = JSON.parse(line);
+            } catch {
+              this.stopWithFailure(active, this.error("CliProtocolError", `${PROVIDER_NAMES[this.provider]} 没有返回有效的 JSON 事件，请检查 CLI 版本。`));
+              return;
+            }
+            try {
+              if (this.provider === "claude") this.consumeClaudeEvent(active, event);
+              else this.consumeDeepSeekEvent(active, event);
+            } catch (error) {
+              this.stopWithFailure(active, error);
+            }
+          };
+          active.finish = finish;
+          try {
+            active.child = this.spawnProcess(invocation.command, invocation.args, {
+              cwd: this.vaultRoot,
+              env: { ...environment },
+              stdio: ["pipe", "pipe", "pipe"],
+              windowsHide: true,
+              detached: this.platform !== "win32",
+              ...invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}
+            });
+          } catch (cause) {
+            active.closed = true;
+            finish(this.error("CliLaunchFailed", `无法启动 ${PROVIDER_NAMES[this.provider]}，请检查 CLI 路径。`, { cause }));
+            return;
+          }
+          active.timeout = setTimeout(() => this.stopWithFailure(
+            active,
+            this.error("TurnTimeout", "本地 Agent 响应超时，已请求停止。")
+          ), this.turnTimeoutMs);
+          active.child.stdout.setEncoding("utf8");
+          active.child.stderr.setEncoding("utf8");
+          active.child.stdout.on("data", (chunk) => {
+            buffer += chunk;
+            if (Buffer.byteLength(buffer, "utf8") > MAX_OUTPUT_BYTES) {
+              this.stopWithFailure(active, this.error("CliOutputLimit", "CLI 返回的单个事件过大，已停止本次解读。"));
+              buffer = "";
+              return;
+            }
+            let newline;
+            while ((newline = buffer.indexOf("\n")) !== -1) {
+              const line = buffer.slice(0, newline);
+              buffer = buffer.slice(newline + 1);
+              consume(line);
+            }
+          });
+          active.child.stderr.on("data", (chunk) => {
+            stderr = (stderr + chunk).slice(-4096);
+          });
+          active.child.stdin.on("error", (cause) => {
+            if (cause.code !== "EPIPE" && !active.interrupted) this.stopWithFailure(
+              active,
+              this.error("CliInputFailed", "无法把请求发送给本地 CLI。", { cause })
+            );
+          });
+          active.child.on("error", (cause) => {
+            active.closed = true;
+            active.resolveExit();
+            finish(this.error("CliLaunchFailed", `无法启动 ${PROVIDER_NAMES[this.provider]}，请检查路径与本机安装。`, { cause }));
+          });
+          active.child.on("close", (code, signal) => {
+            active.closed = true;
+            active.resolveExit();
+            clearTimeout(active.killTimeout);
+            clearTimeout(active.stopDeadline);
+            if (buffer.trim()) consume(buffer);
+            this.activeTurns.delete(active.turnId);
+            if (active.disposeArtifacts) void active.disposeArtifacts();
+            if (active.failure) return finish(active.failure);
+            if (active.interrupted) return finish(null, this.result(active, "interrupted"));
+            if (code !== 0) return finish(this.error(
+              "CliTurnFailed",
+              `${PROVIDER_NAMES[this.provider]} 执行失败${signal ? `（${signal}）` : `（退出码 ${code}）`}。${cleanDiagnostic(stderr)}`
+            ));
+            if (!active.terminal || !active.started) return finish(this.error(
+              "CliProtocolError",
+              "CLI 已退出，但没有返回完整的会话和完成事件，请检查 CLI 版本。"
+            ));
+            if (!active.text.trim()) return finish(this.error("EmptyAgentResponse", "本地 Agent 已结束，但没有返回可显示的回答。"));
+            this.diagnostics.authenticated = true;
+            this.emit(active, { type: "completed", status: "completed" });
+            finish(null, this.result(active, "completed"));
+          });
+          active.child.stdin.end(task, "utf8");
+        });
+      }
+      startSession(active, id) {
+        if (typeof id !== "string" || !id.trim() || id.length > 1e3 || id.includes("\0")) {
+          throw this.error("CliProtocolError", "CLI 未返回有效的会话标识。");
+        }
+        if (active.nativeId && active.nativeId !== id) {
+          throw this.error("ThreadUnavailable", "CLI 恢复了不同的会话，已停止请求；请新建解读。");
+        }
+        active.nativeId = id;
+        active.threadId = `${this.provider}:${id}`;
+        if (!active.started) {
+          active.started = true;
+          this.emit(active, { type: "started" });
+        }
+      }
+      updateText(active, text) {
+        if (typeof text !== "string" || text === active.text) return;
+        if (Buffer.byteLength(text, "utf8") > MAX_OUTPUT_BYTES) {
+          throw this.error("CliOutputLimit", "CLI 回答过大，已停止本次解读。");
+        }
+        active.text = text;
+        if (active.started) this.emit(active, { type: "delta", text });
+      }
+      consumeClaudeEvent(active, event) {
+        if (event.session_id) {
+          this.startSession(active, event.session_id);
+          this.diagnostics.disallowedCapabilitiesIsolated = true;
+        }
+        if (event.type === "stream_event") {
+          if (event.event?.type === "message_start") active.streamText = "";
+          if (event.event?.type === "content_block_delta" && event.event.delta?.type === "text_delta") {
+            active.streamText += String(event.event.delta.text || "");
+            this.updateText(active, [...active.messages.values(), active.streamText].filter(Boolean).join("\n\n"));
+          }
+        } else if (event.type === "assistant") {
+          const text = extractClaudeText(event.message?.content);
+          if (text) {
+            active.messages.set(event.message?.id || String(active.messages.size), text);
+            active.streamText = "";
+            this.updateText(active, [...active.messages.values()].join("\n\n"));
+          }
+        } else if (event.type === "result") {
+          if (event.is_error === true || event.subtype && event.subtype !== "success") {
+            throw this.error("CliTurnFailed", cleanDiagnostic(event.result || event.errors?.join("\n") || "Claude Code 未能完成回答。"));
+          }
+          if (typeof event.result === "string") this.updateText(active, event.result);
+          active.terminal = true;
+        } else if (event.type === "error") {
+          throw this.error("CliTurnFailed", cleanDiagnostic(event.message || event.error?.message || "Claude Code 执行失败。"));
+        }
+      }
+      consumeDeepSeekEvent(active, event) {
+        if (event.type === "lctp_policy") {
+          if (event.nonce === active.policyNonce) {
+            active.policyConfirmed = true;
+            this.diagnostics.disallowedCapabilitiesIsolated = true;
+          }
+          return;
+        }
+        if (event.type === "session") {
+          if (!active.policyConfirmed) throw this.error("CliPolicyUnavailable", "DeepSeek Harness 未确认只读工具限制，已停止请求。请检查 CLI 版本。");
+          this.startSession(active, event.sessionId);
+        } else if (event.type === "text") {
+          this.updateText(active, active.text + String(event.text || ""));
+        } else if (event.type === "final") {
+          this.startSession(active, event.sessionId);
+          if (!active.policyConfirmed) throw this.error("CliPolicyUnavailable", "DeepSeek Harness 未确认只读工具限制。");
+          if (event.reason?.kind !== "completed") {
+            throw this.error("CliTurnFailed", cleanDiagnostic(event.reason?.error?.message || `DeepSeek Harness 未完成回答（${event.reason?.kind || "无完成原因"}）。`));
+          }
+          this.updateText(active, event.text);
+          active.terminal = true;
+        } else if (event.type === "error") {
+          throw this.error("CliTurnFailed", cleanDiagnostic(event.message || "DeepSeek Harness 执行失败。"));
+        }
+      }
+      emit(active, event) {
+        try {
+          active.onEvent({ threadId: active.threadId, turnId: active.turnId, ...event });
+        } catch {
+          this.diagnostics.eventCallbackFailed = true;
+        }
+      }
+      result(active, status) {
+        return { threadId: active.threadId, turnId: active.turnId, text: active.text, status };
+      }
+      stopWithFailure(active, error) {
+        active.failure ||= error;
+        this.requestStop(active);
+      }
+      requestStop(active) {
+        if (!active.child || active.closed || active.stopping) return;
+        active.stopping = true;
+        this.terminateProcess(active.child, "SIGTERM", this.platform);
+        if (active.closed) return;
+        active.killTimeout = setTimeout(() => {
+          this.terminateProcess(active.child, "SIGKILL", this.platform);
+        }, this.stopTimeoutMs);
+        active.stopDeadline = setTimeout(() => {
+          active.finish(this.error("ProcessStopUnconfirmed", "CLI 未确认退出，暂时不能恢复这个会话。请在终端检查该进程。"));
+        }, this.stopTimeoutMs * 2);
+      }
+      async interrupt({ threadId = "", turnId = "" } = {}) {
+        const active = [...this.activeTurns.values()].filter((turn) => (!threadId || turn.threadId === threadId) && (!turnId || turn.turnId === turnId));
+        for (const turn of active) {
+          turn.interrupted = true;
+          this.requestStop(turn);
+        }
+        return active.length > 0;
+      }
+      async shutdown() {
+        this.closed = true;
+        const active = [...this.activeTurns.values()];
+        await this.interrupt();
+        if (active.length === 0) return;
+        let deadline;
+        try {
+          await Promise.race([
+            Promise.all(active.map((turn) => turn.finished)),
+            new Promise((_, reject) => {
+              deadline = setTimeout(() => reject(this.error(
+                "ProcessStopUnconfirmed",
+                "CLI 尚未确认退出，请检查本地进程后再切换提供商。"
+              )), this.stopTimeoutMs * 2 + 500);
+            })
+          ]);
+          if (active.some((turn) => turn.child && !turn.closed)) {
+            throw this.error("ProcessStopUnconfirmed", "CLI 尚未确认退出，请检查本地进程后再切换提供商。");
+          }
+        } finally {
+          clearTimeout(deadline);
+        }
+      }
+      async dispose() {
+        return this.shutdown();
+      }
+      getDiagnostics() {
+        return JSON.parse(JSON.stringify({ ...this.diagnostics, activeTurnCount: this.activeTurns.size }));
+      }
+      error(code, message, details) {
+        return new CliAgentRuntimeError(code, message, details);
+      }
+    };
+    function buildClaudeArgs({ nativeId, selectedModel, selectedEffort, artifacts, researchEnabled, allowSkillRead }) {
+      const tools = [
+        ...researchEnabled || allowSkillRead ? ["Read", "Glob", "Grep"] : [],
+        ...researchEnabled ? ["WebSearch", "WebFetch"] : []
+      ].join(",");
+      return [
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--input-format",
+        "text",
+        "--permission-mode",
+        "dontAsk",
+        "--tools",
+        tools,
+        "--allowedTools",
+        tools,
+        "--disallowedTools",
+        "mcp__*",
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+        // Native user settings own API routes and credentials. Exclude project/local
+        // settings while overriding hooks and MCP for this read-only invocation.
+        "--setting-sources",
+        "user",
+        "--settings",
+        '{"disableAllHooks":true}',
+        "--disable-slash-commands",
+        "--no-chrome",
+        "--system-prompt-file",
+        artifacts.instructionsPath,
+        ...nativeId ? ["--resume", nativeId] : [],
+        ...selectedModel ? ["--model", selectedModel] : [],
+        ...selectedEffort ? ["--effort", selectedEffort] : []
+      ];
+    }
+    async function createInvocationArtifacts({ provider, baseInstructions, researchEnabled, allowSkillRead }) {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), "lctp-cli-"));
+      const dispose = () => fs.rm(directory, { recursive: true, force: true });
+      try {
+        await fs.chmod(directory, 448);
+        const instructionsPath = path.join(directory, "instructions.txt");
+        await fs.writeFile(instructionsPath, baseInstructions || "你是只读翻译助手。不得创建、修改或删除文件。", { mode: 384 });
+        if (provider === "claude") return { instructionsPath, dispose };
+        const pluginPath = path.join(directory, "read-only-policy.mjs");
+        const patchPath = path.join(directory, "invocation.patch.json");
+        const nonce = randomUUID();
+        const allowedTools = [
+          ...researchEnabled || allowSkillRead ? ["read", "glob", "grep"] : [],
+          ...researchEnabled ? ["web_search", "web_fetch"] : []
+        ];
+        const disabled = [
+          "tool-bash",
+          "tool-pwsh",
+          "tool-jobs",
+          "tool-agent-team",
+          "tool-subagent-control",
+          "tool-subagent",
+          "tool-subagent-fork",
+          "tool-workflow",
+          "tool-todo",
+          "tool-goal",
+          "tool-plugin-manager",
+          "plugin-manager",
+          "skill-filesystem",
+          "tool-skill",
+          "agent-instructions",
+          "mcp-resources",
+          "session-title-llm",
+          ...!researchEnabled ? ["tool-web", "web-deepseek-api", "web-search-deepseek", "web-fetch-http"] : []
+        ];
+        const patch = [
+          ...disabled.map((id) => ({ id, disabled: true })),
+          { id: "tool-fs", config: { read: true, readImage: false, write: false, edit: false, applyPatch: false } },
+          { insert: [{
+            id: "lctp-read-only-policy",
+            name: pluginPath,
+            config: { instructionsPath, allowedTools, nonce }
+          }] }
+        ];
+        await fs.writeFile(pluginPath, DEEPSEEK_POLICY_PLUGIN, { mode: 384 });
+        await fs.writeFile(patchPath, JSON.stringify(patch), { mode: 384 });
+        return { instructionsPath, patchPath, nonce, dispose };
+      } catch (error) {
+        await dispose();
+        throw error;
+      }
+    }
+    function extractClaudeText(content) {
+      if (typeof content === "string") return content;
+      return (Array.isArray(content) ? content : []).filter((block) => block.type === "text" && typeof block.text === "string").map((block) => block.text).join("");
+    }
+    function cleanDiagnostic(value) {
+      return String(value || "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/(Bearer\s+)[^\s]+/gi, "$1[redacted]").replace(/((?:api[_-]?key|auth[_-]?token)\s*[=:]\s*)[^\s,;]+/gi, "$1[redacted]").trim().slice(0, 1800);
+    }
+    function terminateProcessTree(child, signal, platform) {
+      if (platform === "win32" && Number.isInteger(child.pid) && child.pid > 0) {
+        try {
+          const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", ...signal === "SIGKILL" ? ["/F"] : []], {
+            stdio: "ignore",
+            windowsHide: true
+          });
+          killer.on("error", () => {
+            try {
+              child.kill(signal);
+            } catch {
+            }
+          });
+          return;
+        } catch {
+        }
+      }
+      if (platform !== "win32" && Number.isInteger(child.pid) && child.pid > 0) {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+        }
+      }
+      try {
+        child.kill(signal);
+      } catch {
+      }
+    }
+    module2.exports = { CliAgentRuntime: CliAgentRuntime2, CliAgentRuntimeError };
+  }
+});
+
+// segment-ai/provider-settings.js
+var require_provider_settings = __commonJS({
+  "segment-ai/provider-settings.js"(exports2, module2) {
+    var PROVIDER_DEFINITIONS2 = Object.freeze([
+      Object.freeze({
+        id: "codex",
+        label: "Codex CLI",
+        pathSetting: "segmentAiCodexPath",
+        placeholder: "/opt/homebrew/bin/codex"
+      }),
+      Object.freeze({
+        id: "claude",
+        label: "Claude Code",
+        pathSetting: "segmentAiClaudePath",
+        placeholder: "~/.local/bin/claude"
+      }),
+      Object.freeze({
+        id: "deepseek",
+        label: "DeepSeek Harness",
+        pathSetting: "segmentAiDeepseekPath",
+        placeholder: "/opt/homebrew/bin/dsh"
+      })
+    ]);
+    var normalizeProvider2 = (value) => {
+      const provider = String(value || "").trim().toLowerCase().replace(/\s+/g, "-");
+      if (["claude", "claude-code"].includes(provider)) return "claude";
+      if (["deepseek", "deepseek-harness", "dsh"].includes(provider)) return "deepseek";
+      return "codex";
+    };
+    var PROFILE_DEFAULTS = Object.freeze({
+      segmentAiModel: "",
+      segmentAiReasoningEffort: "",
+      segmentAiModelCatalog: [],
+      segmentAiModelCatalogUpdatedAt: 0,
+      segmentAiSkillCatalog: [],
+      segmentAiSkillCatalogUpdatedAt: 0,
+      segmentAiConversations: [],
+      segmentAiWorkspace: { openConversationIds: [], activeConversationId: null },
+      segmentAiSessions: [],
+      segmentAiSchemaVersion: 2
+    });
+    var clone = (value) => JSON.parse(JSON.stringify(value));
+    var isRecord = (value) => Boolean(value && typeof value === "object" && !Array.isArray(value));
+    var normalizeProfile = (value) => {
+      const source = isRecord(value) ? value : {};
+      return Object.fromEntries(Object.entries(PROFILE_DEFAULTS).map(([key, fallback]) => {
+        let normalized = source[key];
+        if (Array.isArray(fallback)) {
+          normalized = Array.isArray(normalized) ? normalized : fallback;
+        } else if (isRecord(fallback)) {
+          normalized = isRecord(normalized) ? normalized : fallback;
+        } else if (typeof fallback === "number") {
+          normalized = Number.isFinite(normalized) && normalized >= 0 ? normalized : fallback;
+        } else if (typeof fallback === "boolean") {
+          normalized = normalized === true;
+        } else {
+          normalized = typeof normalized === "string" ? normalized.trim() : fallback;
+        }
+        return [key, clone(normalized)];
+      }));
+    };
+    var normalizeProviderSettings2 = (settings) => {
+      if (!isRecord(settings)) throw new TypeError("Provider settings must be an object.");
+      for (const key of Object.keys(settings)) {
+        if (key.startsWith("segmentAiMcp")) delete settings[key];
+      }
+      const provider = normalizeProvider2(settings.segmentAiProvider);
+      const storedProfiles = isRecord(settings.segmentAiProviderProfiles) ? settings.segmentAiProviderProfiles : {};
+      const profiles = Object.fromEntries(PROVIDER_DEFINITIONS2.map(({ id }) => [
+        id,
+        normalizeProfile(storedProfiles[id])
+      ]));
+      const activeValues = Object.fromEntries(Object.keys(PROFILE_DEFAULTS).map((key) => [
+        key,
+        Object.prototype.hasOwnProperty.call(settings, key) ? settings[key] : profiles[provider][key]
+      ]));
+      const activeProfile = normalizeProfile(activeValues);
+      Object.assign(settings, activeProfile);
+      profiles[provider] = clone(activeProfile);
+      settings.segmentAiProvider = provider;
+      settings.segmentAiProviderProfiles = profiles;
+      for (const { pathSetting } of PROVIDER_DEFINITIONS2) {
+        settings[pathSetting] = String(settings[pathSetting] || "").trim();
+      }
+      return settings;
+    };
+    var switchProviderSettings2 = (settings, nextProvider) => {
+      normalizeProviderSettings2(settings);
+      const provider = normalizeProvider2(nextProvider);
+      if (settings.segmentAiProvider === provider) return provider;
+      Object.assign(settings, clone(settings.segmentAiProviderProfiles[provider]));
+      settings.segmentAiProvider = provider;
+      return provider;
+    };
+    module2.exports = {
+      PROVIDER_DEFINITIONS: PROVIDER_DEFINITIONS2,
+      normalizeProvider: normalizeProvider2,
+      normalizeProviderSettings: normalizeProviderSettings2,
+      switchProviderSettings: switchProviderSettings2
+    };
+  }
+});
+
+// segment-ai/machine-cli-settings.js
+var require_machine_cli_settings = __commonJS({
+  "segment-ai/machine-cli-settings.js"(exports2, module2) {
+    var os = require("os");
+    var { PROVIDER_DEFINITIONS: PROVIDER_DEFINITIONS2, normalizeProvider: normalizeProvider2 } = require_provider_settings();
+    var isRecord = (value) => Boolean(value && typeof value === "object" && !Array.isArray(value));
+    var own = (record, key) => Object.prototype.hasOwnProperty.call(record, key);
+    var pathText = (value) => typeof value === "string" ? value.trim() : "";
+    var machineContext = ({
+      platform = process.platform,
+      hostname = os.hostname(),
+      homeDirectory = os.homedir()
+    } = {}) => ({ platform, homeDirectory, key: `${platform}:${hostname}` });
+    var isWindowsAbsolute = (value) => /^[a-z]:[\\/]/i.test(value) || /^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+/.test(value);
+    var legacyPath = (settings, provider, context) => {
+      const definition = PROVIDER_DEFINITIONS2.find(({ id }) => id === provider);
+      const original = pathText(settings[definition.pathSetting]);
+      let candidate = original;
+      if (/^["']/.test(candidate)) {
+        if (candidate.length < 2 || candidate.at(-1) !== candidate[0]) return "";
+        candidate = candidate.slice(1, -1);
+      }
+      const windowsAbsolute = isWindowsAbsolute(candidate);
+      const tildePath = /^~[\\/].+/.test(candidate);
+      const compatible = context.platform === "win32" ? windowsAbsolute || tildePath && isWindowsAbsolute(String(context.homeDirectory)) : !windowsAbsolute && (candidate.startsWith("/") || /^~\/.+/.test(candidate));
+      return compatible ? original : "";
+    };
+    var requireSettings = (settings) => {
+      if (!isRecord(settings)) throw new TypeError("Machine CLI settings must be an object.");
+    };
+    var migrateMachineCliPaths2 = (settings, options = {}) => {
+      requireSettings(settings);
+      if (isRecord(settings.segmentAiCliPathsByMachine)) return settings;
+      const context = machineContext(options);
+      settings.segmentAiCliPathsByMachine = {
+        [context.key]: Object.fromEntries(PROVIDER_DEFINITIONS2.map(({ id }) => [
+          id,
+          legacyPath(settings, id, context)
+        ]))
+      };
+      return settings;
+    };
+    var getMachineCliPath2 = (settings, provider, options = {}) => {
+      requireSettings(settings);
+      const id = normalizeProvider2(provider);
+      const context = machineContext(options);
+      const map = settings.segmentAiCliPathsByMachine;
+      if (!isRecord(map)) return legacyPath(settings, id, context);
+      const paths = own(map, context.key) && isRecord(map[context.key]) ? map[context.key] : {};
+      return own(paths, id) ? pathText(paths[id]) : "";
+    };
+    var setMachineCliPath2 = (settings, provider, value, options = {}) => {
+      requireSettings(settings);
+      const id = normalizeProvider2(provider);
+      const context = machineContext(options);
+      const configuredPath = pathText(value);
+      migrateMachineCliPaths2(settings, options);
+      const map = settings.segmentAiCliPathsByMachine;
+      if (!own(map, context.key) || !isRecord(map[context.key])) map[context.key] = {};
+      map[context.key][id] = configuredPath;
+      const definition = PROVIDER_DEFINITIONS2.find((entry) => entry.id === id);
+      settings[definition.pathSetting] = configuredPath;
+      return configuredPath;
+    };
+    module2.exports = { getMachineCliPath: getMachineCliPath2, setMachineCliPath: setMachineCliPath2, migrateMachineCliPaths: migrateMachineCliPaths2 };
   }
 });
 
@@ -8361,9 +9141,19 @@ var {
   normalizeCodexModelCatalog,
   resolveCodexReasoningProfile
 } = require_codex_app_server_runtime();
+var { CliAgentRuntime } = require_cli_agent_runtime();
+var { discoverCli } = require_cli_discovery();
 var {
-  normalizeServerNames
-} = require_mcp_capability_registry();
+  PROVIDER_DEFINITIONS,
+  normalizeProvider,
+  normalizeProviderSettings,
+  switchProviderSettings
+} = require_provider_settings();
+var {
+  getMachineCliPath,
+  setMachineCliPath,
+  migrateMachineCliPaths
+} = require_machine_cli_settings();
 var {
   InterpretationWorkspaceController
 } = require_workspace_controller();
@@ -8439,13 +9229,12 @@ var DEFAULT_SETTINGS = {
   githubProxyUrl: DEFAULT_GITHUB_PROXY_URL,
   autoSyncOnStartup: false,
   segmentAiEnabled: false,
+  segmentAiProvider: "codex",
   segmentAiCodexPath: "",
+  segmentAiClaudePath: "",
+  segmentAiDeepseekPath: "",
   segmentAiModel: "",
   segmentAiReasoningEffort: "",
-  segmentAiMcpEnabled: false,
-  segmentAiMcpEnabledServers: [],
-  segmentAiMcpServerCatalog: [],
-  segmentAiMcpServerCatalogUpdatedAt: 0,
   segmentAiPrompt: DEFAULT_INTERPRETATION_PROMPT,
   segmentAiModelCatalog: [],
   segmentAiModelCatalogUpdatedAt: 0,
@@ -8561,24 +9350,16 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.settings.segmentAiModel = String(
       this.settings.segmentAiModel || ""
     ).trim();
-    this.settings.segmentAiReasoningEffort = coerceCodexReasoningEffort(
+    this.settings.segmentAiReasoningEffort = normalizeProvider(this.settings.segmentAiProvider) === "codex" ? coerceCodexReasoningEffort(
       this.settings.segmentAiModelCatalog,
       this.settings.segmentAiModel,
       this.settings.segmentAiReasoningEffort
-    );
+    ) : String(this.settings.segmentAiReasoningEffort || "").trim();
     this.settings.segmentAiModelCatalogUpdatedAt = Number.isFinite(
       this.settings.segmentAiModelCatalogUpdatedAt
     ) ? this.settings.segmentAiModelCatalogUpdatedAt : 0;
-    this.settings.segmentAiMcpEnabled = this.settings.segmentAiMcpEnabled === true;
-    this.settings.segmentAiMcpEnabledServers = normalizeServerNames(
-      this.settings.segmentAiMcpEnabledServers
-    );
-    this.settings.segmentAiMcpServerCatalog = normalizeServerNames(
-      this.settings.segmentAiMcpServerCatalog
-    );
-    this.settings.segmentAiMcpServerCatalogUpdatedAt = Number.isFinite(
-      this.settings.segmentAiMcpServerCatalogUpdatedAt
-    ) ? this.settings.segmentAiMcpServerCatalogUpdatedAt : 0;
+    normalizeProviderSettings(this.settings);
+    migrateMachineCliPaths(this.settings);
     this.progressTimers = /* @__PURE__ */ new Map();
     this.readingToolbarRenderTimer = null;
     this.syncInProgress = false;
@@ -8607,7 +9388,6 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.segmentAiSkillChangeUnsubscribe = null;
     this.segmentAiModelDiscoveryPromise = null;
     this.segmentAiSkillDiscoveryPromise = null;
-    this.segmentAiMcpBackgroundPromise = null;
     this.segmentAiEphemeralPersistTimer = null;
     this.registerView?.(
       LACAN_INTERPRETATION_VIEW_TYPE,
@@ -8618,7 +9398,6 @@ module.exports = class LacanTranslationHelper extends Plugin {
       (leaf) => new LacanBilingualReadingView(leaf, this)
     );
     this.initializeSegmentAi();
-    this.scheduleSegmentAiMcpBackgroundCheck();
     this.initializeFrenchLookup();
     this.initializeTranslationInlineEditing();
     registerPdfReading(this);
@@ -8920,15 +9699,9 @@ module.exports = class LacanTranslationHelper extends Plugin {
         workspace: this.settings.segmentAiWorkspace,
         maxOpenSessions: this.settings.segmentAiMaxOpenSessions
       });
-      this.segmentAiRuntime = new CodexAppServerRuntime({
-        vaultRoot: this.getVaultBasePath(),
-        pluginVersion: this.manifest?.version || "0.0.0",
-        cliPath: this.settings.segmentAiCodexPath || "",
-        defaultModel: this.settings.segmentAiModel || "",
-        defaultReasoningEffort: this.settings.segmentAiReasoningEffort || "",
-        mcpEnabled: this.settings.segmentAiMcpEnabled,
-        enabledMcpServerNames: this.settings.segmentAiMcpEnabledServers
-      });
+      this.segmentAiRuntime = this.createSegmentAiRuntime();
+      const provider = normalizeProvider(this.settings.segmentAiProvider);
+      const runtime = this.segmentAiRuntime;
       this.segmentAiSkillCatalog = new CodexSkillCatalog({
         vaultRoot: this.getVaultBasePath(),
         runtime: this.segmentAiRuntime,
@@ -8946,8 +9719,11 @@ module.exports = class LacanTranslationHelper extends Plugin {
         store: this.segmentAiWorkspaceStore,
         runtime: this.segmentAiRuntime,
         skillCatalog: this.segmentAiSkillCatalog,
-        onState: (state) => this.updateSegmentAiState(state),
+        onState: (state) => {
+          if (this.segmentAiRuntime === runtime) this.updateSegmentAiState(state);
+        },
         persistWorkspace: async ({ conversations, workspace }) => {
+          if (this.segmentAiRuntime !== runtime || normalizeProvider(this.settings.segmentAiProvider) !== provider) return;
           this.settings.segmentAiConversations = conversations;
           this.settings.segmentAiWorkspace = workspace;
           this.settings.segmentAiSchemaVersion = 2;
@@ -8979,16 +9755,12 @@ module.exports = class LacanTranslationHelper extends Plugin {
       getToken: () => this.getEudicToken()
     });
     this.frenchLookupTranslator = new FrenchSelectionTranslator({
-      createRuntime: () => new CodexAppServerRuntime({
-        vaultRoot: this.getVaultBasePath(),
-        pluginVersion: this.manifest?.version || "0.0.0",
-        cliPath: this.settings.segmentAiCodexPath || "",
-        defaultModel: this.settings.segmentAiModel || "",
+      getReasoningEffort: () => normalizeProvider(this.settings.segmentAiProvider) === "deepseek" ? "" : "low",
+      createRuntime: () => this.createSegmentAiRuntime({
         defaultReasoningEffort: "low",
         ephemeralThreads: true,
         requestTimeoutMs: 15e3,
-        turnTimeoutMs: 6e4,
-        mcpEnabled: false
+        turnTimeoutMs: 6e4
       })
     });
     this.frenchLookupPopup = new FrenchLookupPopup(this, {
@@ -9002,7 +9774,103 @@ module.exports = class LacanTranslationHelper extends Plugin {
     const name = String(this.settings.frenchLookupSecretName || "lacan-eudic-api-token");
     return this.app.secretStorage?.getSecret(name) || this.eudicSessionToken || "";
   }
-  async resetSegmentAiRuntime({ scheduleMcpCheck = true } = {}) {
+  async setSegmentAiCodexPath(value) {
+    return this.setSegmentAiCliPath("codex", value);
+  }
+  getSegmentAiCliPath(provider = this.settings.segmentAiProvider) {
+    return getMachineCliPath(this.settings, normalizeProvider(provider));
+  }
+  createSegmentAiRuntime(overrides = {}) {
+    const provider = normalizeProvider(this.settings.segmentAiProvider);
+    const Runtime = provider === "codex" ? CodexAppServerRuntime : CliAgentRuntime;
+    return new Runtime({
+      provider,
+      vaultRoot: this.getVaultBasePath(),
+      pluginVersion: this.manifest?.version || "0.0.0",
+      cliPath: this.getSegmentAiCliPath(provider),
+      defaultModel: provider === "deepseek" ? "" : this.settings.segmentAiModel || "",
+      defaultReasoningEffort: this.settings.segmentAiReasoningEffort || "",
+      ...overrides,
+      ...provider === "deepseek" ? { defaultModel: "", defaultReasoningEffort: "" } : {}
+    });
+  }
+  setSegmentAiProvider(value) {
+    const task = (this.segmentAiProviderSwitchPromise || Promise.resolve()).catch(() => {
+    }).then(() => this.performSegmentAiProviderSwitch(value));
+    this.segmentAiProviderSwitchPromise = task;
+    const clear = () => {
+      if (this.segmentAiProviderSwitchPromise === task) this.segmentAiProviderSwitchPromise = null;
+    };
+    task.then(clear, clear);
+    return task;
+  }
+  async performSegmentAiProviderSwitch(value) {
+    const provider = normalizeProvider(value);
+    if (provider === normalizeProvider(this.settings.segmentAiProvider)) return;
+    if (this.segmentAiEphemeralPersistTimer) {
+      clearTimeout(this.segmentAiEphemeralPersistTimer);
+      this.segmentAiEphemeralPersistTimer = null;
+    }
+    await this.segmentAiRuntime?.shutdown();
+    await this.persistSegmentAiWorkspaceSnapshot();
+    this.segmentAiRuntime = null;
+    switchProviderSettings(this.settings, provider);
+    await this.saveSettings();
+    this.frenchLookupTranslator?.destroy();
+    await this.resetSegmentAiRuntime();
+  }
+  setSegmentAiCliPath(provider, value) {
+    const task = (this.segmentAiProviderSwitchPromise || Promise.resolve()).catch(() => {
+    }).then(() => this.performSetSegmentAiCliPath(provider, value));
+    this.segmentAiProviderSwitchPromise = task;
+    const clear = () => {
+      if (this.segmentAiProviderSwitchPromise === task) this.segmentAiProviderSwitchPromise = null;
+    };
+    task.then(clear, clear);
+    return task;
+  }
+  async performSetSegmentAiCliPath(provider, value) {
+    provider = normalizeProvider(provider);
+    const cliPath = String(value || "").trim();
+    if (cliPath === this.getSegmentAiCliPath(provider)) return;
+    setMachineCliPath(this.settings, provider, cliPath);
+    if (this.segmentAiCliDetections) delete this.segmentAiCliDetections[provider];
+    if (provider !== normalizeProvider(this.settings.segmentAiProvider)) {
+      const profile = this.settings.segmentAiProviderProfiles?.[provider];
+      if (profile) {
+        profile.segmentAiModelCatalog = [];
+        profile.segmentAiModelCatalogUpdatedAt = 0;
+        profile.segmentAiSkillCatalog = [];
+        profile.segmentAiSkillCatalogUpdatedAt = 0;
+      }
+      await this.saveSettings();
+      return;
+    }
+    this.segmentAiModelDiscoveryPromise = null;
+    this.settings.segmentAiModelCatalog = [];
+    this.settings.segmentAiModelCatalogUpdatedAt = 0;
+    this.settings.segmentAiSkillCatalog = [];
+    this.settings.segmentAiSkillCatalogUpdatedAt = 0;
+    await this.saveSettings();
+    this.frenchLookupTranslator?.destroy();
+    await this.resetSegmentAiRuntime();
+  }
+  async discoverSegmentAiCli(provider) {
+    provider = normalizeProvider(provider);
+    this.segmentAiCliDetections ||= {};
+    const configuredPath = this.getSegmentAiCliPath(provider);
+    const state = { status: "checking", configuredPath };
+    this.segmentAiCliDetections[provider] = state;
+    try {
+      const result = await discoverCli(provider, { configuredPath });
+      Object.assign(state, { status: "ready", path: result.path, version: result.version, source: result.source, versionError: result.versionError });
+    } catch (error) {
+      Object.assign(state, { status: "failed", message: error.message });
+    }
+    return state;
+  }
+  async resetSegmentAiRuntime() {
+    this.segmentAiModelDiscoveryPromise = null;
     if (this.segmentAiRuntime) {
       await this.segmentAiRuntime.shutdown();
     }
@@ -9013,65 +9881,8 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.segmentAiWorkspaceStore = null;
     this.segmentAiSkillCatalog = null;
     this.segmentAiSkillDiscoveryPromise = null;
-    this.segmentAiMcpBackgroundPromise = null;
     this.initializeSegmentAi();
-    if (scheduleMcpCheck) {
-      this.scheduleSegmentAiMcpBackgroundCheck();
-    }
     this.refreshSegmentAiEntrances();
-  }
-  getSegmentAiMcpServerCatalog() {
-    return normalizeServerNames([
-      ...this.settings.segmentAiMcpServerCatalog,
-      ...this.settings.segmentAiMcpEnabledServers
-    ]);
-  }
-  scheduleSegmentAiMcpBackgroundCheck() {
-    if (!this.settings.segmentAiEnabled || !this.segmentAiRuntime) {
-      return null;
-    }
-    const task = this.runSegmentAiMcpBackgroundCheck();
-    void task.catch(() => {
-    });
-    return task;
-  }
-  runSegmentAiMcpBackgroundCheck() {
-    if (this.segmentAiMcpBackgroundPromise) {
-      return this.segmentAiMcpBackgroundPromise;
-    }
-    const runtime = this.segmentAiRuntime;
-    if (!runtime) {
-      return Promise.reject(new Error("本地 Agent 运行时尚未初始化。"));
-    }
-    const task = (async () => {
-      const report = await runtime.preflightMcpServers();
-      if (this.segmentAiRuntime !== runtime) {
-        return report;
-      }
-      this.settings.segmentAiMcpServerCatalog = normalizeServerNames(
-        report.configuredServerNames
-      );
-      this.settings.segmentAiMcpServerCatalogUpdatedAt = Number(
-        report.checkedAt || Date.now()
-      );
-      await this.saveSettings();
-      return report;
-    })();
-    this.segmentAiMcpBackgroundPromise = task;
-    const clear = () => {
-      if (this.segmentAiMcpBackgroundPromise === task) {
-        this.segmentAiMcpBackgroundPromise = null;
-      }
-    };
-    task.then(clear, clear);
-    return task;
-  }
-  async refreshSegmentAiMcpServers() {
-    if (!this.settings.segmentAiEnabled) {
-      throw new Error("请先启用分段 AI 功能。");
-    }
-    await this.resetSegmentAiRuntime({ scheduleMcpCheck: false });
-    return this.runSegmentAiMcpBackgroundCheck();
   }
   getSegmentAiModelCatalog() {
     return normalizeCodexModelCatalog(this.settings.segmentAiModelCatalog);
@@ -9080,29 +9891,36 @@ module.exports = class LacanTranslationHelper extends Plugin {
     if (this.segmentAiModelDiscoveryPromise) {
       return this.segmentAiModelDiscoveryPromise;
     }
-    this.segmentAiModelDiscoveryPromise = (async () => {
+    const discovery = (async () => {
       if (!this.segmentAiRuntime) {
         this.initializeSegmentAi();
       }
       if (!this.segmentAiRuntime) {
         throw new Error("本地 Agent 运行时尚未初始化。");
       }
-      const models = await this.segmentAiRuntime.listModels();
+      const runtime = this.segmentAiRuntime;
+      const models = await runtime.listModels();
+      if (this.segmentAiRuntime !== runtime || this.segmentAiModelDiscoveryPromise !== discovery) {
+        throw new Error("Agent 配置已变化，请刷新当前 Agent 的模型与推理强度。");
+      }
       this.settings.segmentAiModelCatalog = models;
       this.settings.segmentAiReasoningEffort = coerceCodexReasoningEffort(
         models,
         this.settings.segmentAiModel,
         this.settings.segmentAiReasoningEffort
       );
-      this.segmentAiRuntime.defaultReasoningEffort = this.settings.segmentAiReasoningEffort;
+      runtime.defaultReasoningEffort = this.settings.segmentAiReasoningEffort;
       this.settings.segmentAiModelCatalogUpdatedAt = Date.now();
       await this.saveSettings();
       return models;
     })();
+    this.segmentAiModelDiscoveryPromise = discovery;
     try {
-      return await this.segmentAiModelDiscoveryPromise;
+      return await discovery;
     } finally {
-      this.segmentAiModelDiscoveryPromise = null;
+      if (this.segmentAiModelDiscoveryPromise === discovery) {
+        this.segmentAiModelDiscoveryPromise = null;
+      }
     }
   }
   async discoverSegmentAiSkills({ forceReload = true } = {}) {
@@ -9316,6 +10134,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
       pluginId: this.manifest?.id || "lacan-translation-helper",
       pluginVersion: this.manifest?.version || "unknown",
       enabled: Boolean(this.settings.segmentAiEnabled),
+      provider: normalizeProvider(this.settings.segmentAiProvider),
       status: activeConversation?.status || "empty",
       errorCode: activeConversation?.error?.code || null,
       openConversationCount: this.segmentAiState?.openConversationIds?.length || 0,
@@ -11778,6 +12597,63 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
       }
     }));
   }
+  renderSegmentAiProviderSettings(containerEl) {
+    const plugin = this.plugin;
+    const selected = normalizeProvider(plugin.settings.segmentAiProvider);
+    new Setting(containerEl).setName("CLI 工具").setDesc("分段解读和法语语境翻译使用此工具。每种工具独立保存会话、草稿和模型设置；切换时停止当前生成。").addDropdown((dropdown) => {
+      for (const provider of PROVIDER_DEFINITIONS) {
+        dropdown.addOption(provider.id, provider.label);
+      }
+      dropdown.setValue(selected).onChange(async (value) => {
+        dropdown.setDisabled(true);
+        try {
+          await plugin.setSegmentAiProvider(value);
+        } catch (error) {
+          new Notice(`切换 CLI 失败：${error.message}`);
+        } finally {
+          this.display();
+        }
+      });
+    }).addButton((button) => button.setButtonText("重新检测").onClick(async () => {
+      button.setDisabled(true).setButtonText("检测中...");
+      await Promise.allSettled(PROVIDER_DEFINITIONS.map(({ id }) => plugin.discoverSegmentAiCli(id)));
+      this.display();
+    }));
+    const sourceLabels = { custom: "自定义路径", path: "PATH", "login-shell": "登录 Shell", common: "常见安装目录", application: "应用内置" };
+    for (const provider of PROVIDER_DEFINITIONS) {
+      const card = containerEl.createEl("details", { cls: "lacan-ai-cli-card" });
+      if (provider.id === selected) card.setAttribute("open", "");
+      const summary = card.createEl("summary");
+      summary.createSpan({ text: provider.label + (provider.id === selected ? " · 当前使用" : "") });
+      const status = summary.createSpan({ cls: "lacan-ai-cli-status" });
+      const resolvedPath = card.createEl("code", { cls: "lacan-ai-cli-resolved-path" });
+      const update = (state) => {
+        status.textContent = state?.status === "ready" ? `${state.version || state.versionError || "已找到"} · ${sourceLabels[state.source] || "自动发现"}` : state?.status === "failed" ? "未找到或无法启动" : "正在检测...";
+        status.setAttribute("data-status", state?.status || "checking");
+        resolvedPath.textContent = state?.status === "ready" ? state.path : state?.message || "";
+      };
+      let pathChangeTimer;
+      new Setting(card).setClass("lacan-ai-setting-wide").setName(`${provider.label} 路径`).setDesc("此电脑的可选 CLI 路径。留空自动检测 PATH、登录 Shell 和常见安装目录；支持 Windows 与 macOS。").addText((text) => text.setPlaceholder(process.platform === "win32" ? `C:\\Users\\用户名\\AppData\\Roaming\\npm\\${provider.id === "deepseek" ? "dsh" : provider.id}.cmd` : provider.placeholder).setValue(plugin.getSegmentAiCliPath(provider.id)).onChange((value) => {
+        clearTimeout(pathChangeTimer);
+        pathChangeTimer = setTimeout(async () => {
+          try {
+            await plugin.setSegmentAiCliPath(provider.id, value);
+            const state = await plugin.discoverSegmentAiCli(provider.id);
+            if (plugin.segmentAiCliDetections?.[provider.id] === state) update(state);
+          } catch (error) {
+            new Notice(`保存 CLI 路径失败：${error.message}`);
+          }
+        }, 500);
+      }));
+      const detection = plugin.segmentAiCliDetections?.[provider.id];
+      update(detection);
+      if (!detection || detection.configuredPath !== plugin.getSegmentAiCliPath(provider.id)) {
+        void plugin.discoverSegmentAiCli(provider.id).then((state) => {
+          if (plugin.segmentAiCliDetections?.[provider.id] === state) update(state);
+        });
+      }
+    }
+  }
   renderSegmentAiSettings(parentEl) {
     const containerEl = parentEl.createDiv("lacan-ai-settings");
     containerEl.createEl("h3", { text: "AI 功能（本地 Agent）" });
@@ -11786,15 +12662,15 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
       text: "点击译文分段旁的“Ф”运行 AI 解读；点击原文分段旁的同一按钮，直接显示该 ID 的项目译文、完整注释与建言，并快速生成原文试译。"
     });
     descriptionEl.createEl("p", {
-      text: "译文解读使用下方提示词，由 Agent 按任务选用当前项目和自身已安装的 Skills；原文解析使用专用翻译流程，先查看试译与项目版本，需要词义、双关或语境分析时可继续追问。两种功能分别保存会话。"
+      text: "译文解读使用下方提示词，Codex 可按任务选用已发现的 Skills；原文解析使用专用翻译流程，先查看试译与项目版本，需要词义、双关或语境分析时可继续追问。两种功能分别保存会话。"
     });
     descriptionEl.createEl("p", {
       text: "本地 Agent 指编排、文件检索和权限控制在本机运行，不等于使用本地模型。发送给模型的上下文和 Agent 读取的材料仍可能离开本机。"
     });
     descriptionEl.createEl("p", {
-      text: "所有 AI 功能保持只读，不创建或修改笔记。译文解读每次回答必须使用内置 Web Search，外部来源只接受法语、德语或英语网页；MCP 默认关闭，只能从下方白名单显式开启。原文解析只做翻译与直接对话，不预先检索。Apps、Plugins 保持禁用，不会自动回退到 OpenAI API。"
+      text: "所有 AI 功能保持只读，不创建或修改笔记。译文解读每次回答必须使用内置 Web Search，外部来源只接受法语、德语或英语网页；所选 CLI 未提供网页工具时，回答须明确说明。原文解析只做翻译与直接对话。各 CLI 的工具支持范围见下方说明。"
     });
-    new Setting(containerEl).setName("启用分段 AI 功能").setDesc("默认关闭。关闭后不会启动 Codex App Server，也不会影响原有插件功能。").addToggle((toggle) => {
+    new Setting(containerEl).setName("启用分段 AI 功能").setDesc("默认关闭。关闭后不会为分段解读启动 CLI；法语取词的语境翻译使用所选 CLI 单独运行。").addToggle((toggle) => {
       toggle.setValue(Boolean(this.plugin.settings.segmentAiEnabled)).onChange(async (value) => {
         this.plugin.settings.segmentAiEnabled = value;
         await this.plugin.saveSettings();
@@ -11817,183 +12693,127 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
         this.display();
       });
     });
-    new Setting(containerEl).setClass("lacan-ai-setting-wide").setName("Codex CLI 路径").setDesc("可选。填写 codex 可执行文件的绝对路径；留空时从 Obsidian 进程的 PATH 中查找。插件不会自动安装 Codex。").addText((text) => {
-      text.setPlaceholder("/opt/homebrew/bin/codex").setValue(this.plugin.settings.segmentAiCodexPath || "").onChange(async (value) => {
-        const cliPath = value.trim();
-        if (cliPath === this.plugin.settings.segmentAiCodexPath) return;
-        this.plugin.settings.segmentAiCodexPath = cliPath;
-        this.plugin.settings.segmentAiSkillCatalog = [];
-        this.plugin.settings.segmentAiSkillCatalogUpdatedAt = 0;
-        await this.plugin.saveSettings();
-        await this.plugin.resetSegmentAiRuntime();
-      });
-    });
-    const modelCatalog = this.plugin.getSegmentAiModelCatalog();
-    const selectedModel = String(this.plugin.settings.segmentAiModel || "").trim();
-    const modelCatalogUpdatedAt = Number(
-      this.plugin.settings.segmentAiModelCatalogUpdatedAt || 0
-    );
-    const modelCatalogStatus = modelCatalog.length > 0 ? `已从本机 Codex 获取 ${modelCatalog.length} 个模型${modelCatalogUpdatedAt ? `，最近刷新：${new Date(modelCatalogUpdatedAt).toLocaleString()}` : ""}。` : "尚未获取模型列表。";
-    new Setting(containerEl).setClass("lacan-ai-setting-wide").setName("Agent 模型").setDesc(
-      `列表由本机 Codex App Server 的 model/list 提供，不经过 Claudian。${modelCatalogStatus}`
-    ).addDropdown((dropdown) => {
-      dropdown.addOption("", "使用 Codex 默认模型");
-      for (const model of modelCatalog) {
-        const label = model.displayName === model.model ? model.displayName : `${model.displayName} · ${model.model}`;
-        dropdown.addOption(
-          model.model,
-          model.isDefault ? `${label}（Codex 默认）` : label
-        );
-      }
-      if (selectedModel && !modelCatalog.some((model) => model.model === selectedModel)) {
-        dropdown.addOption(selectedModel, `${selectedModel}（已保存，当前未发现）`);
-      }
-      dropdown.setValue(selectedModel).onChange(async (value) => {
-        this.plugin.settings.segmentAiModel = String(value || "").trim();
-        this.plugin.settings.segmentAiReasoningEffort = coerceCodexReasoningEffort(
-          modelCatalog,
-          this.plugin.settings.segmentAiModel,
-          this.plugin.settings.segmentAiReasoningEffort
-        );
-        await this.plugin.saveSettings();
-        await this.plugin.resetSegmentAiRuntime();
-        this.display();
-      });
-    }).addButton((button) => {
-      button.setButtonText("刷新模型").onClick(async () => {
-        button.setDisabled(true);
-        button.setButtonText("获取中...");
-        try {
-          await this.plugin.resetSegmentAiRuntime();
-          const models = await this.plugin.discoverSegmentAiModels();
-          new Notice(`已从 Codex 获取 ${models.length} 个可用模型。`);
-        } catch (error) {
-          new Notice(
-            `模型列表获取失败：${error?.message || "请检查 Codex CLI 路径和登录状态。"}`
-          );
-        } finally {
-          button.setDisabled(false);
-          button.setButtonText("刷新模型");
-          this.display();
-        }
-      });
-    });
-    const reasoningProfile = resolveCodexReasoningProfile(
-      modelCatalog,
-      selectedModel
-    );
-    const selectedReasoningEffort = coerceCodexReasoningEffort(
-      modelCatalog,
-      selectedModel,
-      this.plugin.settings.segmentAiReasoningEffort
-    );
-    const defaultReasoningLabel = reasoningProfile?.defaultReasoningEffort ? REASONING_EFFORT_LABELS[reasoningProfile.defaultReasoningEffort] || reasoningProfile.defaultReasoningEffort : "";
-    const reasoningDescription = reasoningProfile ? `${reasoningProfile.model} 支持的强度来自 model/list；留空时使用模型默认值${defaultReasoningLabel ? ` ${defaultReasoningLabel}` : ""}。所选强度会作为 turn/start 的 effort 发送。` : "尚未取得当前模型的推理强度目录；可先刷新模型。留空时由 Codex 选择默认值。";
-    new Setting(containerEl).setClass("lacan-ai-setting-wide").setName("推理强度").setDesc(reasoningDescription).addDropdown((dropdown) => {
-      dropdown.addOption(
-        "",
-        defaultReasoningLabel ? `跟随模型默认值（${defaultReasoningLabel}）` : "跟随模型默认值"
+    this.renderSegmentAiProviderSettings(containerEl);
+    const provider = normalizeProvider(this.plugin.settings.segmentAiProvider);
+    if (provider === "codex") {
+      const modelCatalog = this.plugin.getSegmentAiModelCatalog();
+      const selectedModel = String(this.plugin.settings.segmentAiModel || "").trim();
+      const modelCatalogUpdatedAt = Number(
+        this.plugin.settings.segmentAiModelCatalogUpdatedAt || 0
       );
-      for (const effort of reasoningProfile?.supportedReasoningEfforts || []) {
-        dropdown.addOption(
-          effort.value,
-          REASONING_EFFORT_LABELS[effort.value] || effort.value
-        );
-      }
-      if (selectedReasoningEffort && !reasoningProfile?.supportedReasoningEfforts.some(
-        (effort) => effort.value === selectedReasoningEffort
-      )) {
-        dropdown.addOption(
-          selectedReasoningEffort,
-          `${REASONING_EFFORT_LABELS[selectedReasoningEffort] || selectedReasoningEffort}（已保存，待刷新验证）`
-        );
-      }
-      dropdown.setValue(selectedReasoningEffort).onChange(async (value) => {
-        this.plugin.settings.segmentAiReasoningEffort = String(
-          value || ""
-        ).trim();
-        await this.plugin.saveSettings();
-        await this.plugin.resetSegmentAiRuntime();
-        this.display();
-      });
-    });
-    const mcpCatalog = this.plugin.getSegmentAiMcpServerCatalog();
-    const mcpEnabledServerSet = new Set(
-      this.plugin.settings.segmentAiMcpEnabledServers
-    );
-    const mcpDiagnostics = this.plugin.segmentAiRuntime?.getDiagnostics?.().mcpBackgroundCheck;
-    const mcpStatusLabels = {
-      idle: "等待后台检查",
-      checking: "正在后台检查",
-      disabled: "全部关闭，未连接任何 MCP",
-      ready: "已完成后台检查",
-      degraded: "检查完成，部分服务不可用",
-      unavailable: "白名单服务未在 Codex 配置中发现",
-      failed: "后台检查失败，可查看脱敏诊断"
-    };
-    const mcpStatus = mcpStatusLabels[mcpDiagnostics?.status] || "尚未执行后台检查";
-    const mcpCatalogUpdatedAt = Number(
-      this.plugin.settings.segmentAiMcpServerCatalogUpdatedAt || 0
-    );
-    containerEl.createEl("h4", { text: "MCP 服务（默认关闭）" });
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text: "核心规则：任何没有在插件白名单中同时配置并开启的外部 MCP，在插件启动和 Agent thread 中都不会建立连接。插件只保存服务名称和开关，不保存命令、URL 或凭据；后台只读取 Codex 配置名称，并且只连接、检查白名单中已开启的服务。开启一个服务会让 Agent 看见该服务当前暴露的全部工具，插件不能替服务保证这些工具只读，因此只应开启你信任的服务。"
-    });
-    new Setting(containerEl).setName("启用 MCP 服务").setDesc(
-      `${mcpStatus}${mcpCatalogUpdatedAt ? `；清单刷新于 ${new Date(mcpCatalogUpdatedAt).toLocaleString()}` : ""}。总开关关闭时，即使下方保存了选择，也不会连接或检查任何 MCP。`
-    ).addToggle((toggle) => {
-      toggle.setValue(Boolean(this.plugin.settings.segmentAiMcpEnabled)).onChange(async (value) => {
-        this.plugin.settings.segmentAiMcpEnabled = value;
-        await this.plugin.saveSettings();
-        await this.plugin.resetSegmentAiRuntime();
-        this.display();
-      });
-    }).addButton((button) => {
-      button.setButtonText("刷新清单").setDisabled(!this.plugin.settings.segmentAiEnabled).onClick(async () => {
-        button.setDisabled(true);
-        button.setButtonText("后台检查中...");
-        try {
-          const report = await this.plugin.refreshSegmentAiMcpServers();
-          new Notice(
-            `已发现 ${report.configuredServerNames.length} 个 MCP；检查 ${report.checkedServerNames.length} 个已开启服务。`
+      const modelCatalogCliPath = this.plugin.segmentAiRuntime?.getDiagnostics?.().cliPath || this.plugin.segmentAiCliDetections?.codex?.path || this.plugin.getSegmentAiCliPath("codex") || "自动检测";
+      const modelCatalogStatus = modelCatalog.length > 0 ? `已从本机 Codex 获取 ${modelCatalog.length} 个模型${modelCatalogUpdatedAt ? `，最近刷新：${new Date(modelCatalogUpdatedAt).toLocaleString()}` : ""}。` : "尚未获取模型列表。";
+      new Setting(containerEl).setClass("lacan-ai-setting-wide").setName("Agent 模型").setDesc(
+        `列表由本机 Codex App Server 的 model/list 提供，同时读取各模型支持的推理强度。CLI：${modelCatalogCliPath}。${modelCatalogStatus}`
+      ).addDropdown((dropdown) => {
+        dropdown.addOption("", "使用 Codex 默认模型");
+        for (const model of modelCatalog) {
+          const label = model.displayName === model.model ? model.displayName : `${model.displayName} · ${model.model}`;
+          dropdown.addOption(
+            model.model,
+            model.isDefault ? `${label}（Codex 默认）` : label
           );
-        } catch (error) {
-          new Notice(
-            `MCP 清单刷新失败：${error?.message || "请查看脱敏诊断。"}`
-          );
-        } finally {
-          button.setDisabled(false);
-          button.setButtonText("刷新清单");
-          this.display();
         }
-      });
-    });
-    if (mcpCatalog.length === 0) {
-      containerEl.createEl("p", {
-        cls: "setting-item-description",
-        text: this.plugin.settings.segmentAiEnabled ? "尚未发现本机 Codex 的 MCP 配置；后台完成后重新打开此设置页，或点击“刷新清单”。" : "启用分段 AI 功能后，插件才会在后台读取本机 Codex 的 MCP 名称。"
-      });
-    }
-    for (const serverName of mcpCatalog) {
-      new Setting(containerEl).setName(serverName).setDesc("关闭时会在每个 Agent thread 的配置中明确写入 enabled=false；开启时授权该服务的全部工具。").addToggle((toggle) => {
-        toggle.setValue(mcpEnabledServerSet.has(serverName)).setDisabled(!this.plugin.settings.segmentAiMcpEnabled).onChange(async (value) => {
-          const next = new Set(
-            this.plugin.settings.segmentAiMcpEnabledServers
+        if (selectedModel && !modelCatalog.some((model) => model.model === selectedModel)) {
+          dropdown.addOption(selectedModel, `${selectedModel}（已保存，当前未发现）`);
+        }
+        dropdown.setValue(selectedModel).onChange(async (value) => {
+          this.plugin.settings.segmentAiModel = String(value || "").trim();
+          this.plugin.settings.segmentAiReasoningEffort = coerceCodexReasoningEffort(
+            modelCatalog,
+            this.plugin.settings.segmentAiModel,
+            this.plugin.settings.segmentAiReasoningEffort
           );
-          if (value) {
-            next.add(serverName);
-          } else {
-            next.delete(serverName);
+          await this.plugin.saveSettings();
+          await this.plugin.resetSegmentAiRuntime();
+          this.display();
+        });
+      }).addButton((button) => {
+        button.setButtonText("刷新模型").onClick(async () => {
+          button.setDisabled(true);
+          button.setButtonText("获取中...");
+          try {
+            await this.plugin.resetSegmentAiRuntime();
+            const models = await this.plugin.discoverSegmentAiModels();
+            new Notice(`已从 Codex 获取 ${models.length} 个可用模型及其推理强度。`);
+          } catch (error) {
+            new Notice(
+              `模型列表获取失败：${error?.message || "请检查 Codex CLI 路径和登录状态。"}`
+            );
+          } finally {
+            button.setDisabled(false);
+            button.setButtonText("刷新模型");
+            this.display();
           }
-          this.plugin.settings.segmentAiMcpEnabledServers = normalizeServerNames([...next]);
+        });
+      });
+      const reasoningProfile = resolveCodexReasoningProfile(
+        modelCatalog,
+        selectedModel
+      );
+      const selectedReasoningEffort = coerceCodexReasoningEffort(
+        modelCatalog,
+        selectedModel,
+        this.plugin.settings.segmentAiReasoningEffort
+      );
+      const defaultReasoningLabel = reasoningProfile?.defaultReasoningEffort ? REASONING_EFFORT_LABELS[reasoningProfile.defaultReasoningEffort] || reasoningProfile.defaultReasoningEffort : "";
+      const reasoningDescription = reasoningProfile ? `${reasoningProfile.model} 支持的强度来自 model/list；留空时使用模型默认值${defaultReasoningLabel ? ` ${defaultReasoningLabel}` : ""}。所选强度会作为 turn/start 的 effort 发送。` : modelCatalog.length > 0 ? selectedModel ? `当前 CLI 未返回已选模型 ${selectedModel}，无法确认其推理强度。请检查 CLI 路径与版本后刷新模型，或选择列表中的模型。` : "当前模型列表未标明默认模型。请选择列表中的模型，以查看它支持的推理强度。" : "尚未取得当前模型的推理强度目录；刷新模型时会一起读取。留空时由 Codex 选择默认值。";
+      new Setting(containerEl).setClass("lacan-ai-setting-wide").setName("推理强度").setDesc(reasoningDescription).addDropdown((dropdown) => {
+        dropdown.addOption(
+          "",
+          defaultReasoningLabel ? `跟随模型默认值（${defaultReasoningLabel}）` : "跟随模型默认值"
+        );
+        for (const effort of reasoningProfile?.supportedReasoningEfforts || []) {
+          dropdown.addOption(
+            effort.value,
+            REASONING_EFFORT_LABELS[effort.value] || effort.value
+          );
+        }
+        if (selectedReasoningEffort && !reasoningProfile?.supportedReasoningEfforts.some(
+          (effort) => effort.value === selectedReasoningEffort
+        )) {
+          dropdown.addOption(
+            selectedReasoningEffort,
+            `${REASONING_EFFORT_LABELS[selectedReasoningEffort] || selectedReasoningEffort}（已保存，待刷新验证）`
+          );
+        }
+        dropdown.setValue(selectedReasoningEffort).onChange(async (value) => {
+          this.plugin.settings.segmentAiReasoningEffort = String(
+            value || ""
+          ).trim();
           await this.plugin.saveSettings();
           await this.plugin.resetSegmentAiRuntime();
           this.display();
         });
       });
+    } else if (provider === "claude") {
+      new Setting(containerEl).setClass("lacan-ai-setting-wide").setName("Agent 模型").setDesc("留空使用 Claude Code 当前默认模型，也可填写 sonnet、opus 或完整模型名称。沿用 CLI 已有登录。").addText((text) => text.setPlaceholder("使用 Claude Code 默认模型").setValue(this.plugin.settings.segmentAiModel || "").onChange(async (value) => {
+        this.plugin.settings.segmentAiModel = value.trim();
+        await this.plugin.saveSettings();
+        await this.plugin.resetSegmentAiRuntime();
+      }));
+      new Setting(containerEl).setName("推理强度").setDesc("使用 Claude Code 的 --effort 参数；可用强度取决于所选模型。").addDropdown((dropdown) => {
+        dropdown.addOption("", "跟随模型默认值");
+        for (const effort of ["low", "medium", "high", "max"]) {
+          dropdown.addOption(effort, REASONING_EFFORT_LABELS[effort]);
+        }
+        dropdown.setValue(this.plugin.settings.segmentAiReasoningEffort || "").onChange(async (value) => {
+          this.plugin.settings.segmentAiReasoningEffort = value;
+          await this.plugin.saveSettings();
+          await this.plugin.resetSegmentAiRuntime();
+        });
+      });
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text: "Claude Code 使用内置只读与网页工具，禁用文件写入、Shell、Hooks 和 Slash Commands；当前适配不提供 Skill 清单。"
+      });
+    } else {
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text: "DeepSeek Harness 使用 headless profile 中配置的模型、凭据和推理参数。请先在终端完成 dsh 配置；插件只向模型开放允许的只读／网页工具，profile 自带插件仍可能在启动时运行。当前适配不提供模型或 Skill 清单。"
+      });
     }
-    containerEl.createEl("h4", { text: "解读提示词与 Skills" });
+    containerEl.createEl("h4", { text: provider === "codex" ? "解读提示词与 Skills" : "解读提示词" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
       text: "默认功能：术语与符号对照 + 语境性解读。术语表只读，缺项或不一致只提示，由用户判断是否修改。"
@@ -12018,63 +12838,65 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
         this.display();
       });
     });
-    new Setting(containerEl).setName("Skills 来源").setDesc(`当前项目：${this.plugin.getVaultBasePath()}
-Agent：${this.plugin.settings.segmentAiCodexPath || "PATH 中的 Codex"}
+    if (provider === "codex") {
+      new Setting(containerEl).setName("Skills 来源").setDesc(`当前项目：${this.plugin.getVaultBasePath()}
+Agent：${this.plugin.getSegmentAiCliPath("codex") || "自动检测"}
 只使用当前项目与该 Agent 已安装、实际发现的 Skills，由 Agent 按请求自行选择，无需配置固定组合。`);
-    const skillCatalog = (this.plugin.segmentAiSkillCatalog?.list?.() || this.plugin.settings.segmentAiSkillCatalog || []).map(normalizeSkillMetadata).filter(Boolean);
-    const skillCatalogUpdatedAt = Number(
-      this.plugin.settings.segmentAiSkillCatalogUpdatedAt || 0
-    );
-    new Setting(containerEl).setName("自动发现 Skills").setDesc(
-      skillCatalog.length > 0 ? `上次发现 ${skillCatalog.length} 个${skillCatalogUpdatedAt ? `，最近刷新：${new Date(skillCatalogUpdatedAt).toLocaleString()}` : ""}。` : "尚未获取 Skills 清单。开启 AI 后自动发现，也可手动刷新。"
-    ).addButton((button) => {
-      button.setButtonText("刷新 Skills").onClick(async () => {
-        button.setDisabled(true);
-        button.setButtonText("获取中...");
-        try {
-          const skills = await this.plugin.discoverSegmentAiSkills({
-            forceReload: true
-          });
-          new Notice(`已从 Codex 获取 ${skills.length} 个 Skill。`);
-        } catch (error) {
-          new Notice(
-            `Skill 清单获取失败：${error?.message || "请检查 Codex CLI 和登录状态。"}`
-          );
-        } finally {
-          button.setDisabled(false);
-          button.setButtonText("刷新 Skills");
-          this.display();
+      const skillCatalog = (this.plugin.segmentAiSkillCatalog?.list?.() || this.plugin.settings.segmentAiSkillCatalog || []).map(normalizeSkillMetadata).filter(Boolean);
+      const skillCatalogUpdatedAt = Number(
+        this.plugin.settings.segmentAiSkillCatalogUpdatedAt || 0
+      );
+      new Setting(containerEl).setName("自动发现 Skills").setDesc(
+        skillCatalog.length > 0 ? `上次发现 ${skillCatalog.length} 个${skillCatalogUpdatedAt ? `，最近刷新：${new Date(skillCatalogUpdatedAt).toLocaleString()}` : ""}。` : "尚未获取 Skills 清单。开启 AI 后自动发现，也可手动刷新。"
+      ).addButton((button) => {
+        button.setButtonText("刷新 Skills").onClick(async () => {
+          button.setDisabled(true);
+          button.setButtonText("获取中...");
+          try {
+            const skills = await this.plugin.discoverSegmentAiSkills({
+              forceReload: true
+            });
+            new Notice(`已从 Codex 获取 ${skills.length} 个 Skill。`);
+          } catch (error) {
+            new Notice(
+              `Skill 清单获取失败：${error?.message || "请检查 Codex CLI 和登录状态。"}`
+            );
+          } finally {
+            button.setDisabled(false);
+            button.setButtonText("刷新 Skills");
+            this.display();
+          }
+        });
+      });
+      const skillSources = {
+        repo: "当前项目",
+        user: "Agent 已安装 · 用户",
+        system: "Agent 已安装 · 系统",
+        admin: "Agent 已安装 · 管理员"
+      };
+      if (skillCatalog.length > 0) {
+        const skillListEl = containerEl.createDiv("lacan-ai-skill-list");
+        for (const skill of skillCatalog) {
+          const available = skill.enabled && skill.errors.length === 0;
+          const source = skillSources[skill.scope] || `Agent 已安装 · ${skill.scope}`;
+          const details = [
+            `${source} · ${available ? "可用" : skill.enabled ? "加载失败" : "已禁用"}`,
+            skill.description,
+            skill.path,
+            ...skill.errors
+          ].filter(Boolean).join("\n");
+          new Setting(skillListEl).setName(skill.name).setDesc(details);
         }
-      });
-    });
-    const skillSources = {
-      repo: "当前项目",
-      user: "Agent 已安装 · 用户",
-      system: "Agent 已安装 · 系统",
-      admin: "Agent 已安装 · 管理员"
-    };
-    if (skillCatalog.length > 0) {
-      const skillListEl = containerEl.createDiv("lacan-ai-skill-list");
-      for (const skill of skillCatalog) {
-        const available = skill.enabled && skill.errors.length === 0;
-        const source = skillSources[skill.scope] || `Agent 已安装 · ${skill.scope}`;
-        const details = [
-          `${source} · ${available ? "可用" : skill.enabled ? "加载失败" : "已禁用"}`,
-          skill.description,
-          skill.path,
-          ...skill.errors
-        ].filter(Boolean).join("\n");
-        new Setting(skillListEl).setName(skill.name).setDesc(details);
       }
-    }
-    const configuredAgent = this.plugin.settings.segmentAiCodexPath || "";
-    if (this.plugin.settings.segmentAiEnabled && this.skillsRequestedForAgent !== configuredAgent) {
-      this.skillsRequestedForAgent = configuredAgent;
-      void this.plugin.discoverSegmentAiSkills({ forceReload: true }).then(() => {
-        if (this.activeSettingsTab === "ai") this.display();
-      }).catch((error) => {
-        new Notice(`Skills 自动发现失败：${error?.message || "请检查 Codex CLI 和登录状态。"}`);
-      });
+      const configuredAgent = this.plugin.getSegmentAiCliPath("codex");
+      if (this.plugin.settings.segmentAiEnabled && this.skillsRequestedForAgent !== configuredAgent) {
+        this.skillsRequestedForAgent = configuredAgent;
+        void this.plugin.discoverSegmentAiSkills({ forceReload: true }).then(() => {
+          if (this.activeSettingsTab === "ai") this.display();
+        }).catch((error) => {
+          new Notice(`Skills 自动发现失败：${error?.message || "请检查 Codex CLI 和登录状态。"}`);
+        });
+      }
     }
     const diagnostics = this.plugin.getSegmentAiDiagnostics();
     new Setting(containerEl).setName("本地 Agent 诊断").setDesc(

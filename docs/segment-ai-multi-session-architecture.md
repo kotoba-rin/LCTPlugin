@@ -1,3 +1,5 @@
+> **MCP 设计已于 2026-11-09 移除。** 插件不提供外部 MCP 接入、设置或后台预检；本文关于 MCP 白名单、服务开关及未来接入阶段的内容仅为历史设计记录，以 [CLI 适配说明](cli-providers.md) 和当前代码为准。
+
 > **Skills 设计已于 2026-11-08 替换。** 当前实现以 [Skills 自动发现](segment-ai-skills.md) 为准。本文关于固定 SkillProfile、主要/辅助 Skill、默认方案、结构化 SkillUserInput、按方案区分会话及自定义 Skill 编辑器的段落仅保留为旧设计记录，不再适用。多会话、流式显示、只读、MCP 与其他非 Skills 机制仍按当前代码实现。
 
 # Lacan Translation Helper 分段 AI 多会话、并发任务与 Skill 触发升级设计

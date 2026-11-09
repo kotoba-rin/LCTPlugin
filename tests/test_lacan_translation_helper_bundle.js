@@ -57,28 +57,18 @@ assert.ok(
     && source.includes("法语、德语或英语"),
   "AI settings should disclose the required web search and source-language boundary"
 );
-assert.match(
-  source,
-  /segmentAiMcpEnabled:\s*false/,
-  "MCP access should be disabled by default"
-);
-assert.match(
-  source,
-  /segmentAiMcpEnabledServers:\s*\[\]/,
-  "the plugin should persist an explicit MCP allowlist"
-);
-assert.match(
-  source,
-  /setName\("启用 MCP 服务"\)[\s\S]{0,1200}\.addToggle\(/,
-  "AI settings should expose a master MCP switch"
+assert.ok(
+  !source.includes('setName("启用 MCP 服务")')
+    && !source.includes('text: "MCP 服务（默认关闭）"')
+    && !source.includes("segmentAiMcpEnabled")
+    && !source.includes("segmentAiMcpEnabledServers"),
+  "AI settings must not expose or persist MCP configuration"
 );
 assert.ok(
-  source.includes("scheduleSegmentAiMcpBackgroundCheck"),
-  "the plugin should schedule MCP preflight during startup"
-);
-assert.ok(
-  main.includes('"config/read"'),
-  "the released runtime should discover MCP names without connecting to every server"
+  !source.includes("scheduleSegmentAiMcpBackgroundCheck")
+    && !source.includes("runSegmentAiMcpBackgroundCheck")
+    && !source.includes("refreshSegmentAiMcpServers"),
+  "plugin startup and settings must not run MCP discovery or preflight"
 );
 assert.match(
   source,

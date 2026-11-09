@@ -401,7 +401,7 @@ const runQuickTranslation = async () => {
   }
   const defaultConfig = runtime.restrictedThreadConfig();
   assert.strictEqual(defaultConfig.web_search, "live");
-  assert.strictEqual(defaultConfig.mcp_servers["global-server"].enabled, true, "quick mode must not mutate the normal MCP allowlist");
+  assert.strictEqual(defaultConfig.mcp_servers["global-server"].enabled, false, "MCP must remain disabled in every mode, including legacy enabled settings");
   assert.strictEqual(defaultConfig.features.shell_tool, undefined);
   await runtime.shutdown();
 };
@@ -576,101 +576,6 @@ const runEmptyCompletedFailure = async () => {
       prompt: "请解释这个分段。",
     }),
     (error) => error.code === "EmptyAgentResponse"
-  );
-  await runtime.shutdown();
-};
-
-const runIsolationFailure = async () => {
-  let fakeProcess;
-  const runtime = new CodexAppServerRuntime({
-    vaultRoot: VAULT_ROOT,
-    cliPath: CLI_PATH,
-    mcpEnabled: true,
-    enabledMcpServerNames: ["global-server"],
-    spawnProcess: () => {
-      fakeProcess = new ScriptedAppServerProcess((message, process) => {
-        if (!Object.prototype.hasOwnProperty.call(message, "id")) {
-          return;
-        }
-        switch (message.method) {
-          case "initialize":
-            process.respond(message, initializeResponse);
-            break;
-          case "account/read":
-            process.respond(message, accountResponse);
-            break;
-          case "mcpServerStatus/list":
-            process.respond(message, {
-              data: [{
-                ...globalMcpInventory.data[0],
-                name: "rogue-server",
-              }],
-              nextCursor: null,
-            });
-            break;
-          case "thread/start":
-            process.respond(message, threadResponse("thread-unsafe"));
-            break;
-          default:
-            process.fail(message, -32601, "Not expected");
-        }
-      });
-      return fakeProcess;
-    },
-    requestTimeoutMs: 200,
-  });
-
-  await assert.rejects(
-    runtime.preflightMcpServers(),
-    (error) => error.code === "ExternalToolsAvailable"
-  );
-  const probe = fakeProcess.messages.find(
-    (message) => message.method === "thread/start"
-  );
-  assert.strictEqual(probe.params.ephemeral, true);
-  assert.strictEqual(
-    fakeProcess.messages.some((message) => message.method === "turn/start"),
-    false,
-    "a policy violation must stop before any Agent turn"
-  );
-  await runtime.shutdown();
-};
-
-const runGlobalMcpInventoryRejected = async () => {
-  let fakeProcess;
-  const runtime = new CodexAppServerRuntime({
-    vaultRoot: VAULT_ROOT,
-    cliPath: CLI_PATH,
-    spawnProcess: () => {
-      fakeProcess = new ScriptedAppServerProcess((message, process) => {
-        if (!Object.prototype.hasOwnProperty.call(message, "id")) {
-          return;
-        }
-        switch (message.method) {
-          case "initialize":
-            process.respond(message, initializeResponse);
-            break;
-          case "account/read":
-            process.respond(message, accountResponse);
-            break;
-          default:
-            process.fail(message, -32601, "Not expected");
-        }
-      });
-      return fakeProcess;
-    },
-    requestTimeoutMs: 200,
-  });
-  await runtime.ensureServer();
-  await assert.rejects(
-    runtime.listMcpInventory(),
-    (error) => error.code === "McpGlobalInventoryRejected"
-  );
-  assert.strictEqual(
-    fakeProcess.messages.some(
-      (message) => message.method === "mcpServerStatus/list"
-    ),
-    false
   );
   await runtime.shutdown();
 };
@@ -1121,7 +1026,7 @@ const runConcurrentStartupBarrier = async () => {
   assert.strictEqual(
     secondResolved,
     false,
-    "all callers must wait for authentication and MCP inventory, not merely for stdio creation"
+    "all callers must wait for authentication and external capability isolation, not merely for stdio creation"
   );
   pendingAccountRequest.process.respond(
     pendingAccountRequest.message,
@@ -1590,8 +1495,6 @@ const run = async () => {
   await runOriginalSkillRead();
   await runItemCompletedFallback();
   await runEmptyCompletedFailure();
-  await runIsolationFailure();
-  await runGlobalMcpInventoryRejected();
   await runAppIsolationFailure();
   await runRestore();
   await runModelDiscovery();
