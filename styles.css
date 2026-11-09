@@ -1280,20 +1280,20 @@
   padding: 10px 12px;
 }
 
-.setting-item:has(.lacan-ai-global-prompt) {
+.setting-item.lacan-ai-global-prompt-setting {
   align-items: stretch;
   flex-direction: column;
   gap: 12px;
 }
 
-.setting-item:has(.lacan-ai-global-prompt) > .setting-item-info {
+.setting-item.lacan-ai-global-prompt-setting > .setting-item-info {
   flex: none;
   margin-right: 0;
   min-width: 0;
   width: 100%;
 }
 
-.setting-item:has(.lacan-ai-global-prompt) > .setting-item-control {
+.setting-item.lacan-ai-global-prompt-setting > .setting-item-control {
   align-items: stretch;
   flex: none;
   flex-direction: column;
@@ -1302,7 +1302,7 @@
   width: 100%;
 }
 
-.setting-item:has(.lacan-ai-global-prompt) > .setting-item-control > button {
+.setting-item.lacan-ai-global-prompt-setting > .setting-item-control > button {
   align-self: flex-end;
 }
 

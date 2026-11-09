@@ -1,10 +1,10 @@
 {
   "id": "lacan-translation-helper",
   "name": "Lacan Translation Helper",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "minAppVersion": "1.8.0",
   "description": "Read Lacan seminars with segment notes, bilingual reading, translation tools, and a read-only local Agent interpretation sidebar.",
   "author": "Lacan Chinese Translation Project",
-  "authorUrl": "https://github.com/kotoba-rin/LCTPlugin",
+  "authorUrl": "https://github.com/kotoba-rin",
   "isDesktopOnly": true
 }

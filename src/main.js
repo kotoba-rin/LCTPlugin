@@ -4416,7 +4416,9 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
       cls: "setting-item-description",
       text: "默认功能：术语与符号对照 + 语境性解读。术语表只读，缺项或不一致只提示，由用户判断是否修改。",
     });
-    new Setting(containerEl)
+    const globalPromptSetting = new Setting(containerEl);
+    globalPromptSetting.settingEl.addClass("lacan-ai-global-prompt-setting");
+    globalPromptSetting
       .setName("解读提示词")
       .setDesc("这是插件唯一的可编辑解读提示词，适用于所有译文分段。只读、安全、本地 Vault 文件范围和外部来源语言限制仍由插件内部固定。")
       .addTextArea((text) => {
