@@ -8,7 +8,7 @@ const EXCLUDED_TARGETS = [
   "[contenteditable='true']", ".cm-editor", ".markdown-source-view",
   ".internal-embed", ".markdown-embed", ".footnotes", ".footnote-ref", ".footnote-backref",
   ".lacan-bilingual-view", ".lacan-bilingual-content", ".lacan-translation-inline-editor",
-  ".lacan-segment-ai-control", ".lacan-segment-note-actions", ".lacan-segment-compare-control",
+  ".lacan-segment-ai-control", ".lacan-segment-note-actions",
   ".lacan-segment-preview-popover", ".lacan-french-lookup",
 ].join(", ");
 

@@ -1,7 +1,7 @@
 const { buildFrenchLookup, getFrenchWordAt } = require("./french-lookup-text");
 const { readPdfTextLayer } = require("./pdf-lookup-text");
 
-const EXCLUDED_TARGETS = ".lacan-french-lookup, .view-header, .inline-title, .cm-gutters, .modal-container, .setting-item, button, input, textarea, select, .lacan-segment-ai-control, .lacan-segment-note-actions, .lacan-segment-compare-control, .lacan-translation-inline-editor";
+const EXCLUDED_TARGETS = ".lacan-french-lookup, .view-header, .inline-title, .cm-gutters, .modal-container, .setting-item, button, input, textarea, select, .lacan-segment-ai-control, .lacan-segment-note-actions, .lacan-translation-inline-editor";
 
 function createElement(parent, tag, className, text) {
   const element = parent.ownerDocument.createElement(tag);

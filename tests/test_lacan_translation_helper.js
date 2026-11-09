@@ -78,6 +78,25 @@ try {
   const plugin = Object.create(PluginClass.prototype);
   assert.strictEqual(mockNormalizePath(""), "/");
 
+  const syncPlugin = Object.create(PluginClass.prototype);
+  syncPlugin.settings = {
+    mode: "reader",
+    repositoryUrl: "https://example.com/project.git",
+    forks: [{ id: "legacy", url: "https://example.com/legacy.git", localBranch: "legacy", enabled: true }],
+  };
+  const repositorySyncCalls = [];
+  syncPlugin.ensureGitRepositoryInitialized = async () => { repositorySyncCalls.push("init"); };
+  syncPlugin.syncReaderRepository = async () => { repositorySyncCalls.push("reader"); };
+  syncPlugin.syncEditorRepository = async () => { repositorySyncCalls.push("editor"); };
+  syncPlugin.syncForkRepository = async () => { assert.fail("legacy Fork settings must never trigger a fetch"); };
+  syncPlugin.refreshReadingAfterRepositorySync = () => { repositorySyncCalls.push("refresh"); };
+  await syncPlugin.syncConfiguredRepositories();
+  assert.deepStrictEqual(repositorySyncCalls, ["init", "reader", "refresh"]);
+  repositorySyncCalls.length = 0;
+  syncPlugin.settings.mode = "editer";
+  await syncPlugin.syncConfiguredRepositories();
+  assert.deepStrictEqual(repositorySyncCalls, ["init", "editor", "refresh"], "both repository modes must ignore legacy Fork settings");
+
   const graphPlugin = Object.create(PluginClass.prototype);
   graphPlugin.projectGraphViews = new WeakSet();
   let graphUpdates = 0;
@@ -221,8 +240,8 @@ try {
       },
     },
   };
-  assert.strictEqual(typeof plugin.resolveComparisonToolbarMount, "function");
-  assert.deepStrictEqual(plugin.resolveComparisonToolbarMount(markdownView), {
+  assert.strictEqual(typeof plugin.resolveReadingToolbarMount, "function");
+  assert.deepStrictEqual(plugin.resolveReadingToolbarMount(markdownView), {
     hostEl: viewHeaderEl,
     beforeEl: viewActionsEl,
     location: "header",
@@ -843,27 +862,22 @@ try {
       return element;
     };
     toolbar.createSpan = (options) => toolbar.createEl("span", options);
-    plugin.renderComparisonToolbarContent(toolbar, [], bilingualSourcePath, bilingualLeaf);
+    plugin.renderReadingToolbarContent(toolbar, bilingualSourcePath, bilingualLeaf);
     const bilingualToolbarButton = toolbar.children.find((child) => child.textContent === "双语阅读");
-    assert.ok(bilingualToolbarButton, "双语阅读 must be available even without configured forks");
+    assert.ok(bilingualToolbarButton, "双语阅读 must remain available in the reading toolbar");
     const previousRunWithNotice = plugin.runWithNotice;
     plugin.runWithNotice = (action) => action();
     await bilingualToolbarButton.listeners.click();
     assert.strictEqual(bilingualViewStates.length, 3, "toolbar opens bilingual reading in the source leaf");
     plugin.runWithNotice = previousRunWithNotice;
-    plugin.renderComparisonToolbarContent(toolbar, [], "知识库/欲望.md", bilingualLeaf);
+    plugin.renderReadingToolbarContent(toolbar, "知识库/欲望.md", bilingualLeaf);
     assert.ok(!toolbar.children.some((child) => child.textContent === "双语阅读"));
 
     const toolbarPlugin = Object.create(PluginClass.prototype);
+    // A stale legacy configuration must never recreate a Fork selector.
     toolbarPlugin.settings = { forks: [{ id: "old", name: "老版本", localBranch: "fork-old", enabled: true }] };
-    toolbarPlugin.activeComparisonForks = new Set();
-    toolbarPlugin.comparisonRenderRevision = 0;
     let removedToolbars = 0;
-    let bilingualComparisons = 0;
-    let markdownComparisons = 0;
-    toolbarPlugin.removeComparisonToolbars = () => { removedToolbars += 1; };
-    toolbarPlugin.canRenderComparisonSegments = () => true;
-    toolbarPlugin.renderInlineComparisonControlsForActiveView = async () => { markdownComparisons += 1; };
+    toolbarPlugin.removeReadingToolbars = () => { removedToolbars += 1; };
     const sourceFile = Object.assign(new MockTFile(), { path: bilingualSourcePath, extension: "md" });
     const originalCreateElement = global.document.createElement;
     const createToolbarElement = (tagName) => {
@@ -903,7 +917,6 @@ try {
       containerEl: toolbarContainer,
       sourcePath: bilingualSourcePath,
       getViewType: () => "lacan-bilingual-reading",
-      renderComparisonControls() { bilingualComparisons += 1; },
     };
     const activeBilingualLeaf = { view: activeBilingualView };
     activeBilingualView.leaf = activeBilingualLeaf;
@@ -917,37 +930,33 @@ try {
     };
     try {
       global.document.createElement = createToolbarElement;
-      toolbarPlugin.renderComparisonToolbar();
-      assert.strictEqual(removedToolbars, 0, "a bilingual source must retain its toolbar even when getActiveFile is empty");
-      assert.strictEqual(headerEl.children.length, 2, "bilingual toolbar must mount before native view actions");
+      toolbarPlugin.renderReadingToolbar();
+      assert.strictEqual(removedToolbars, 0, "a bilingual source must retain its language menu even when getActiveFile is empty");
+      assert.strictEqual(headerEl.children.length, 2, "reading toolbar must mount before native view actions");
       assert.strictEqual(headerEl.children[1], actionsEl, "native view actions must be preserved");
       let mountedToolbar = headerEl.children[0];
-      assert.ok(mountedToolbar.children.some((child) => child.textContent === "Fork 对照版本"));
-      const oldVersionButton = mountedToolbar.children.find((child) => child.textContent === "选择 老版本");
-      assert.ok(oldVersionButton, "the existing Fork selector must remain available in bilingual reading");
-      assert.strictEqual(bilingualComparisons, 1);
-      assert.strictEqual(markdownComparisons, 0, "bilingual controls must use their own language lanes");
-      await oldVersionButton.listeners.click();
-      assert.ok(toolbarPlugin.activeComparisonForks.has("old"));
-      assert.ok(mountedToolbar.children.some((child) => child.textContent === "已选 老版本"));
-      assert.strictEqual(bilingualComparisons, 2, "selecting a Fork must refresh bilingual segment comparisons");
+      assert.deepStrictEqual(mountedToolbar.children.map((child) => child.textContent), ["双语阅读"], "the toolbar must contain only the retained bilingual reading action");
       const unrelatedFile = Object.assign(new MockTFile(), { path: "知识库/欲望.md", extension: "md" });
       toolbarPlugin.app.workspace.getActiveFile = () => unrelatedFile;
-      toolbarPlugin.renderComparisonToolbar({ renderSegments: false });
-      assert.ok(mountedToolbar.dataset.toolbarSignature.startsWith(`${bilingualSourcePath}::`), "a stale active file must not redirect bilingual toolbar actions");
-      assert.strictEqual(bilingualComparisons, 2, "header-only updates must not rerender bilingual comparisons");
+      toolbarPlugin.renderReadingToolbar();
+      assert.ok(mountedToolbar.dataset.toolbarSignature.includes(bilingualSourcePath), "a stale active file must not redirect bilingual toolbar actions");
 
       const normalView = { containerEl: toolbarContainer, leaf: {}, getViewType: () => "markdown" };
       headerEl.children = [actionsEl];
       toolbarPlugin.app.workspace.activeLeaf = { view: normalView };
       toolbarPlugin.app.workspace.getActiveFile = () => sourceFile;
       toolbarPlugin.app.workspace.getActiveViewOfType = () => normalView;
-      toolbarPlugin.renderComparisonToolbar();
+      toolbarPlugin.renderReadingToolbar();
       mountedToolbar = headerEl.children[0];
       assert.strictEqual(headerEl.children[1], actionsEl);
-      assert.ok(mountedToolbar.children.some((child) => child.textContent === "双语阅读"));
-      assert.ok(mountedToolbar.children.some((child) => child.textContent === "已选 老版本"));
-      assert.strictEqual(markdownComparisons, 1, "normal Markdown views must keep their existing comparison render path");
+      assert.deepStrictEqual(mountedToolbar.children.map((child) => child.textContent), ["双语阅读"]);
+
+      const notesFile = Object.assign(new MockTFile(), { path: "texts/s7-l-ethique-de-la-psychanalyse/notes/s7-01.md", extension: "md" });
+      headerEl.children = [actionsEl];
+      toolbarPlugin.app.workspace.getActiveFile = () => notesFile;
+      toolbarPlugin.renderReadingToolbar();
+      assert.strictEqual(removedToolbars, 1, "notes must not mount an empty reading toolbar");
+      assert.deepStrictEqual(headerEl.children, [actionsEl]);
     } finally {
       global.document.createElement = originalCreateElement;
     }

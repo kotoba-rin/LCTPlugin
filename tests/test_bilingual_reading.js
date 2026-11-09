@@ -142,9 +142,6 @@ const run = async () => {
   let modifyListener;
   let removedEvent = null;
   const aiCalls = [];
-  const comparisonCalls = [];
-  const activeForks = [];
-  let unloadedComparisons = 0;
   const plugin = {
     settings: { segmentAiEnabled: true },
     app: { vault: {
@@ -155,17 +152,10 @@ const run = async () => {
     } },
     pathsFromOriginal: (pathname) => pathname.includes("/original/") ? { originalPath: pathname, translationPath: pathname.replace("/original/", "/translation/") } : null,
     pathsFromTranslation: (pathname) => pathname.includes("/translation/") ? { originalPath: pathname.replace("/translation/", "/original/"), translationPath: pathname } : null,
-    renderComparisonToolbar() {},
+    renderReadingToolbar() {},
     openMonolingualReading: (sourceView, path, options) => (
       sourceView.leaf.openFile(files.get(path), options)
     ),
-    getActiveComparisonForks: () => activeForks,
-    comparisonForkSignature: () => activeForks.map((fork) => fork.id).join("|"),
-    renderSegmentComparisonControlIfNeeded: (element, pathname, id, forks, signature) => {
-      comparisonCalls.push({ pathname, id, signature });
-      element.dataset.forkSignature = signature;
-    },
-    unloadMarkdownRenderComponents: () => { unloadedComparisons += 1; },
     createSegmentAiPreviewControl: (pathname, id) => {
       const element = new MockElement("button", { text: "Ф" });
       element.listeners.click = () => aiCalls.push({ pathname, id });
@@ -244,18 +234,6 @@ const run = async () => {
   await view.actions[0].callback();
   assert.deepStrictEqual(openedFiles[2], { path: translationPath, options: { state: { mode: "preview" } } });
 
-  activeForks.push({ id: "old" });
-  view.renderComparisonControls();
-  assert.deepStrictEqual(comparisonCalls.map(({ pathname, id }) => ({ pathname, id })), [
-    { pathname: originalPath, id: "s7-01-0001" },
-    { pathname: translationPath, id: "s7-01-0001" },
-    { pathname: originalPath, id: "s7-01-0002" },
-    { pathname: originalPath, id: "s7-01-0003" },
-    { pathname: translationPath, id: "s7-01-0002" },
-  ], "Fork controls must use each block's language and merged primary ID");
-  activeForks.length = 0;
-  view.renderComparisonControls();
-
   leaf.contentEl.scrollTop = 0;
   assert.strictEqual(view.getState().scrollTop, 0, "scrolling to the top must override an older saved position");
   plugin.settings.segmentAiEnabled = false;
@@ -318,14 +296,12 @@ const run = async () => {
   await new Promise((resolve) => setImmediate(resolve));
   const lessonBeforeEditor = [...leaf.contentEl.children];
   const mountedComponents = [...view.markdownComponents];
-  const mountedComparisons = view.comparisonBlocks;
   plugin.translationInlineEditor = { isActiveWithin: () => true };
   finishEditedRender();
   await editedRefresh;
   renderGate = null;
   assert.deepStrictEqual(leaf.contentEl.children, lessonBeforeEditor, "opening an editor during rendering must prevent replacement");
   assert.ok(mountedComponents.every((component) => component.unloads === 0), "discarding a staged render must keep mounted Markdown resources alive");
-  assert.strictEqual(view.comparisonBlocks, mountedComparisons, "discarded comparison controls must not replace those of the mounted page");
   assert.strictEqual(view.pendingInlineRefresh, true);
   delete plugin.translationInlineEditor;
   await view.render();
@@ -355,7 +331,6 @@ const run = async () => {
   assert.ok(components.every((component) => component.unloads === 1), "closing during rendering must unload every Markdown component exactly once");
   assert.strictEqual(view.markdownComponents.size, 0);
   assert.strictEqual(view.nativeClosed, true, "closing must release native FileView resources");
-  assert.ok(unloadedComparisons > 0, "Fork Markdown components must be unloaded with the view");
 
   const nativeStateView = new LacanBilingualReadingView({ contentEl: new MockElement() }, plugin);
   await nativeStateView.setState({ file: originalPath, scrollTop: 30 });

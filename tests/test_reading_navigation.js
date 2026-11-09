@@ -85,7 +85,7 @@ async function run() {
     empty() {}, createEl: () => button,
     createSpan: () => ({ setAttribute() {} }),
   };
-  plugin.renderComparisonToolbarContent(toolbar, [], originalPath, leaf);
+  plugin.renderReadingToolbarContent(toolbar, originalPath, leaf);
   button.listeners.click();
   assert.strictEqual(states.length, 0, "clicking bilingual reading while reading must not reset the view");
   assert.strictEqual(menus.length, 1);
