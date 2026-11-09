@@ -1,12 +1,10 @@
-# Lacan Translation Helper
+# 拉康翻译助手
 
-[中文说明](README.zh-CN.md)
+用于在 Obsidian 中阅读、编辑和对照拉康研讨班法中原译文的桌面端插件，提供逐段阅读、章节笔记、Fork 对照、法语查词和 Codex 分段分析。
 
-Read and edit French–Chinese Lacan seminar texts in Obsidian, with aligned paragraphs, reading notes, fork comparison, French lookup, and a Codex-powered analysis sidebar.
+本仓库是从[拉康中文翻译项目](https://github.com/Kotoba-Rin/Lacan-Chinese-Translation-Project)中迁出的独立插件源码仓库。插件名称为 `Lacan Translation Helper`，ID 为 `lacan-translation-helper`。**插件代码**在 `kotoba-rin/LCTPlugin` 维护，**研讨班文本**仍在原翻译项目维护；插件默认同步的内容上游仍是原项目。
 
-This is the standalone source repository for the **Lacan Translation Helper** desktop plugin, extracted from the [Lacan Chinese Translation Project](https://github.com/Kotoba-Rin/Lacan-Chinese-Translation-Project). The plugin ID remains `lacan-translation-helper`. The translation project remains the default **content** upstream; this repository is the **plugin code** upstream. Seminar texts are maintained separately.
-
-The project-specific features expect this vault layout and stable segment IDs:
+研讨班专用功能按以下 Vault 目录及稳定分段 ID 工作：
 
 ```text
 texts/<seminar>/
@@ -16,76 +14,76 @@ texts/<seminar>/
   glossary.md
 ```
 
-Paragraphs are aligned by comments such as `<!-- id: s8-01-0001 -->`; merged translations can also declare `<!-- ids: ... -->`. The interface and generated reading aids currently primarily use Chinese.
+原译文通过 `<!-- id: s8-01-0001 -->` 等标记对齐；合并译文还可以声明 `<!-- ids: ... -->`。界面与生成的阅读辅助材料目前主要使用中文。
 
-## Features
+## 功能
 
-- Open French–Chinese bilingual reading views, search within them, and navigate by segment ID.
-- Edit an entire Chinese translation, annotation, or suggestion block in place. Paste images using the vault's attachment settings; pasted attachments are created immediately and remain if the edit is cancelled.
-- Create chapter reading notes with the selected segment's original, translation, annotations, and suggestions.
-- Generate translation skeletons, track `<!-- untranslated -->` markers, and browse lesson status through Obsidian Bases when that API is available.
-- Sync the translation project's upstream and compare multiple forks paragraph by paragraph.
-- Read PDFs with Obsidian's built-in viewer, and look up selectable French text. Scanned pages need a text layer supplied by OCR elsewhere.
-- Look up French words in the online Frdic dictionary, translate selected phrases through Codex, use system French speech, and save words to a chosen Eudic wordbook.
-- Open read-only segment interpretation or original-text translation in a sidebar with streaming replies, follow-up questions, multiple conversations, and automatic discovery of the configured Codex agent's Skills.
+- 法中双语阅读、文内搜索和按分段 ID 定位。
+- 在阅读视图或双语阅读中就地编辑整段中文译文、注释和建言。粘贴图片遵循 Obsidian 附件设置；图片在粘贴时创建，取消编辑仍会保留该附件。
+- 创建章节阅读笔记，收录当前分段的原文、译文、注释和建言。
+- 创建译文骨架、按 `<!-- untranslated -->` 标记统计翻译进度；Obsidian Bases API 可用时提供课次状态浏览。
+- 同步翻译项目上游，添加多个 Fork 进行逐段对照。
+- 使用 Obsidian 内置 PDF 阅读器，并对 PDF 文字层进行法语取词。扫描 PDF 需先通过其他工具生成 OCR 文字层。
+- 查询法语助手在线词典，通过 Codex 翻译选区，使用系统法语朗读，并收藏到所选欧路生词本。
+- 在侧栏进行只读的译文解读或原文解析，支持流式回答、多会话、继续追问，以及自动发现所配置 Codex Agent 的 Skills。
 
-## Requirements
+## 使用条件
 
-- Obsidian **desktop**, version **1.8.0 or later** as declared in the manifest. Features that depend on newer Obsidian APIs are guarded and may be unavailable on older versions.
-- A vault using the translation project's file layout for seminar-specific features. Existing project users can keep using their current vault.
-- **Git CLI** on the Obsidian process's `PATH` for content synchronization and fork comparison.
-- **Codex CLI**, authenticated in your terminal and compatible with `codex app-server`, for AI features. Set its absolute executable path in the plugin's **AI 功能** settings if Obsidian cannot find it through `PATH`. Codex is not installed by this plugin.
-- An **Eudic API authorization token** only if you want to read or update Eudic wordbooks. Public dictionary lookup does not use this token.
-- **Node.js 20+ and npm** for development and building from source. Normal use of an already built plugin does not require a separate Node installation.
+- **Obsidian 桌面端**，manifest 声明的最低版本为 **1.8.0**。依赖较新 Obsidian API 的功能有可用性检查，在旧版本上可能无法使用。
+- 研讨班相关功能需要符合翻译项目格式的 Vault。已有项目用户可以继续使用当前文库。
+- 内容同步与 Fork 对照需要本机安装 **Git CLI**，且 Obsidian 进程能通过 `PATH` 找到它。
+- AI 功能需要已在终端登录、支持 `codex app-server` 协议的 **Codex CLI**。Obsidian 无法从 `PATH` 找到它时，可在插件的「AI 功能」设置中填写可执行文件绝对路径。插件不会自动安装 Codex。
+- 只有读取、更新欧路生词本时才需要 **欧路 API 授权码**。公开词典查询不使用该授权码。
+- 从源码开发和构建需要 **Node.js 20+ 与 npm**；使用已构建好的插件不需要另行安装 Node。
 
-Codex and Eudic services may require third-party accounts, subscriptions, or usage payments. Those services handle their own access and charges; the plugin does not supply accounts or service credits.
+Codex 和欧路服务可能需要第三方账号、订阅或按量付费。相应服务自行管理权限与费用，插件不提供账号或服务额度。
 
-## Install from source
+## 从源码安装
 
-Clone this repository into a development directory separate from your content vault, then run:
+将本仓库克隆到文库之外的开发目录，在本仓库根目录运行：
 
 ```bash
 npm ci
 npm run build
-npm run install:plugin -- /absolute/path/to/your/vault
+npm run install:plugin -- /绝对路径/你的文库
 ```
 
-The install command copies the three runtime files into `<vault>/.obsidian/plugins/lacan-translation-helper/`. Existing plugin settings and conversation history are kept. Close and reopen the plugin in Obsidian's **Community plugins** settings to load the new build.
+安装命令将三个运行文件复制到 `<文库>/.obsidian/plugins/lacan-translation-helper/`，保留已有插件设置和会话记录。随后在 Obsidian「第三方插件」设置中关闭再开启插件，加载新构建。
 
-For a manual install, copy only `main.js`, `manifest.json`, and `styles.css` into that plugin directory. Keep personal `data.json`, credentials, and conversation data out of Git and distributable archives.
+手动安装时，将 `main.js`、`manifest.json` 和 `styles.css` 复制到上述目录即可。个人 `data.json`、凭据和会话数据不应进入 Git 或分发包。
 
-The vault for seminar reading is the root of your local [translation project](https://github.com/Kotoba-Rin/Lacan-Chinese-Translation-Project). Installing this source repository does not download the seminar content or submit the plugin to the Obsidian Community directory.
+用于阅读研讨班的 Vault 是本地[翻译项目](https://github.com/Kotoba-Rin/Lacan-Chinese-Translation-Project)的根目录。安装本源码仓库不会自动下载研讨班文本，也不表示插件已提交到 Obsidian 社区目录。
 
-## Content synchronization
+## 内容同步
 
-The **项目与同步** settings configure the content repository, branch, and optional fork repositories. The default content upstream is `Kotoba-Rin/Lacan-Chinese-Translation-Project`, even though the plugin source now lives in `kotoba-rin/LCTPlugin`.
+「项目与同步」设置用于配置内容仓库、分支和 Fork。尽管插件代码已迁移至 `kotoba-rin/LCTPlugin`，默认内容上游仍为 `Kotoba-Rin/Lacan-Chinese-Translation-Project`。
 
-**Back up or commit your vault changes before using Reader synchronization.** Reader mode aligns the working tree with the selected upstream using Git operations that can overwrite local changes and remove untracked files. Use **Editer** mode when you want to keep editing the current working files while refreshing comparison branches. Automatic synchronization on startup is disabled by default.
+**使用 Reader 同步前，请备份或提交文库内的本地改动。** Reader 模式通过 Git 将工作目录对齐到上游，可能覆盖本地修改并删除未跟踪文件。希望继续编辑当前文件、只刷新对照分支时，使用 **Editer** 模式。启动时自动同步默认关闭。
 
-## Network, files, and privacy
+## 联网、文件访问与隐私
 
-The following disclosures apply to the optional online features and local integrations:
+在线功能和本机集成涉及以下数据及访问范围：
 
-| Feature | Data and access |
+| 功能 | 数据与访问 |
 | --- | --- |
-| Content synchronization | Invokes the local Git executable to contact the configured upstream and forks, and changes Git state and content inside the vault. An optional GitHub proxy uses the URL you configure. |
-| Dictionary lookup | Sends the queried word or phrase to `https://www.frdic.com` and displays dictionary material, including dictionary images where provided. Automatic selection lookup is enabled by default and can be disabled in **法语取词** settings. |
-| Wordbooks | Sends your token to `https://api.frdic.com` and reads your wordbooks, checks word membership, and adds words at your request. Obtain a token through the linked Frdic authorization page. |
-| Quick selection translation | Sends the selected text and nearby context through your local Codex process to its configured model provider. Automatic phrase translation is enabled by default in **法语取词** settings. This feature has its own trigger and is not controlled by the segment-AI enable switch. Disable automatic translation, or automatic lookup entirely, if you do not want selections to trigger model requests. |
-| Segment interpretation | Sends the target translation, aligned original paragraphs, neighboring text, relevant glossary entries, and linked notes through Codex. The agent can read additional material within the current seminar under its read-only policy. Its default prompt requests web search with French, German, or English sources. |
-| Original-text analysis | Sends the selected original segment and assembled original/translation context through Codex. The first answer is a translation; the mode does not proactively request external research. |
-| Skills and MCP | Queries the configured Codex agent's installed Skills and may read their definitions and supporting files outside the vault. MCP is off by default; if you explicitly enable named servers, their tools and data flows depend on those services. Apps and Plugins integrations remain disabled in this runtime. |
-| French speech | Uses the operating system/browser speech synthesis API and available French voices; processing depends on the selected system voice. |
+| 内容同步 | 调用本机 Git，连接所配置的上游和 Fork，并修改文库内的 Git 状态与内容。可选的 GitHub 代理使用你配置的地址。 |
+| 词典查词 | 将查询的单词或短语发送至 `https://www.frdic.com`，显示词典内容及原站提供的词典图片。选中后自动取词默认开启，可在「法语取词」中关闭。 |
+| 欧路生词本 | 将授权码发送至 `https://api.frdic.com`，读取生词本、查询收录状态，并按用户操作添加词语。授权码通过插件链接的法语助手授权页面获取。 |
+| 快速选区翻译 | 将当前选区和附近上下文交给本机 Codex 进程，再由其发送至配置的模型服务。「法语取词」中的短语自动翻译默认开启，它与分段 AI 开关独立。希望避免选区触发模型请求时，应关闭自动翻译或关闭自动取词。 |
+| 译文解读 | 将目标译文、对齐法文、相邻段落、相关术语条目和链接笔记交给 Codex；Agent 可在只读规则内进一步读取当前研讨班资料。默认提示词要求网页检索，并只采用法语、德语或英语来源。 |
+| 原文解析 | 将点击的原文分段及组装的原译文上下文交给 Codex，首次直接生成翻译，不主动要求外部研究。 |
+| Skills 与 MCP | 通过所配置的 Codex Agent 发现已安装 Skills，可能读取文库外的 Skill 定义及必要支持文件。MCP 默认关闭；显式启用具体服务后，其工具与数据流由相应服务决定。本运行时的 Apps、Plugins 集成保持关闭。 |
+| 法语朗读 | 使用操作系统／浏览器的语音合成 API 及可用法语语音；具体处理方式取决于所选系统语音。 |
 
-**A local Agent is a local process, not a guarantee of local model inference.** Text sent to Codex can leave your computer according to your model-provider configuration and its policies. The plugin uses your existing Codex authentication; it does not silently fall back to a separate model API.
+**“本地 Agent”表示本机进程，不代表模型推理必定在本地完成。** 按照你的模型服务配置与服务政策，交给 Codex 的文本可能离开本机。插件沿用已有 Codex 登录，不会静默回退到另一套模型 API。
 
-Segment AI is disabled by default. Its runtime requests a read-only sandbox, denies permission escalation, and instructs the agent not to edit source text, translations, glossaries, or notes. Quick selection translation uses an ephemeral thread with research and MCP disabled. These AI policies are separate from editing, note creation, and Git synchronization that you initiate through the plugin.
+分段 AI 默认关闭。其运行时请求只读沙箱、拒绝权限提升，并要求 Agent 不修改原文、译文、术语表或笔记。快速选区翻译使用临时会话，关闭研究工具和 MCP。这些 AI 权限与用户主动操作的段落编辑、创建笔记和 Git 同步分别生效。
 
-The plugin stores settings, segment conversation history, and drafts in its local `data.json`. Codex manages its own authentication, configuration, and thread storage outside the vault. Closing a conversation tab does not delete its history. The Eudic token uses Obsidian SecretStorage when available; on older Obsidian versions it is kept only for the current run, rather than written to `data.json`. Review your vault synchronization or backup settings if local conversation history is sensitive.
+插件设置、分段会话历史和草稿保存在本地 `data.json`。Codex 在文库之外管理自己的登录、配置与 thread 数据。关闭会话标签不会删除历史。欧路授权码在支持时存入 Obsidian SecretStorage；旧版 Obsidian 只在当前运行期间保留，不写入 `data.json`。如果会话内容敏感，请同时检查文库同步与备份设置。
 
-The plugin does not include client-side usage analytics or a developer-operated telemetry endpoint. Third-party services process requests under their own terms and privacy policies.
+插件未包含客户端使用统计或开发者运营的遥测接口。第三方服务按照各自的条款与隐私政策处理请求。
 
-## Development
+## 开发与验证
 
 ```bash
 npm ci
@@ -95,25 +93,27 @@ npm test
 npm run package:plugin
 ```
 
-- `src/main.js` is the plugin entry point; `segment-ai/` contains the Codex integration and domain modules.
-- `main.js` is the bundled file Obsidian loads. Keep it consistent with source when committing.
-- `npm run package:plugin` produces the three distributable runtime files in `dist/`.
-- The tests use mocks and fixtures; passing them does not demonstrate live Codex authentication, remote dictionary availability, or every Obsidian interaction.
+- `src/main.js` 为插件入口，`segment-ai/` 为 Codex 集成及领域模块。
+- Obsidian 实际加载根目录的 `main.js`；提交时应保持它与源码一致。
+- `npm run package:plugin` 在 `dist/` 中生成三个可分发运行文件。
+- 测试使用模拟环境与固定材料；通过测试不代表已经验证真实 Codex 登录、词典服务可用性或所有 Obsidian 交互。
 
-## Documentation
+## 详细说明
 
-- [French lookup and Eudic wordbooks](docs/french-lookup.md)
-- [PDF reading](docs/pdf-reading.md)
-- [Original-text analysis](docs/original-analysis.md)
-- [Chapter reading notes](docs/chapter-reading-notes.md)
-- [Automatic Skills discovery](docs/segment-ai-skills.md)
-- [Segment AI architecture](docs/segment-ai-interpretation-architecture.md)
-- [Multi-conversation architecture and historical design](docs/segment-ai-multi-session-architecture.md)
+- [法语取词与欧路生词本](docs/french-lookup.md)
+- [PDF 阅读](docs/pdf-reading.md)
+- [原文解析](docs/original-analysis.md)
+- [章节阅读笔记](docs/chapter-reading-notes.md)
+- [Skills 自动发现](docs/segment-ai-skills.md)
+- [分段 AI 架构](docs/segment-ai-interpretation-architecture.md)
+- [多会话架构与历史设计](docs/segment-ai-multi-session-architecture.md)
 
-Some architecture documents retain historical decisions. The current code and the Skills discovery document take precedence where later changes are explicitly noted.
+部分架构文档保留历史决策；已注明后续替换的内容，以当前代码及 Skills 自动发现说明为准。
 
-Report plugin bugs and feature requests in [this repository's Issues](https://github.com/kotoba-rin/LCTPlugin/issues). Text corrections belong in the translation project.
+插件问题及功能建议请提交到[本仓库 Issues](https://github.com/kotoba-rin/LCTPlugin/issues)；原译文修订仍提交至翻译项目。
 
-## License and origin
+## 许可与来源
 
-This migration preserves the upstream **CC BY 4.0** license. See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md) for the retained license and source attribution.
+本仓库的插件源码、样式、构建工具、测试和配套文档采用 **MIT 许可证**。分发时须保留版权声明和许可文本；构建后的 `main.js` 已包含完整许可。详见 [LICENSE](LICENSE) 和 [来源说明](NOTICE.md)。
+
+研讨班原文、译文及第三方材料的授权安排独立于插件的软件许可证。
