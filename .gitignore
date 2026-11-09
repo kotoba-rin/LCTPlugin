@@ -1,0 +1,10 @@
+node_modules/
+dist/
+data.json
+.obsidian/
+.codex/
+.claude/
+.env
+.env.*
+*.log
+.DS_Store
