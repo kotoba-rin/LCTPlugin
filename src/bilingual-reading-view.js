@@ -1,6 +1,7 @@
 const { Component, FileView, MarkdownRenderer, Scope, normalizePath } = require("obsidian");
 const { SegmentParser } = require("../segment-ai/segment-parser");
 const { BilingualReadingSearch } = require("./bilingual-reading-search");
+const { captureBilingualReadingPosition, restoreBilingualReadingPosition } = require("./reading-position");
 
 const LACAN_BILINGUAL_VIEW_TYPE = "lacan-bilingual-reading";
 const LESSON_PATH_RE = /^texts\/[^/]+\/(original|translation)\/(?:Leçon|Lecon|lesson)-\d+\.md$/i;
@@ -93,6 +94,7 @@ class LacanBilingualReadingView extends FileView {
     this.allowNoFile = true;
     this.sourcePath = "";
     this.savedScrollTop = 0;
+    this.pendingReadingPosition = null;
     this.renderToken = 0;
     this.markdownComponents = new Set();
     this.comparisonBlocks = [];
@@ -145,17 +147,24 @@ class LacanBilingualReadingView extends FileView {
   }
 
   getState() {
+    const readingPosition = this.getReadingPosition();
     return {
       ...super.getState(),
       sourcePath: this.sourcePath,
       scrollTop: this.contentRoot()?.scrollTop ?? this.savedScrollTop,
+      ...(readingPosition ? { readingPosition } : {}),
     };
+  }
+
+  getReadingPosition() {
+    return captureBilingualReadingPosition(this.contentRoot());
   }
 
   async setState(state = {}, result) {
     const candidate = String(state.sourcePath || state.file || "").replace(/\\/g, "/");
     this.sourcePath = LESSON_PATH_RE.test(candidate) ? normalizePath(candidate) : "";
     this.savedScrollTop = Math.max(0, Number(state.scrollTop) || 0);
+    this.pendingReadingPosition = state.readingPosition || null;
     const previousFile = this.file;
     await super.setState({ ...state, file: this.sourcePath }, result || {});
     // FileView only calls onLoadFile when the file changes.
@@ -187,10 +196,7 @@ class LacanBilingualReadingView extends FileView {
   }
 
   async openMonolingual(path, options) {
-    const file = this.plugin.app.vault.getAbstractFileByPath(path);
-    if (file?.extension === "md") {
-      await this.leaf.openFile(file, options);
-    }
+    return this.plugin.openMonolingualReading(this, path, options);
   }
 
   async onOpen() {
@@ -282,16 +288,6 @@ class LacanBilingualReadingView extends FileView {
         stagingEl.createDiv({ cls: "lacan-bilingual-empty", text: "请从研讨班原文或译文打开双语阅读。" });
       } else {
         const headerEl = stagingEl.createDiv({ cls: "lacan-bilingual-header" });
-        const languagesEl = headerEl.createDiv({ cls: "lacan-bilingual-navigation" });
-        for (const [label, path] of [["中文", paths.translationPath], ["法语", paths.originalPath]]) {
-          const button = languagesEl.createEl("button", {
-            cls: "lacan-bilingual-monolingual",
-            text: label,
-            attr: { type: "button", "aria-label": `打开${label} Markdown 文本`, title: path },
-          });
-          button.disabled = !this.plugin.app.vault.getAbstractFileByPath(path);
-          button.addEventListener("click", () => this.openMonolingual(path));
-        }
         const title = [originalText, translationText].flatMap((text) => (
           String(text).match(/^#\s+(.+)$/m)?.[1] || []
         ))[0] || this.sourcePath.split("/").pop().replace(/\.md$/i, "");
@@ -342,7 +338,10 @@ class LacanBilingualReadingView extends FileView {
       committed = true;
       this.renderComparisonControls();
       rootEl.scrollTop = scrollTop;
-      this.savedScrollTop = scrollTop;
+      if (this.pendingReadingPosition && restoreBilingualReadingPosition(rootEl, this.pendingReadingPosition)) {
+        this.pendingReadingPosition = null;
+      }
+      this.savedScrollTop = rootEl.scrollTop;
       this.readingSearch?.refresh();
     } catch (error) {
       if (!this.closed && token === this.renderToken) {
@@ -378,6 +377,9 @@ class LacanBilingualReadingView extends FileView {
   async renderBlock(pairEl, language, block, fileText, sourcePath, rendered) {
     const isOriginal = language === "original";
     const laneEl = pairEl.createDiv({ cls: `lacan-bilingual-language is-${language}`, attr: { lang: isOriginal ? "fr" : "zh" } });
+    laneEl.dataset.segmentId = block.primaryId;
+    laneEl.dataset.segmentIds = block.ids.join(" ");
+    laneEl.dataset.language = language;
     const headerEl = laneEl.createDiv({ cls: "lacan-bilingual-language-header" });
     headerEl.createSpan({ cls: "lacan-bilingual-language-label", text: isOriginal ? "法语原文" : "中文译文" });
     if (this.plugin.settings.segmentAiEnabled) {

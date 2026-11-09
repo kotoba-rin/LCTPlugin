@@ -259,16 +259,6 @@
   margin: 24px 0 32px;
 }
 
-.lacan-bilingual-navigation {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.lacan-bilingual-monolingual {
-  color: var(--text-muted);
-}
-
 .lacan-bilingual-pair {
   border-bottom: 1px solid var(--background-modifier-border);
   padding: 0 0 28px;

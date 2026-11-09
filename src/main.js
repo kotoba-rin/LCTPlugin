@@ -4,6 +4,7 @@ const {
   LACAN_BILINGUAL_VIEW_TYPE,
   LacanBilingualReadingView,
 } = require("./bilingual-reading-view");
+const { captureMarkdownReadingPosition } = require("./reading-position");
 const { FrenchDictionaryService } = require("./french-dictionary-service");
 const { FrenchLookupPopup } = require("./french-lookup-popup");
 const { FrenchSelectionTranslator } = require("./french-selection-translator");
@@ -1406,7 +1407,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
 
   refreshBilingualReadingViews() {
     for (const leaf of this.app.workspace.getLeavesOfType?.(LACAN_BILINGUAL_VIEW_TYPE) || []) {
-      void leaf.view.render();
+      void leaf.view?.render?.();
     }
   }
 
@@ -1416,11 +1417,60 @@ module.exports = class LacanTranslationHelper extends Plugin {
       throw new Error("双语阅读仅适用于研讨班原文或译文课文。");
     }
     const leaf = sourceLeaf || this.app.workspace.getLeaf(false);
+    if (leaf.view?.getViewType?.() === LACAN_BILINGUAL_VIEW_TYPE) return;
+    const readingPosition = await this.captureReadingPosition(leaf.view, path);
     await leaf.setViewState({
       type: LACAN_BILINGUAL_VIEW_TYPE,
-      state: { sourcePath: path },
+      state: { sourcePath: path, ...(readingPosition ? { readingPosition } : {}) },
       active: true,
     });
+  }
+
+  async captureReadingPosition(view, sourcePath) {
+    if (view?.getViewType?.() === LACAN_BILINGUAL_VIEW_TYPE) {
+      return view.getReadingPosition();
+    }
+    if (!view || view.file?.path !== sourcePath) return null;
+    const file = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (file?.extension !== "md") return null;
+    const text = await this.app.vault.cachedRead(file);
+    const blocks = new SegmentParser().parse(text, sourcePath);
+    const language = this.isTranslationLessonPath(sourcePath) ? "translation" : "original";
+    return captureMarkdownReadingPosition(view, blocks, language);
+  }
+
+  async openMonolingualReading(sourceView, targetPath, options = {}) {
+    const file = this.app.vault.getAbstractFileByPath(targetPath);
+    if (file?.extension !== "md") throw new Error(`找不到目标文本：${targetPath}`);
+    const position = sourceView.getReadingPosition();
+    let location = null;
+    if (position) {
+      const text = await this.app.vault.cachedRead(file);
+      for (const id of new Set([position.segmentId, ...(position.segmentIds || [])])) {
+        location = this.findSegmentLocation(text, id);
+        if (location) break;
+      }
+      if (!location) throw new Error(`目标文本中没有对应分段：${position.segmentId}`);
+    }
+    await sourceView.leaf.openFile(file, {
+      ...options,
+      state: { ...options.state, mode: options.state?.mode || "preview" },
+      ...(location ? { eState: { ...options.eState, scroll: location.line } } : {}),
+    });
+  }
+
+  showBilingualLanguageMenu(view, button) {
+    const paths = view.lessonPaths();
+    if (!paths) return;
+    const menu = new Obsidian.Menu();
+    for (const [label, path] of [["中文", paths.translationPath], ["法语", paths.originalPath]]) {
+      menu.addItem((item) => item
+        .setTitle(label)
+        .setDisabled(!this.app.vault.getAbstractFileByPath(path))
+        .onClick(() => this.runWithNotice(() => view.openMonolingual(path), "语言切换失败")));
+    }
+    const rect = button.getBoundingClientRect();
+    menu.showAtPosition({ x: rect.left, y: rect.bottom });
   }
 
   async handleCreatedFile(file) {
@@ -2402,9 +2452,16 @@ module.exports = class LacanTranslationHelper extends Plugin {
         text: "双语阅读",
       });
       bilingualButton.type = "button";
-      bilingualButton.setAttribute("aria-label", "双语阅读：法语原文在上，中文翻译在下");
+      const isBilingual = sourceLeaf?.view?.getViewType?.() === LACAN_BILINGUAL_VIEW_TYPE;
+      bilingualButton.setAttribute("aria-label", isBilingual
+        ? "双语阅读：切换为中文或法语" : "双语阅读：法语原文在上，中文翻译在下");
+      if (isBilingual) bilingualButton.setAttribute("aria-haspopup", "menu");
       bilingualButton.addEventListener("click", () => {
-        void this.runWithNotice(
+        if (sourceLeaf?.view?.getViewType?.() === LACAN_BILINGUAL_VIEW_TYPE) {
+          this.showBilingualLanguageMenu(sourceLeaf.view, bilingualButton);
+          return;
+        }
+        return this.runWithNotice(
           () => this.openBilingualReading(sourcePath, sourceLeaf),
           "双语阅读打开失败"
         );

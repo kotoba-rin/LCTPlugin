@@ -848,7 +848,7 @@ try {
     assert.ok(bilingualToolbarButton, "双语阅读 must be available even without configured forks");
     const previousRunWithNotice = plugin.runWithNotice;
     plugin.runWithNotice = (action) => action();
-    bilingualToolbarButton.listeners.click();
+    await bilingualToolbarButton.listeners.click();
     assert.strictEqual(bilingualViewStates.length, 3, "toolbar opens bilingual reading in the source leaf");
     plugin.runWithNotice = previousRunWithNotice;
     plugin.renderComparisonToolbarContent(toolbar, [], "知识库/欲望.md", bilingualLeaf);

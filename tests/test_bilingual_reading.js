@@ -156,6 +156,9 @@ const run = async () => {
     pathsFromOriginal: (pathname) => pathname.includes("/original/") ? { originalPath: pathname, translationPath: pathname.replace("/original/", "/translation/") } : null,
     pathsFromTranslation: (pathname) => pathname.includes("/translation/") ? { originalPath: pathname.replace("/translation/", "/original/"), translationPath: pathname } : null,
     renderComparisonToolbar() {},
+    openMonolingualReading: (sourceView, path, options) => (
+      sourceView.leaf.openFile(files.get(path), options)
+    ),
     getActiveComparisonForks: () => activeForks,
     comparisonForkSignature: () => activeForks.map((fork) => fork.id).join("|"),
     renderSegmentComparisonControlIfNeeded: (element, pathname, id, forks, signature) => {
@@ -229,10 +232,13 @@ const run = async () => {
   assert.strictEqual(markdownRenders[0].sourcePath, originalPath);
   assert.ok(markdownRenders[1].markdown.includes("> 注释保留。\n> $$a+b$$"));
   assert.ok(markdownRenders[1].markdown.includes("[^zh-s7-01-0001-1]: 中文注释。"));
-  const languageButtons = leaf.contentEl.children[0].children[0].children;
-  assert.deepStrictEqual(languageButtons.map((button) => button.textContent), ["中文", "法语"]);
-  await languageButtons[0].listeners.click();
-  await languageButtons[1].listeners.click();
+  assert.strictEqual(leaf.contentEl.children[0].children[0].tag, "h1",
+    "language options belong in the toolbar popup, leaving only the title in the reading header");
+  assert.strictEqual(pairsEl.children[1].children[1].dataset.segmentId, "s7-01-0003",
+    "each French lane must keep its exact ID within a merged pair");
+  assert.strictEqual(pairsEl.children[1].children[2].dataset.segmentIds, "s7-01-0002 s7-01-0003");
+  await view.openMonolingual(translationPath);
+  await view.openMonolingual(originalPath);
   assert.deepStrictEqual(openedFiles.map((file) => file.path), [translationPath, originalPath], "language buttons must open their corresponding markdown in the same leaf");
   assert.strictEqual(view.actions.length, 1, "native header must retain a reading action");
   await view.actions[0].callback();
@@ -361,6 +367,31 @@ const run = async () => {
   assert.strictEqual(nativeStateView.nativeRenameTitle, "Leçon-02 · 双语阅读", "native rename must update the tab title from the current source path");
   nativeStateView.file.path = originalPath;
   await nativeStateView.onClose();
+
+  const navigationRoot = new MockElement();
+  navigationRoot.getBoundingClientRect = () => ({ top: 100, bottom: 600 });
+  navigationRoot.querySelectorAll = () => {
+    const lanes = [];
+    const visit = (element) => {
+      if (element.dataset?.language) {
+        const top = Number(element.dataset.segmentId.slice(-4)) * 200
+          + (element.dataset.language === "translation" ? 60 : 0) - navigationRoot.scrollTop;
+        element.getBoundingClientRect = () => ({ top: 100 + top, bottom: 160 + top, height: 60 });
+        lanes.push(element);
+      }
+      element.children.forEach(visit);
+    };
+    navigationRoot.children.forEach(visit);
+    return lanes;
+  };
+  const navigationView = new LacanBilingualReadingView({ contentEl: navigationRoot }, plugin);
+  const readingPosition = { segmentId: "s7-01-0003", segmentIds: ["s7-01-0003"], language: "original" };
+  await navigationView.onOpen();
+  await navigationView.setState({ sourcePath: originalPath, readingPosition });
+  assert.strictEqual(navigationRoot.scrollTop, 600, "opening bilingual reading must restore the requested segment after rendering");
+  assert.deepStrictEqual(navigationView.getState().readingPosition, readingPosition,
+    "history states retain the reading segment ID and language");
+  await navigationView.onClose();
 
   const invalid = new LacanBilingualReadingView({ contentEl: new MockElement() }, plugin);
   await invalid.setState({ sourcePath: "../texts/s7/original/Leçon-01.md" });
