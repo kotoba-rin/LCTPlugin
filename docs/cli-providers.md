@@ -7,13 +7,15 @@
 发现机制参考 [Claudian](https://github.com/yishentu/claudian) 的职责划分，并以本插件的运行接口重新实现：
 
 1. 显式路径优先；路径无效时直接提示，不悄悄改用另一份安装。
-2. 查询 Obsidian 继承的 PATH；macOS 缺少终端路径时，以有时限的固定登录 Shell 命令读取 PATH。
+2. 查询 Obsidian 继承的 PATH，不启动登录 Shell，也不执行其启动脚本。
 3. 检查 Homebrew、用户 `.local/bin`、npm／pnpm、NVM、Volta、asdf 等常见安装目录，以及受支持的桌面应用内置入口。
 4. 单独执行有时限的 `--version`。检测不会发送模型请求。
 
 Windows 保留 `Path` 大小写，支持 `.exe`、npm `.cmd`、Node `.js/.cjs/.mjs` 入口及带空格的路径。npm 包装器解析为底层 Node 入口，提示词通过 stdin 传入，不拼进 `cmd.exe`。无法识别的自定义批处理会提示改选 `.exe` 或 Node 入口。macOS 支持 Homebrew、原生安装及 Codex／ChatGPT 应用内置 Codex。DeepSeek Desktop 的入口按其内置 Electron／Node 布局启动。
 
 自定义路径允许外层引号、`~/` 和 Windows `%APPDATA%` 等环境变量。路径以操作系统＋电脑名称为键保存；新电脑使用自动发现。首次迁移仅导入与当前操作系统兼容的旧路径。清空后恢复自动发现。
+
+如果 CLI 安装位置仅由终端的 Shell 启动脚本加入 PATH，且不在常见安装目录中，请填写 CLI 入口的绝对路径。插件不会为自动检测读取登录 Shell 的 PATH。
 
 ## 运行协议与能力
 
@@ -30,6 +32,10 @@ Claude 与 DeepSeek 当前适配不提供模型／Skills／MCP 发现 RPC，不�
 恢复界面使用插件已保存的消息；下次追问时才调用 CLI 的原生恢复参数，不通过额外模型请求读取历史。原生会话被删除或恢复标识不符时报告错误，不自动开启新会话冒充延续。
 
 ## 只读与进程边界
+
+插件读取操作系统、主机名、主目录和环境变量，用于按电脑保存路径、发现安装位置和启动 CLI；电脑名称会明文保存在 `data.json` 的路径索引中。CLI 进程继承 Obsidian 的环境，以沿用已有登录、API、代理和证书配置。插件不把完整环境放入提示词或自身 HTTP 请求；第三方 CLI 如何读取和使用这些配置，仍由其自身决定。
+
+插件以 `shell: false` 直接启动 CLI，不把提示词拼进 Shell 命令。Node.js `fs` 仍用于安装发现、同步路径检查、同步状态原子替换和私有临时文件，`child_process` 仍用于 CLI 启动、版本检测及进程停止，因此静态审核可能继续显示文件系统、系统身份和进程执行提示。这些 API 的用途限制与 AI 工具策略不等于操作系统沙箱；CLI 仍以 Obsidian 当前用户的身份运行。
 
 插件不提供 MCP 接入、服务清单、启用开关或后台预检；旧版保存的相关设置会在载入时删除。Codex 仅在实际使用 CLI 时读取配置名称，以明确禁用用户或项目配置中的外部服务，不连接这些服务。
 

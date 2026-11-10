@@ -101,20 +101,6 @@ const commonDirectoriesFor = (home, environment, platform, fileSystem) => {
   return uniquePaths(entries, platform);
 };
 
-// The shell command is fixed: no configured executable, provider or prompt enters shell syntax.
-const readLoginShellPath = async ({ environment, platform, home, execFile, timeoutMs }) => {
-  if (platform === "win32") return [];
-  const shell = environment.SHELL || (() => { try { return os.userInfo().shell; } catch (_error) { return ""; } })();
-  if (!shell || !path.posix.isAbsolute(shell)) return [];
-  try {
-    const marker = "__LCTPLUGIN_LOGIN_PATH__";
-    const output = await runProbe(execFile, shell,
-      ["-i", "-l", "-c", `printf '%s' '${marker}'; /usr/bin/printenv PATH; printf '%s' '${marker}'`],
-      { env: { ...environment }, cwd: home, windowsHide: true }, timeoutMs);
-    return splitPath(output.split(marker)[1] || "", platform).filter((entry) => path.posix.isAbsolute(entry));
-  } catch (_error) { return []; }
-};
-
 const runProbe = (execFile, command, args, options, timeoutMs) => new Promise((resolve, reject) => {
   let settled = false;
   let child;
@@ -133,7 +119,7 @@ const runProbe = (execFile, command, args, options, timeoutMs) => new Promise((r
   }, timeoutMs);
   try {
     child = execFile(command, args, {
-      ...options, encoding: "utf8", timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 256 * 1024,
+      ...options, shell: false, encoding: "utf8", timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 256 * 1024,
     }, finish);
   } catch (error) { finish(error); }
 });
@@ -259,7 +245,6 @@ async function discoverCli(provider, options = {}) {
   if (custom && !paths.isAbsolute(custom)) throw new CliDiscoveryError("InvalidCliPath", `${definition.label} 路径必须是绝对路径。`);
   const inherited = splitPath(environmentValue(environment, "PATH"), platform).filter((entry) => paths.isAbsolute(entry));
   const common = options.commonDirectories || commonDirectoriesFor(home, environment, platform, fileSystem);
-  let login = [];
   const candidatesFor = (directories, source) => directories.flatMap((directory) => {
     const names = platform === "win32" ? [`${definition.binary}.exe`, `${definition.binary}.cmd`] : [definition.binary];
     const candidates = names.map((name) => ({ path: paths.join(directory, name), source }));
@@ -271,7 +256,7 @@ async function discoverCli(provider, options = {}) {
   const choose = (candidates) => {
     for (const candidate of candidates) {
       try {
-        const context = { platform, paths, fileSystem, directories: uniquePaths([...inherited, ...login, ...common], platform), environment };
+        const context = { platform, paths, fileSystem, directories: uniquePaths([...inherited, ...common], platform), environment };
         const launch = launchFor(candidate.path, definition, context);
         if (launch) return { ...candidate, ...launch };
       } catch (error) { if (custom) throw error; }
@@ -283,15 +268,11 @@ async function discoverCli(provider, options = {}) {
     if (!chosen) throw new CliDiscoveryError("CliNotFound", `设置中的 ${definition.label} 路径无效，请选择可执行文件或 Node.js 入口的绝对路径。`);
   } else {
     chosen = choose(candidatesFor(inherited, "path"));
-    if (!chosen && options.loginShell !== false) {
-      login = options.loginShellPath !== undefined ? splitPath(options.loginShellPath, platform) : await readLoginShellPath({ environment, platform, home, execFile, timeoutMs: options.shellTimeoutMs || 2500 });
-      chosen = choose(candidatesFor(login, "login-shell"));
-    }
     if (!chosen) chosen = choose(candidatesFor(common, "common"));
     if (!chosen) chosen = choose(desktopInstallations(id, home, environment, platform, options.applicationDirectories).map((candidate) => ({ path: candidate, source: "application" })));
     if (!chosen) throw new CliDiscoveryError("CliNotFound", `未找到本地 ${definition.label}。请安装该 CLI，或在插件设置中填写其绝对路径。`);
   }
-  const directories = uniquePaths([...inherited, ...login, ...common], platform);
+  const directories = uniquePaths([...inherited, ...common], platform);
   chosen.environment = buildEnvironment(chosen.environment, directories, chosen.path, platform);
   chosen.provider = id;
   chosen.version = null;

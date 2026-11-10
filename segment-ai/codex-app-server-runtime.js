@@ -145,6 +145,7 @@ class CodexAppServerRuntime {
         env: installation.environment,
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
+        shell: false,
       });
     } catch (error) {
       throw this.rememberError(new CodexRuntimeError(

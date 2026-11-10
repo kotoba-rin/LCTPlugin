@@ -49,6 +49,7 @@ function processStub() {
   assert(calls[0][1].includes('app-server'));
   assert.strictEqual(calls[0][2].env, installation.environment);
   assert.strictEqual(calls[0][2].windowsHide, true);
+  assert.strictEqual(calls[0][2].shell, false, 'CLI launch explicitly bypasses shell command parsing');
   assert.strictEqual(runtime.getDiagnostics().cliPath, '/npm/codex');
   await runtime.shutdown();
 

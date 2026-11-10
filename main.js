@@ -5419,30 +5419,6 @@ var require_cli_discovery = __commonJS({
       }
       return uniquePaths(entries, platform);
     };
-    var readLoginShellPath = async ({ environment, platform, home, execFile, timeoutMs }) => {
-      if (platform === "win32") return [];
-      const shell = environment.SHELL || (() => {
-        try {
-          return os.userInfo().shell;
-        } catch (_error) {
-          return "";
-        }
-      })();
-      if (!shell || !path.posix.isAbsolute(shell)) return [];
-      try {
-        const marker = "__LCTPLUGIN_LOGIN_PATH__";
-        const output = await runProbe(
-          execFile,
-          shell,
-          ["-i", "-l", "-c", `printf '%s' '${marker}'; /usr/bin/printenv PATH; printf '%s' '${marker}'`],
-          { env: { ...environment }, cwd: home, windowsHide: true },
-          timeoutMs
-        );
-        return splitPath(output.split(marker)[1] || "", platform).filter((entry) => path.posix.isAbsolute(entry));
-      } catch (_error) {
-        return [];
-      }
-    };
     var runProbe = (execFile, command, args, options, timeoutMs) => new Promise((resolve, reject) => {
       let settled = false;
       let child;
@@ -5466,6 +5442,7 @@ ${stderr}` : ""}`);
       try {
         child = execFile(command, args, {
           ...options,
+          shell: false,
           encoding: "utf8",
           timeout: timeoutMs,
           killSignal: "SIGKILL",
@@ -5595,7 +5572,6 @@ ${stderr}` : ""}`);
       if (custom && !paths.isAbsolute(custom)) throw new CliDiscoveryError("InvalidCliPath", `${definition.label} 路径必须是绝对路径。`);
       const inherited = splitPath(environmentValue(environment, "PATH"), platform).filter((entry) => paths.isAbsolute(entry));
       const common = options.commonDirectories || commonDirectoriesFor(home, environment, platform, fileSystem);
-      let login = [];
       const candidatesFor = (directories2, source) => directories2.flatMap((directory) => {
         const names = platform === "win32" ? [`${definition.binary}.exe`, `${definition.binary}.cmd`] : [definition.binary];
         const candidates = names.map((name) => ({ path: paths.join(directory, name), source }));
@@ -5607,7 +5583,7 @@ ${stderr}` : ""}`);
       const choose = (candidates) => {
         for (const candidate of candidates) {
           try {
-            const context = { platform, paths, fileSystem, directories: uniquePaths([...inherited, ...login, ...common], platform), environment };
+            const context = { platform, paths, fileSystem, directories: uniquePaths([...inherited, ...common], platform), environment };
             const launch = launchFor(candidate.path, definition, context);
             if (launch) return { ...candidate, ...launch };
           } catch (error) {
@@ -5621,15 +5597,11 @@ ${stderr}` : ""}`);
         if (!chosen) throw new CliDiscoveryError("CliNotFound", `设置中的 ${definition.label} 路径无效，请选择可执行文件或 Node.js 入口的绝对路径。`);
       } else {
         chosen = choose(candidatesFor(inherited, "path"));
-        if (!chosen && options.loginShell !== false) {
-          login = options.loginShellPath !== void 0 ? splitPath(options.loginShellPath, platform) : await readLoginShellPath({ environment, platform, home, execFile, timeoutMs: options.shellTimeoutMs || 2500 });
-          chosen = choose(candidatesFor(login, "login-shell"));
-        }
         if (!chosen) chosen = choose(candidatesFor(common, "common"));
         if (!chosen) chosen = choose(desktopInstallations(id, home, environment, platform, options.applicationDirectories).map((candidate) => ({ path: candidate, source: "application" })));
         if (!chosen) throw new CliDiscoveryError("CliNotFound", `未找到本地 ${definition.label}。请安装该 CLI，或在插件设置中填写其绝对路径。`);
       }
-      const directories = uniquePaths([...inherited, ...login, ...common], platform);
+      const directories = uniquePaths([...inherited, ...common], platform);
       chosen.environment = buildEnvironment(chosen.environment, directories, chosen.path, platform);
       chosen.provider = id;
       chosen.version = null;
@@ -6057,7 +6029,8 @@ var require_codex_app_server_runtime = __commonJS({
             cwd: this.vaultRoot,
             env: installation.environment,
             stdio: ["pipe", "pipe", "pipe"],
-            windowsHide: true
+            windowsHide: true,
+            shell: false
           });
         } catch (error) {
           throw this.rememberError(new CodexRuntimeError(
@@ -7198,6 +7171,7 @@ export function apply(ctx, config) {
               env: { ...environment },
               stdio: ["pipe", "pipe", "pipe"],
               windowsHide: true,
+              shell: false,
               detached: this.platform !== "win32",
               ...invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}
             });
@@ -7511,7 +7485,8 @@ export function apply(ctx, config) {
         try {
           const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", ...signal === "SIGKILL" ? ["/F"] : []], {
             stdio: "ignore",
-            windowsHide: true
+            windowsHide: true,
+            shell: false
           });
           killer.on("error", () => {
             try {
@@ -18588,7 +18563,7 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
       await Promise.allSettled(PROVIDER_DEFINITIONS.map(({ id }) => plugin.discoverSegmentAiCli(id)));
       this.display();
     }));
-    const sourceLabels = { custom: "自定义路径", path: "PATH", "login-shell": "登录 Shell", common: "常见安装目录", application: "应用内置" };
+    const sourceLabels = { custom: "自定义路径", path: "PATH", common: "常见安装目录", application: "应用内置" };
     for (const provider of PROVIDER_DEFINITIONS) {
       const card = containerEl.createEl("details", { cls: "lacan-ai-cli-card" });
       if (provider.id === selected) card.setAttribute("open", "");
@@ -18602,7 +18577,7 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
         resolvedPath.textContent = state?.status === "ready" ? state.path : state?.message || "";
       };
       let pathChangeTimer;
-      new Setting(card).setClass("lacan-ai-setting-wide").setName(`${provider.label} 路径`).setDesc("此电脑的可选 CLI 路径。留空自动检测 PATH、登录 Shell 和常见安装目录；支持 Windows 与 macOS。").addText((text) => text.setPlaceholder(process.platform === "win32" ? `C:\\Users\\用户名\\AppData\\Roaming\\npm\\${provider.id === "deepseek" ? "dsh" : provider.id}.cmd` : provider.placeholder).setValue(plugin.getSegmentAiCliPath(provider.id)).onChange((value) => {
+      new Setting(card).setClass("lacan-ai-setting-wide").setName(`${provider.label} 路径`).setDesc("此电脑的可选 CLI 路径。留空自动检测 PATH、常见安装目录和应用内置入口；未找到时可填写绝对路径。支持 Windows 与 macOS。").addText((text) => text.setPlaceholder(process.platform === "win32" ? `C:\\Users\\用户名\\AppData\\Roaming\\npm\\${provider.id === "deepseek" ? "dsh" : provider.id}.cmd` : provider.placeholder).setValue(plugin.getSegmentAiCliPath(provider.id)).onChange((value) => {
         clearTimeout(pathChangeTimer);
         pathChangeTimer = setTimeout(async () => {
           try {

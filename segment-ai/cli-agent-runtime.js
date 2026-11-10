@@ -221,6 +221,7 @@ class CliAgentRuntime {
           env: { ...environment },
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
+          shell: false,
           detached: this.platform !== "win32",
           ...(invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
         });
@@ -501,7 +502,7 @@ function terminateProcessTree(child, signal, platform) {
   if (platform === "win32" && Number.isInteger(child.pid) && child.pid > 0) {
     try {
       const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", ...(signal === "SIGKILL" ? ["/F"] : [])], {
-        stdio: "ignore", windowsHide: true,
+        stdio: "ignore", windowsHide: true, shell: false,
       });
       killer.on("error", () => { try { child.kill(signal); } catch {} });
       return;

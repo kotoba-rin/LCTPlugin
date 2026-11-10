@@ -44,6 +44,7 @@ const createRuntime = (provider, handler, options = {}) => {
         args: [], environment: { PATH: process.env.PATH }, source: "path" };
     },
     spawnProcess: (command, args, spawnOptions) => {
+      assert.strictEqual(spawnOptions.shell, false, "all providers explicitly bypass shell command parsing");
       const call = { command, args, options: spawnOptions };
       calls.push(call);
       const child = new ScriptedCli((process) => handler(process, call));
@@ -79,7 +80,7 @@ async function testClaudeStreamAndResume() {
     assert.ok(call.args.includes("--strict-mcp-config"));
     assert.ok(!call.args.includes(prompt));
     assert.ok(!call.args.includes(instructions));
-    assert.strictEqual(call.options.shell, undefined);
+    assert.strictEqual(call.options.shell, false);
     child.event({ type: "system", subtype: "init", session_id: session });
     child.event({ type: "stream_event", event: { type: "message_start" } });
     child.event({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "你" } } });
@@ -115,7 +116,7 @@ async function testOriginalModeHasNoToolsAndWindowsUsesArgv() {
     assert.strictEqual(argValue(call, "--tools"), "");
     assert.strictEqual(argValue(call, "--allowedTools"), "");
     assert.strictEqual(call.options.detached, false);
-    assert.strictEqual(call.options.shell, undefined);
+    assert.strictEqual(call.options.shell, false);
     child.event({ type: "result", session_id: session, subtype: "success", result: "译文" });
     child.close();
   }, { platform: "win32" });

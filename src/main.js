@@ -4233,7 +4233,7 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
         this.display();
       }));
 
-    const sourceLabels = { custom: "自定义路径", path: "PATH", "login-shell": "登录 Shell", common: "常见安装目录", application: "应用内置" };
+    const sourceLabels = { custom: "自定义路径", path: "PATH", common: "常见安装目录", application: "应用内置" };
     for (const provider of PROVIDER_DEFINITIONS) {
       const card = containerEl.createEl("details", { cls: "lacan-ai-cli-card" });
       if (provider.id === selected) card.setAttribute("open", "");
@@ -4252,7 +4252,7 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
       new Setting(card)
         .setClass("lacan-ai-setting-wide")
         .setName(`${provider.label} 路径`)
-        .setDesc("此电脑的可选 CLI 路径。留空自动检测 PATH、登录 Shell 和常见安装目录；支持 Windows 与 macOS。")
+        .setDesc("此电脑的可选 CLI 路径。留空自动检测 PATH、常见安装目录和应用内置入口；未找到时可填写绝对路径。支持 Windows 与 macOS。")
         .addText((text) => text
           .setPlaceholder(process.platform === "win32"
             ? `C:\\Users\\用户名\\AppData\\Roaming\\npm\\${provider.id === "deepseek" ? "dsh" : provider.id}.cmd`

@@ -10,7 +10,7 @@ const makeFile = (file, contents = "#!/bin/sh\necho tool 1.2.3\n", mode = 0o755)
   return file;
 };
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "lctp-cli-discovery-"));
-const baseOptions = { homeDirectory: root, environment: { HOME: root, PATH: "" }, commonDirectories: [], applicationDirectories: [], loginShell: false };
+const baseOptions = { homeDirectory: root, environment: { HOME: root, PATH: "" }, commonDirectories: [], applicationDirectories: [] };
 
 const virtualWindowsFS = (entries) => ({
   statSync(file) { if (!(file in entries)) throw new Error("ENOENT"); return { isFile: () => true }; },
@@ -41,34 +41,47 @@ const virtualWindowsFS = (entries) => ({
 
     // GUI apps have no user-installed PATH entries; native installer directories still work.
     const claude = makeFile(path.join(root, ".local", "bin", "claude"));
-    const gui = await discoverCli("claude", { homeDirectory: root, environment: { HOME: root, PATH: "" }, loginShell: false, applicationDirectories: [] });
+    const gui = await discoverCli("claude", { homeDirectory: root, environment: { HOME: root, PATH: "" }, applicationDirectories: [] });
     assert.strictEqual(gui.path, claude);
     assert.strictEqual(gui.source, "common");
 
     const shellDirectory = path.join(root, "from-shell");
-    const shellCli = makeFile(path.join(shellDirectory, "dsh"));
-    const shellCalls = [];
-    const viaShell = await discoverCli("deepseek", {
-      ...baseOptions, loginShell: true, environment: { HOME: root, PATH: "", SHELL: "/bin/zsh" },
-      execFile(command, args, options, callback) {
-        shellCalls.push({ command, args, options });
-        callback(null, `profile banner\n__LCTPLUGIN_LOGIN_PATH__${shellDirectory}\n__LCTPLUGIN_LOGIN_PATH__`, "");
-      }, readVersion: false,
-    });
-    assert.strictEqual(viaShell.path, shellCli);
-    assert.strictEqual(viaShell.source, "login-shell");
-    assert.strictEqual(shellCalls[0].command, "/bin/zsh");
-    assert.deepStrictEqual(shellCalls[0].args.slice(0, 3), ["-i", "-l", "-c"]);
-    assert(!shellCalls[0].args[3].includes(shellDirectory), "CLI path never enters shell command syntax");
-    assert(viaShell.environment.PATH.includes(shellDirectory));
+    makeFile(path.join(shellDirectory, "dsh"));
+    // Discovery never runs shell startup files, even with options from older callers.
+    for (const legacyOptions of [{}, { loginShell: true }, { loginShellPath: shellDirectory },
+      { loginShell: false, loginShellPath: shellDirectory }]) {
+      const shellCalls = [];
+      const options = {
+        homeDirectory: root, environment: { HOME: root, PATH: "", SHELL: "/bin/zsh" },
+        applicationDirectories: [], readVersion: false, ...legacyOptions,
+        execFile(command, args, spawnOptions, callback) {
+          shellCalls.push({ command, args, options: spawnOptions });
+          callback(null, `profile banner\n__LCTPLUGIN_LOGIN_PATH__${shellDirectory}\n__LCTPLUGIN_LOGIN_PATH__`, "");
+        },
+      };
+      const fromCommon = await discoverCli("claude", options);
+      assert.strictEqual(fromCommon.path, claude);
+      assert.strictEqual(fromCommon.source, "common");
+      assert.deepStrictEqual(shellCalls, [], "CLI discovery must not execute a login shell");
+      assert(!fromCommon.environment.PATH.includes(shellDirectory), "legacy shell paths are ignored");
+      await assert.rejects(discoverCli("deepseek", { ...options, commonDirectories: [] }),
+        (error) => error.code === "CliNotFound", "a shell-only CLI requires an explicit path");
+      assert.deepStrictEqual(shellCalls, [], "missing CLI detection must not execute a login shell");
+    }
 
-    let killedShell = false;
-    const afterShellTimeout = await discoverCli("claude", {
-      homeDirectory: root, environment: { HOME: root, PATH: "", SHELL: "/bin/zsh" }, shellTimeoutMs: 10,
-      execFile: () => ({ kill() { killedShell = true; } }), readVersion: false, applicationDirectories: [],
+    const versionCalls = [];
+    const probed = await discoverCli("codex", {
+      ...baseOptions, configuredPath: explicitCli,
+      execFile(command, args, options, callback) {
+        versionCalls.push({ command, args, options });
+        callback(null, "codex-cli 0.153.0\n", "");
+      },
     });
-    assert.strictEqual(afterShellTimeout.path, claude);
-    assert(killedShell, "a hung login shell is killed before common-directory fallback");
+    assert.strictEqual(probed.version, "0.153.0");
+    assert.strictEqual(versionCalls.length, 1);
+    assert.strictEqual(versionCalls[0].command, explicitCli);
+    assert.deepStrictEqual(versionCalls[0].args, ["--version"]);
+    assert.strictEqual(versionCalls[0].options.shell, false, "version probes explicitly disable shell syntax");
 
     // Readable Node entry points need not have a Unix executable bit.
     const entry = fs.realpathSync(makeFile(path.join(root, "scripts with spaces", "cli-wrapper.cjs"), "console.log('Claude Code 2.1.92')\n", 0o644));
@@ -101,11 +114,11 @@ const virtualWindowsFS = (entries) => ({
     assert.strictEqual(app.path, appCodex);
     assert.strictEqual(app.source, "application");
 
-    // NVM installs remain discoverable when the shell cannot be started.
+    // NVM installs remain discoverable without executing shell startup files.
     const nvmRoot = fs.mkdtempSync(path.join(os.tmpdir(), "lctp-nvm-"));
     try {
       const nvmCli = makeFile(path.join(nvmRoot, ".nvm", "versions", "node", "v24.1.0", "bin", "dsh"));
-      const nvm = await discoverCli("dsh", { homeDirectory: nvmRoot, environment: { HOME: nvmRoot, PATH: "" }, loginShell: false, applicationDirectories: [] });
+      const nvm = await discoverCli("dsh", { homeDirectory: nvmRoot, environment: { HOME: nvmRoot, PATH: "" }, applicationDirectories: [] });
       assert.strictEqual(nvm.path, nvmCli);
     } finally { fs.rmSync(nvmRoot, { recursive: true, force: true }); }
 
