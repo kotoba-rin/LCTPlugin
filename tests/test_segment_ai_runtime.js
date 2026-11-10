@@ -15,18 +15,11 @@ const {
   READ_ONLY_SANDBOX_POLICY,
   coerceCodexReasoningEffort,
   normalizeCodexModelCatalog,
-  resolveCodexCli,
   resolveCodexReasoningProfile,
 } = require(runtimeModulePath);
 
 const VAULT_ROOT = "/Users/example/Lacan-Vault";
 const CLI_PATH = process.execPath;
-
-assert.strictEqual(resolveCodexCli(CLI_PATH), CLI_PATH);
-assert.throws(
-  () => resolveCodexCli("/definitely/missing/codex"),
-  (error) => error.code === "CodexNotFound"
-);
 
 class ScriptedAppServerProcess extends EventEmitter {
   constructor(handler) {

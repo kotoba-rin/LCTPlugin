@@ -16,7 +16,9 @@ const { bindTranslationPreview } = require("./translation-reading-preview");
 const { registerPdfReading, addPdfFileMenuItems } = require("./pdf-reading");
 const { createProjectTransport, createVaultSyncStorage } = require("./project-sync-obsidian");
 const { createPluginRequest } = require("./plugin-http-request");
-const { PROJECT_BASE_PATH, PROJECT_BASE_CONTENT } = require("./project-library-base");
+const { PROJECT_BASE_PATH, PROJECT_BASE_CONTENT, migrateProjectBaseContent } = require("./project-library-base");
+const { KnowledgeLibrary } = require("./knowledge-library");
+const { createKnowledgeBasesViewClass } = require("./knowledge-library-view");
 const { formatSkipNotice } = require("./project-sync-status");
 const { ProjectSyncReportModal } = require("./project-sync-report");
 const {
@@ -99,6 +101,7 @@ const LESSON_RE = /<!--\s*lesson:\s*([^>\s]+)\s*-->/i;
 const UNTRANSLATED_RE = /<!--\s*untranslated\s*-->/gi;
 const MARKDOWN_RENDER_COMPONENT_KEY = "__lacanMarkdownRenderComponent";
 const LACAN_LESSON_LIST_VIEW_TYPE = "lacan-lesson-list";
+const LACAN_KNOWLEDGE_LIST_VIEW_TYPE = "lacan-knowledge-list";
 const DEFAULT_PROJECT_ENDPOINT = "https://kotoba-rin.com/wp-json/lctp/v1/project";
 const PROJECT_GRAPH_CARD_QUERY = String.raw`path:/^知识库\/[^\/]+\.md$/`;
 const PROJECT_GRAPH_TRANSLATION_QUERY = String.raw`path:/^texts\/[^\/]+\/translation\/[^\/]+\.md$/`;
@@ -117,6 +120,7 @@ const DEFAULT_SETTINGS = {
   projectEndpointUrl: DEFAULT_PROJECT_ENDPOINT,
   projectSyncLastResult: null,
   projectLessonSync: {},
+  projectKnowledgeFilters: {},
   autoSyncOnStartup: false,
   pluginHttpProxyEnabled: false,
   pluginHttpProxyUrl: "",
@@ -238,6 +242,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.projectCatalog = null;
     this.projectCatalogViews = new Set();
     this.projectLessonSyncProgress = new Map();
+    this.knowledgeLibrary = new KnowledgeLibrary(this);
     this.settings.segmentAiSessions = Array.isArray(this.settings.segmentAiSessions)
       ? this.settings.segmentAiSessions
       : [];
@@ -359,6 +364,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     }));
 
     this.registerDomEvent(document, "click", (event) => {
+      if (this.handleKnowledgeInternalLinkClick(event)) return;
       this.handleSegmentInternalLinkClick(event);
     }, { capture: true });
     this.registerDomEvent(document, "mouseover", (event) => {
@@ -375,6 +381,10 @@ module.exports = class LacanTranslationHelper extends Plugin {
     }, { capture: true });
 
     this.registerReadingNoteEditorExtension();
+
+    this.registerMarkdownPostProcessor((element, context) => {
+      this.getKnowledgeLibrary().decorateLinks(element, context.sourcePath || "");
+    });
 
     this.registerMarkdownPostProcessor((element, context) => {
       const sourcePath = normalizePath(context.sourcePath || "");
@@ -444,6 +454,13 @@ module.exports = class LacanTranslationHelper extends Plugin {
         this.handleModifiedFile(file);
       })
     );
+
+    for (const eventName of ["create", "modify", "delete", "rename"]) {
+      this.registerEvent(this.app.vault.on(eventName, (file, oldPath) => this.getKnowledgeLibrary().scheduleRefreshForChange(file, oldPath)));
+    }
+    this.registerEvent(this.app.workspace.on("editor-change", (_editor, info) =>
+      this.getKnowledgeLibrary().scheduleRefreshForChange(info?.file || this.app.workspace.getActiveFile?.())));
+    if (this.app.metadataCache?.on) this.registerEvent(this.app.metadataCache.on("changed", (file) => this.getKnowledgeLibrary().scheduleRefreshForChange(file)));
 
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
@@ -521,7 +538,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
 
     this.addCommand({
       id: "sync-configured-github-repositories",
-      name: "更新文库文本清单（不下载课文）",
+      name: "更新文库目录（正文按需同步）",
       callback: () =>
         this.runWithNotice(
           () => this.syncConfiguredRepositories({ notify: true }),
@@ -531,7 +548,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
 
     this.addCommand({
       id: "open-project-library",
-      name: "打开文库文本清单",
+      name: "打开文库 Base（课文与知识库）",
       callback: () => this.runWithNotice(() => this.openProjectLibrary(), "打开文本清单失败"),
     });
 
@@ -602,6 +619,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.projectSyncController?.abort();
     this.projectSyncController = null;
     this.projectCatalogViews?.clear();
+    this.knowledgeLibrary?.dispose();
     this.pluginRequest?.dispose();
     this.pluginRequest = null;
   }
@@ -665,6 +683,12 @@ module.exports = class LacanTranslationHelper extends Plugin {
       return;
     }
 
+    const KnowledgeBasesView = createKnowledgeBasesViewClass(ObsidianBasesView);
+    this.registerBasesView(LACAN_KNOWLEDGE_LIST_VIEW_TYPE, {
+      name: "知识库",
+      icon: "library",
+      factory: (controller, containerEl) => new KnowledgeBasesView(controller, containerEl, this),
+    });
     this.registerBasesView(LACAN_LESSON_LIST_VIEW_TYPE, {
       name: "Lacan Lesson List",
       icon: "list-tree",
@@ -2074,7 +2098,12 @@ module.exports = class LacanTranslationHelper extends Plugin {
 
   async ensureProjectBase() {
     const existing = this.app.vault.getAbstractFileByPath(PROJECT_BASE_PATH);
-    if (existing) return { file: existing, created: false };
+    if (existing) {
+      if (this.app.vault.process) await this.app.vault.process(existing, (contents) => migrateProjectBaseContent(contents, {
+        parseYaml: Obsidian.parseYaml, stringifyYaml: Obsidian.stringifyYaml,
+      }));
+      return { file: existing, created: false };
+    }
     const file = await this.app.vault.create(PROJECT_BASE_PATH, PROJECT_BASE_CONTENT);
     return { file, created: true };
   }
@@ -2088,10 +2117,11 @@ module.exports = class LacanTranslationHelper extends Plugin {
     const { file, created } = await this.ensureProjectBase();
     const engine = this.createProjectSyncEngine();
     this.projectCatalog = await engine.readCachedCatalog();
+    await this.refreshKnowledgeLibrary({ engine });
     this.refreshProjectCatalogViews();
     await this.reloadProjectBaseViews();
     if (created) await this.openFile(file);
-    if (!this.projectCatalog || this.settings.autoSyncOnStartup) {
+    if (!this.projectCatalog || this.settings.autoSyncOnStartup || this.projectCatalog.files?.some((file) => !file.sha256)) {
       try { await this.refreshProjectCatalog(); }
       catch (error) {
         this.projectCatalogError = error.message || "无法读取文本清单，请检查网络后重试。";
@@ -2117,7 +2147,24 @@ module.exports = class LacanTranslationHelper extends Plugin {
 
   refreshProjectCatalogViews() {
     for (const view of this.projectCatalogViews || []) view.onDataUpdated();
+    for (const view of this.projectKnowledgeViews || []) view.onDataUpdated();
   }
+
+  getKnowledgeLibrary() {
+    return this.knowledgeLibrary ||= new KnowledgeLibrary(this);
+  }
+
+  getKnowledgeEntries() { return this.getKnowledgeLibrary().getEntries(); }
+
+  refreshKnowledgeLibrary(options) { return this.getKnowledgeLibrary().refresh(options); }
+
+  syncProjectKnowledgeEntry(path, options) { return this.getKnowledgeLibrary().sync(path, options); }
+
+  syncAllProjectKnowledge() { return this.getKnowledgeLibrary().syncAll(); }
+
+  openKnowledgeEntry(path, subpath) { return this.getKnowledgeLibrary().open(path, subpath); }
+
+  handleKnowledgeInternalLinkClick(event) { return this.getKnowledgeLibrary().handleLinkClick(event); }
 
   getLessonSyncPercent(originalPath) {
     const active = this.projectLessonSyncProgress?.get(originalPath);
@@ -2137,8 +2184,9 @@ module.exports = class LacanTranslationHelper extends Plugin {
       await this.ensureProjectBase();
       this.projectCatalog = await engine.getCatalog({ signal });
       this.projectCatalogError = null;
+      await this.refreshKnowledgeLibrary({ engine, signal });
       this.refreshProjectCatalogViews();
-      if (notify) new Notice(`文本清单已更新：${this.projectCatalog.lessonCount} 个课次。课文请在 Base 中逐课同步。`);
+      if (notify) new Notice(`文库目录已更新：${this.projectCatalog.lessonCount} 个课次、${this.projectCatalog.knowledgeEntries?.length || 0} 个知识词条。正文请在 Base 中按需同步。`);
       return this.projectCatalog;
     }, { label: "正在更新文本清单…" });
   }
@@ -2195,10 +2243,13 @@ module.exports = class LacanTranslationHelper extends Plugin {
     };
   }
 
-  async runProjectLibraryTask(action, { label = "正在同步文库…", originalPath } = {}) {
+  async runProjectLibraryTask(action, { label = "正在同步文库…", originalPath, knowledgePath } = {}) {
     if (this.syncInProgress) throw new Error("已有文库同步正在进行，请等待完成或取消后再试。");
+    const knowledgeRefreshRevision = this.knowledgeLibrary?.refreshRevision || 0;
+    this.knowledgeLibrary?.pauseRefresh();
     this.syncInProgress = true;
     this.activeLessonSync = originalPath || null;
+    this.activeKnowledgeSync = knowledgePath || null;
     const controller = new AbortController();
     this.projectSyncController = controller;
     const progress = new Notice(label, 0);
@@ -2213,7 +2264,14 @@ module.exports = class LacanTranslationHelper extends Plugin {
           percent = Math.max(this.projectLessonSyncProgress?.get(originalPath) || 0, percent);
           this.setLessonSyncPercent(originalPath, percent);
         }
-        progress.setMessage?.(`${label}${originalPath ? ` ${percent}%` : ""}`);
+        const activeKnowledgePath = knowledgePath || this.activeKnowledgeSync;
+        if (activeKnowledgePath) {
+          percent = Math.max(this.knowledgeSyncProgress?.get(activeKnowledgePath) || 0, percent);
+          this.getKnowledgeLibrary().setProgress(activeKnowledgePath, percent);
+        }
+        const bulk = this.knowledgeBulkSync;
+        progress.setMessage?.(bulk ? `${label} ${bulk.completed} / ${bulk.total}${bulk.title ? ` · ${bulk.title}` : ""}`
+          : `${label}${originalPath || knowledgePath ? ` ${percent}%` : ""}`);
       });
       return await action(engine, controller.signal);
     } finally {
@@ -2221,7 +2279,11 @@ module.exports = class LacanTranslationHelper extends Plugin {
       if (this.projectSyncController === controller) this.projectSyncController = null;
       this.syncInProgress = false;
       this.activeLessonSync = null;
+      this.activeKnowledgeSync = null;
       this.refreshProjectCatalogViews();
+      if (!this.knowledgeLibrary?.hasRefreshedSince(knowledgeRefreshRevision, this.projectCatalog)) {
+        this.knowledgeLibrary?.scheduleRefresh();
+      }
     }
   }
 
@@ -3940,7 +4002,7 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("文库同步地址")
-      .setDesc("从 WordPress 获取完整文本清单，课文在 Base 中逐课同步，不会整库下载。")
+      .setDesc("获取课文和知识词条目录，在 Base 中按课、按词条同步正文与附件。")
       .addText((text) => text
         .setPlaceholder(DEFAULT_PROJECT_ENDPOINT)
         .setValue(this.plugin.settings.projectEndpointUrl || DEFAULT_PROJECT_ENDPOINT)
@@ -3948,6 +4010,9 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
           this.plugin.settings.projectEndpointUrl = value.trim() || DEFAULT_PROJECT_ENDPOINT;
           this.plugin.projectCatalog = null;
           this.plugin.projectLessonSyncProgress?.clear();
+          this.plugin.knowledgeSyncProgress?.clear();
+          this.plugin.getKnowledgeLibrary().statuses = {};
+          this.plugin.getKnowledgeLibrary().failures = {};
           this.plugin.settings.projectLessonSync = {};
           await this.plugin.saveSettings();
           this.plugin.refreshProjectCatalogViews();
@@ -3955,11 +4020,11 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("本地笔记与修改保护")
-      .setDesc("识别到正文、备注、注释或建言有本地修改时，整课跳过，不合并、不覆盖。需要重新同步时，请先保留修改副本，再删除有改动的本地文件后同步。未保存的编辑同样受保护。");
+      .setDesc("课文或知识卡及引用附件有本地修改时，跳过本课或本词条。需要重新同步时，请先保留修改副本，再删除有改动的本地文件后同步。未保存的编辑同样受保护。");
 
     new Setting(containerEl)
-      .setName("启动时更新文本清单")
-      .setDesc("仅刷新已发布课次目录，不下载课文。首次安装会自动获取清单。")
+      .setName("启动时更新文库目录")
+      .setDesc("仅刷新已发布课次和知识词条目录，不下载正文。首次安装会自动获取目录。")
       .addToggle((toggle) => toggle
         .setValue(Boolean(this.plugin.settings.autoSyncOnStartup))
         .onChange(async (value) => {
@@ -3969,8 +4034,8 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
 
     let cancelSyncButton;
     new Setting(containerEl)
-      .setName("更新文本清单")
-      .setDesc("只更新目录。打开 Base 后，先初始化研讨班，再点击每课的同步按钮，同时下载原文和译文。")
+      .setName("更新文库目录")
+      .setDesc("只更新目录。在 Base 的文本清单中逐课同步原译文，或在知识库中搜索并同步所需词条。")
       .addButton((button) => button
         .setButtonText(this.plugin.syncInProgress ? "处理中…" : "更新清单")
         .setCta()

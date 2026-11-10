@@ -31,11 +31,16 @@ function findTextRanges(rootEl, query) {
     };
     visit(body);
     pattern.lastIndex = 0;
+    let firstIndex = 0;
+    let lastIndex = 0;
     for (const match of text.matchAll(pattern)) {
       const end = match.index + match[0].length;
-      const first = nodes.find((entry) => entry.end > match.index);
-      const last = nodes.find((entry) => entry.start < end && entry.end >= end);
-      if (!first || !last) continue;
+      // Literal matches are ordered and non-overlapping, as are text nodes.
+      while (firstIndex < nodes.length && nodes[firstIndex].end <= match.index) firstIndex += 1;
+      while (lastIndex < nodes.length && nodes[lastIndex].end < end) lastIndex += 1;
+      const first = nodes[firstIndex];
+      const last = nodes[lastIndex];
+      if (!first || !last || last.start >= end) continue;
       const range = doc.createRange();
       range.setStart(first.node, match.index - first.start);
       range.setEnd(last.node, end - last.start);

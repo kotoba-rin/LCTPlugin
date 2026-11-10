@@ -1,8 +1,9 @@
 const nodePath = require("path");
-const { validateContentPath, validateVersion } = require("./validation");
+const { validateContentPath, validateVersion, HASH_RE, isKnowledgePath, validateKnowledgeEntries } = require("./validation");
 
 const LESSON_PATH = /^texts\/([^/]+)\/(original|translation)\/((?:Leçon|Lecon|lesson)-(\d+)\.md)$/i;
 const ASSET_EXTENSION = /\.(?:jpe?g|png|gif|svg|webp|avif|bmp|tiff?|emf|wmf|pdf)$/i;
+const isAssetPath = (path) => typeof path === "string" && ASSET_EXTENSION.test(path);
 
 const seminarIdentity = (slug) => {
   const code = slug.match(/^(s\d+[a-z]?)(?:-|$)/i)?.[1]?.toLowerCase() || slug;
@@ -38,18 +39,31 @@ const buildCatalog = (manifest, latest) => {
   }
   const values = [...seminars.values()].sort((a, b) => a.order - b.order || a.slug.localeCompare(b.slug));
   for (const seminar of values) seminar.lessons.sort((a, b) => a.lessonNumber - b.lessonNumber || a.originalPath.localeCompare(b.originalPath));
-  return { version: validateVersion(latest.version), sourceRevision,
+  const files = manifest.files.map(({ path, size, sha256 }) => ({ path,
+    ...(size === undefined ? {} : { size }), ...(sha256 === undefined ? {} : { sha256 }) }));
+  const metadata = validateKnowledgeEntries(manifest.knowledge_entries, files);
+  const byPath = new Map(files.map((file) => [file.path, file]));
+  const knowledgeEntries = (metadata || files.filter((file) => isKnowledgePath(file.path) && file.size !== 0)
+    .map((file) => ({ path: file.path, title: nodePath.posix.basename(file.path).replace(/\.md$/i, ""), tags: [], excerpt: "" })))
+    .map((entry) => ({ ...entry, key: entry.path, aliases: entry.aliases || [], ...byPath.get(entry.path) }))
+    .sort((a, b) => a.title.localeCompare(b.title, "zh-CN") || a.path.localeCompare(b.path));
+  return { version: validateVersion(latest.version), sourceRevision, files, knowledgeEntries, knowledgeMetadataAvailable: metadata !== undefined,
     lessonCount: values.reduce((count, seminar) => count + seminar.lessons.length, 0), seminars: values };
 };
 
-const catalogCache = (manifest, latest, endpointUrl) => ({ schema_version: 1, endpoint_url: endpointUrl,
-  version: latest.version, source_revision: latest.source_revision || null, files: manifest.files.map(({ path }) => ({ path })) });
+const catalogCache = (manifest, latest, endpointUrl) => ({ schema_version: 2, endpoint_url: endpointUrl,
+  version: latest.version, source_revision: latest.source_revision || null,
+  files: manifest.files.map(({ path, size, sha256 }) => ({ path, size, sha256 })),
+  ...(manifest.knowledge_entries === undefined ? {} : { knowledge_entries: manifest.knowledge_entries }) });
 
 const readCatalogCache = (value, endpointUrl) => {
-  if (value?.schema_version !== 1 || value.endpoint_url !== endpointUrl) return null;
+  if (![1, 2].includes(value?.schema_version) || value.endpoint_url !== endpointUrl) return null;
   if (!Array.isArray(value.files) || value.files.length < 1 || value.files.length > 25000
     || (value.source_revision !== null && (typeof value.source_revision !== "string" || value.source_revision.length > 128))) {
     throw new Error("本地文库目录缓存损坏，请刷新文库目录。");
+  }
+  if (value.schema_version === 2 && value.files.some((file) => !Number.isSafeInteger(file.size) || file.size < 0 || file.size > 64 * 1024 * 1024 || !HASH_RE.test(file.sha256 || ""))) {
+    throw new Error("本地文库目录校验信息损坏，请刷新文库目录。");
   }
   return buildCatalog(value, value);
 };
@@ -59,15 +73,20 @@ const lessonFromCatalog = (catalog, originalPath) => {
   return catalog.seminars.flatMap((seminar) => seminar.lessons).find((lesson) => lesson.originalPath === originalPath) || null;
 };
 
-const referencedAssets = (text, sourcePath, files) => {
-  if (typeof text !== "string") return [];
-  const assets = new Set();
-  const assetPaths = new Set(files.filter((file) => ASSET_EXTENSION.test(file.path)).map((file) => file.path));
+const createAssetIndex = (files) => {
+  const assetPaths = new Set(files.filter((file) => isAssetPath(file.path)).map((file) => file.path));
   const byName = new Map();
   for (const path of assetPaths) {
     const name = nodePath.posix.basename(path);
     byName.set(name, byName.has(name) ? null : path);
   }
+  return { assetPaths, byName };
+};
+
+const referencedAssets = (text, sourcePath, files, index) => {
+  if (typeof text !== "string") return [];
+  const assets = new Set();
+  const { assetPaths, byName } = index || createAssetIndex(files);
   const add = (raw) => {
     let reference = raw.trim().replace(/^<|>$/g, "");
     if (!reference || /^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(reference)) return;
@@ -87,4 +106,4 @@ const referencedAssets = (text, sourcePath, files) => {
   return [...assets];
 };
 
-module.exports = { buildCatalog, catalogCache, readCatalogCache, lessonFromCatalog, referencedAssets };
+module.exports = { buildCatalog, catalogCache, readCatalogCache, lessonFromCatalog, referencedAssets, createAssetIndex, isAssetPath };

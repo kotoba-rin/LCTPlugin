@@ -83,6 +83,10 @@ async function run() {
   assert.strictEqual(basic.writes.length, 0, "IME confirmation must not save");
   textarea.dispatch("keydown", { key: "Enter", metaKey: true });
   await flush();
+  assert.strictEqual(basic.writes.length, 0, "Command+Enter must not save; the save shortcut is Ctrl+Enter on every platform");
+  assert.ok(basic.hostEl.find("lacan-translation-inline-hint").textContent.startsWith("Ctrl + Enter 保存"));
+  textarea.dispatch("keydown", { key: "Enter", ctrlKey: true });
+  await flush();
   assert.deepStrictEqual(basic.writes, [{ snapshot: basic.snapshot, markdown: "新的**完整译文**。\n\n第二段。" }]);
   assert.deepStrictEqual(basic.saved, [{ sourcePath: basic.target.sourcePath, segmentId: basic.target.segmentId }]);
   assert.strictEqual(basic.original.style.display, "block");

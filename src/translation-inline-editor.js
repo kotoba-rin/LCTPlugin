@@ -67,7 +67,7 @@ class TranslationInlineEditor {
       cancelButton.textContent = "取消";
       const hint = editor.appendChild(doc.createElement("div"));
       hint.className = "lacan-translation-inline-hint";
-      hint.textContent = "⌘ / Ctrl + Enter 保存 · Esc 取消 · 支持 Markdown、粘贴图片、注释和建言";
+      hint.textContent = "Ctrl + Enter 保存 · Esc 取消 · 支持 Markdown、粘贴图片、注释和建言";
       const errorEl = editor.appendChild(doc.createElement("div"));
       errorEl.className = "lacan-translation-inline-error";
       errorEl.setAttribute("role", "alert");
@@ -92,7 +92,7 @@ class TranslationInlineEditor {
         if (event.key === "Escape") {
           event.preventDefault();
           this.close();
-        } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        } else if (event.key === "Enter" && event.ctrlKey) {
           event.preventDefault();
           void this.save();
         }

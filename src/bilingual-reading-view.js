@@ -54,11 +54,14 @@ function pairBilingualBlocks(originalBlocks, translationBlocks) {
   })).sort((left, right) => compareId(left.ids[0], right.ids[0]));
 }
 
-function blockReadingMarkdown(block, fileText, namespace) {
-  const definitions = new Map(Array.from(
+function collectFootnoteDefinitions(fileText) {
+  return new Map(Array.from(
     String(fileText || "").matchAll(FOOTNOTE_DEFINITION_RE),
     (match) => [match[1], match[0].trimEnd()]
   ));
+}
+
+function blockReadingMarkdown(block, fileText, namespace, definitions = collectFootnoteDefinitions(fileText)) {
   const sourceMarkdown = String(block.markdown || "");
   const hasLocalFootnoteDefinitions = Array.from(sourceMarkdown.matchAll(FOOTNOTE_DEFINITION_RE)).length > 0;
   let markdown = sourceMarkdown
@@ -294,6 +297,8 @@ class LacanBilingualReadingView extends FileView {
           parser.parse(originalText, paths.originalPath),
           parser.parse(translationText, paths.translationPath)
         );
+        const originalDefinitions = collectFootnoteDefinitions(originalText);
+        const translationDefinitions = collectFootnoteDefinitions(translationText);
         if (!pairs.length) {
           stagingEl.createDiv({ cls: "lacan-bilingual-empty", text: "没有找到可供双语阅读的分段。" });
         }
@@ -301,16 +306,16 @@ class LacanBilingualReadingView extends FileView {
         for (const pair of pairs) {
           const pairEl = pairsEl.createEl("section", { cls: "lacan-bilingual-pair" });
           pairEl.dataset.segmentId = pair.ids[0];
-          for (const [language, blocks, text, sourcePath] of [
-            ["original", pair.originals, originalText, paths.originalPath],
-            ["translation", pair.translations, translationText, paths.translationPath],
+          for (const [language, blocks, text, sourcePath, definitions] of [
+            ["original", pair.originals, originalText, paths.originalPath, originalDefinitions],
+            ["translation", pair.translations, translationText, paths.translationPath, translationDefinitions],
           ]) {
             if (!blocks.length) {
               const laneEl = pairEl.createDiv({ cls: `lacan-bilingual-language is-${language}`, attr: { lang: language === "original" ? "fr" : "zh" } });
               laneEl.createDiv({ cls: "lacan-bilingual-empty", text: language === "original" ? "[没有对应法语原文]" : "[没有对应中文译文]" });
             }
             for (const block of blocks) {
-              await this.renderBlock(pairEl, language, block, text, sourcePath, rendered);
+              await this.renderBlock(pairEl, language, block, text, sourcePath, rendered, definitions);
               if (this.closed || token !== this.renderToken) {
                 return;
               }
@@ -349,7 +354,7 @@ class LacanBilingualReadingView extends FileView {
     }
   }
 
-  async renderBlock(pairEl, language, block, fileText, sourcePath, rendered) {
+  async renderBlock(pairEl, language, block, fileText, sourcePath, rendered, definitions) {
     const isOriginal = language === "original";
     const laneEl = pairEl.createDiv({ cls: `lacan-bilingual-language is-${language}`, attr: { lang: isOriginal ? "fr" : "zh" } });
     laneEl.dataset.segmentId = block.primaryId;
@@ -362,7 +367,7 @@ class LacanBilingualReadingView extends FileView {
     }
     const bodyEl = laneEl.createDiv({ cls: "lacan-bilingual-content markdown-rendered" });
     if (!isOriginal) this.plugin.bindTranslationBlockEditing?.(bodyEl, sourcePath, block.primaryId);
-    const markdown = blockReadingMarkdown(block, fileText, `${isOriginal ? "fr" : "zh"}-${block.primaryId}`);
+    const markdown = blockReadingMarkdown(block, fileText, `${isOriginal ? "fr" : "zh"}-${block.primaryId}`, definitions);
     if (!markdown) {
       bodyEl.createDiv({ cls: "lacan-bilingual-empty", text: !isOriginal && /<!--\s*untranslated\s*-->/i.test(block.markdown) ? "[该段尚未翻译]" : "[该段暂无正文]" });
       return;

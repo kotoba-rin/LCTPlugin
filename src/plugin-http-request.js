@@ -1,5 +1,13 @@
 const { randomBytes } = require("crypto");
 
+const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
+const MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
+const abortError = () => Object.assign(new Error("插件网络请求已取消。"), { name: "AbortError" });
+const checkResponseSize = (headers, maxBytes) => {
+  const declared = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === "content-length")?.[1];
+  if (Number(declared) > maxBytes) throw new Error("插件网络响应超出允许的大小。");
+};
+
 const normalizeProxyUrl = (value) => {
   const input = String(value || "").trim();
   let url;
@@ -18,14 +26,14 @@ const makeResponse = (status, rawHeaders, bytes) => {
   for (const [key, value] of Object.entries(rawHeaders || {})) {
     headers[key.toLowerCase()] = Array.isArray(value) ? value.join(", ") : String(value);
   }
-  const response = {
-    status, headers,
-    arrayBuffer: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
-  };
+  const response = { status, headers };
+  let arrayBuffer;
   let text;
   let json;
   let parsed = false;
   Object.defineProperties(response, {
+    arrayBuffer: { enumerable: true, get: () => arrayBuffer ??= bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+      ? bytes.buffer : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) },
     text: { enumerable: true, get: () => text ??= bytes.toString("utf8") },
     json: { enumerable: true, get: () => {
       if (!parsed) { json = JSON.parse(response.text); parsed = true; }
@@ -74,10 +82,22 @@ const createPluginRequest = ({ requestUrl, getSettings, getElectron = () => requ
     return entry.ready;
   };
 
-  const pluginRequest = async (input) => {
+  const pluginRequest = async (input, { signal, maxBytes = DEFAULT_MAX_BYTES } = {}) => {
     if (disposed) throw new Error("插件网络请求已关闭。");
+    if (signal?.aborted) throw abortError();
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > MAX_RESPONSE_BYTES) {
+      throw new Error("插件网络响应大小限制无效。");
+    }
     const settings = getSettings() || {};
-    if (!settings.pluginHttpProxyEnabled) return requestUrl(input);
+    if (!settings.pluginHttpProxyEnabled) {
+      // The host buffers its own response and has no cancellable streaming API.
+      // Keep its network settings and original request options intact.
+      const response = await requestUrl(input);
+      if (signal?.aborted) throw abortError();
+      checkResponseSize(response.headers, maxBytes);
+      if (response.arrayBuffer?.byteLength > maxBytes) throw new Error("插件网络响应超出允许的大小。");
+      return response;
+    }
     const proxyRules = normalizeProxyUrl(settings.pluginHttpProxyUrl);
     const options = typeof input === "string" ? { url: input } : input;
     if (!options || typeof options.url !== "string" || !/^https?:\/\//i.test(options.url)) {
@@ -92,12 +112,14 @@ const createPluginRequest = ({ requestUrl, getSettings, getElectron = () => requ
       let request;
       let response;
       let chunks = [];
+      let receivedBytes = 0;
       let settled = false;
       let timer;
       const finish = (error, result) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", cancel);
         active.delete(cancel);
         response?.removeListener?.("data", onData);
         response?.removeListener?.("end", onEnd);
@@ -108,16 +130,23 @@ const createPluginRequest = ({ requestUrl, getSettings, getElectron = () => requ
           reject(error);
         } else resolve(result);
       };
-      const cancel = () => finish(new Error("插件网络请求已取消。"));
+      const cancel = () => finish(abortError());
       const onData = (chunk) => {
         if (settled) return;
-        try { chunks.push(Buffer.from(chunk)); }
+        try {
+          const length = typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.byteLength;
+          if (!Number.isSafeInteger(length) || length > maxBytes - receivedBytes) {
+            throw new Error("插件网络响应超出允许的大小。");
+          }
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          receivedBytes += length;
+        }
         catch (error) { finish(error); }
       };
       const onEnd = () => {
         if (settled) return;
         try {
-          const result = makeResponse(response.statusCode, response.headers, Buffer.concat(chunks));
+          const result = makeResponse(response.statusCode, response.headers, Buffer.concat(chunks, receivedBytes));
           if (options.throw !== false && result.status >= 400) {
             const error = new Error(`Request failed, status ${result.status}`);
             error.status = result.status;
@@ -126,6 +155,8 @@ const createPluginRequest = ({ requestUrl, getSettings, getElectron = () => requ
         } catch (error) { finish(error); }
       };
       active.add(cancel);
+      signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) { cancel(); return; }
       timer = setTimeout(() => finish(new Error("插件代理请求超时，请检查代理连接后重试。")), timeoutMs);
       Promise.resolve().then(() => getSession(proxyRules)).then(({ electron, session }) => {
         if (settled) return;
@@ -147,6 +178,8 @@ const createPluginRequest = ({ requestUrl, getSettings, getElectron = () => requ
           response = incoming;
           response.on("error", (error) => finish(error));
           response.on("aborted", () => finish(new Error("插件代理响应已中止。")));
+          try { checkResponseSize(response.headers, maxBytes); }
+          catch (error) { finish(error); return; }
           response.on("end", onEnd);
           response.on("data", onData);
         });

@@ -1,5 +1,4 @@
 const { spawn } = require("child_process");
-const fs = require("fs");
 const path = require("path");
 const { discoverCli, buildCliInvocation } = require("./cli-discovery");
 const {
@@ -26,6 +25,8 @@ const DISABLED_FEATURES = Object.freeze([
   "computer_use",
 ]);
 
+const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+
 class CodexRuntimeError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -45,6 +46,10 @@ class CodexAppServerRuntime {
     spawnProcess = spawn,
     requestTimeoutMs = 30000,
     turnTimeoutMs = 10 * 60 * 1000,
+    maxMessageBytes = MAX_OUTPUT_BYTES,
+    maxTurnOutputBytes = MAX_OUTPUT_BYTES,
+    maxEarlyTurnEvents = 1000,
+    maxEarlyTurnEventBytes = MAX_OUTPUT_BYTES,
     ephemeralThreads = false,
     environment = process.env,
     discoverCli: discoverCliProcess = discoverCli,
@@ -60,6 +65,10 @@ class CodexAppServerRuntime {
     this.spawnProcess = spawnProcess;
     this.requestTimeoutMs = requestTimeoutMs;
     this.turnTimeoutMs = turnTimeoutMs;
+    for (const [name, limit] of Object.entries({ maxMessageBytes, maxTurnOutputBytes, maxEarlyTurnEvents, maxEarlyTurnEventBytes })) {
+      if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError(`${name} must be a positive integer.`);
+      this[name] = limit;
+    }
     this.ephemeralThreads = ephemeralThreads === true;
     this.environment = environment;
     this.discoverCli = discoverCliProcess;
@@ -69,6 +78,9 @@ class CodexAppServerRuntime {
     this.lifecycleVersion = 0;
     this.activeTurns = new Map();
     this.earlyTurnEvents = new Map();
+    this.pendingTurnStarts = new Map();
+    this.earlyTurnEventCount = 0;
+    this.earlyTurnEventBytes = 0;
     this.skillChangeListeners = new Set();
     this.threadPreparationQueue = Promise.resolve();
     this.globalMcpServerNames = [];
@@ -144,6 +156,7 @@ class CodexAppServerRuntime {
     this.childProcess = childProcess;
     this.client = new JsonLineRpcClient(childProcess, {
       requestTimeoutMs: this.requestTimeoutMs,
+      maxMessageBytes: this.maxMessageBytes,
     });
     this.client.on("notification", (message) => this.handleNotification(message));
     this.client.on("serverRequest", (message) => this.handleServerRequest(message));
@@ -244,6 +257,7 @@ class CodexAppServerRuntime {
     });
     this.assertExternalCapabilitiesDisabled();
     const activeThreadId = prepared.thread.id;
+    this.pendingTurnStarts.set(activeThreadId, (this.pendingTurnStarts.get(activeThreadId) || 0) + 1);
     let response;
     try {
       response = await this.client.request("turn/start", {
@@ -258,17 +272,19 @@ class CodexAppServerRuntime {
         ...(effectiveReasoningEffort ? { effort: effectiveReasoningEffort } : {}),
       });
     } catch (error) {
+      this.releasePendingTurnStart(activeThreadId);
       throw this.rememberError(this.mapProtocolError(error, "TurnFailed"));
     }
     const turnId = response?.turn?.id;
     if (!turnId) {
+      this.releasePendingTurnStart(activeThreadId);
       throw this.rememberError(new CodexRuntimeError(
         "AppServerIncompatible",
         "App Server 未返回有效的 turn ID。"
       ));
     }
 
-    return new Promise((resolve, reject) => {
+    const result = new Promise((resolve, reject) => {
       const key = turnEventKey(activeThreadId, turnId);
       const timeout = setTimeout(() => {
         this.handleTurnTimeout(key);
@@ -278,6 +294,7 @@ class CodexAppServerRuntime {
         threadId: activeThreadId,
         turnId,
         text: "",
+        textBytes: 0,
         onEvent,
         resolve,
         reject,
@@ -290,6 +307,8 @@ class CodexAppServerRuntime {
       });
       this.replayEarlyTurnEvents(activeThreadId, turnId);
     });
+    this.releasePendingTurnStart(activeThreadId);
+    return result;
   }
 
   async startThread({ baseInstructions, model, researchEnabled = true, allowSkillRead = false } = {}) {
@@ -356,7 +375,7 @@ class CodexAppServerRuntime {
   }
 
   prepareRestrictedThread({ threadId, baseInstructions, model, researchEnabled = true, allowSkillRead = false } = {}) {
-    const prepare = this.threadPreparationQueue.then(async () => {
+    const prepareThread = async () => {
       await this.refreshMcpServerCatalog();
       this.assertExternalCapabilitiesDisabled();
       const response = String(threadId || "").trim()
@@ -371,22 +390,8 @@ class CodexAppServerRuntime {
       await this.assertAppsIsolated(response.thread.id);
       this.diagnostics.disallowedCapabilitiesIsolated = true;
       return response;
-    }, async () => {
-      await this.refreshMcpServerCatalog();
-      this.assertExternalCapabilitiesDisabled();
-      const response = String(threadId || "").trim()
-        ? await this.resumeThread(String(threadId).trim(), {
-            baseInstructions,
-            model,
-            researchEnabled,
-            allowSkillRead,
-          })
-        : await this.startThread({ baseInstructions, model, researchEnabled, allowSkillRead });
-      this.assertExternalCapabilitiesDisabled();
-      await this.assertAppsIsolated(response.thread.id);
-      this.diagnostics.disallowedCapabilitiesIsolated = true;
-      return response;
-    });
+    };
+    const prepare = this.threadPreparationQueue.then(prepareThread, prepareThread);
     this.threadPreparationQueue = prepare.catch(() => {});
     return prepare;
   }
@@ -582,20 +587,28 @@ class CodexAppServerRuntime {
       this.applyTurnEvent(message, active);
       return;
     }
-    if (threadId && turnId) {
+    if (threadId && turnId && this.pendingTurnStarts.has(threadId)) {
       const key = turnEventKey(threadId, turnId);
-      const buffered = this.earlyTurnEvents.get(key) || [];
-      if (buffered.length < 1000) {
-        buffered.push(message);
-        this.earlyTurnEvents.set(key, buffered);
+      const bytes = Buffer.byteLength(JSON.stringify(message), "utf8");
+      if (this.earlyTurnEventCount >= this.maxEarlyTurnEvents
+        || this.earlyTurnEventBytes + bytes > this.maxEarlyTurnEventBytes) {
+        const error = new CodexRuntimeError("EarlyTurnEventLimit", "本地 Agent 在启动回合前返回了过多事件，已停止连接。");
+        this.closeProcess(error);
+        this.handleRuntimeExit(error);
+        return;
       }
+      const buffered = this.earlyTurnEvents.get(key) || { threadId, messages: [], bytes: 0 };
+      buffered.messages.push(message);
+      buffered.bytes += bytes;
+      this.earlyTurnEventCount += 1;
+      this.earlyTurnEventBytes += bytes;
+      this.earlyTurnEvents.set(key, buffered);
     }
   }
 
   replayEarlyTurnEvents(threadId, turnId) {
     const key = turnEventKey(threadId, turnId);
-    const buffered = this.earlyTurnEvents.get(key) || [];
-    this.earlyTurnEvents.delete(key);
+    const buffered = this.takeEarlyTurnEvents(key);
     for (const message of buffered) {
       const active = this.activeTurns.get(key);
       if (!active) {
@@ -605,19 +618,53 @@ class CodexAppServerRuntime {
     }
   }
 
+  takeEarlyTurnEvents(key) {
+    const buffered = this.earlyTurnEvents.get(key);
+    if (!buffered) return [];
+    this.earlyTurnEvents.delete(key);
+    this.earlyTurnEventCount -= buffered.messages.length;
+    this.earlyTurnEventBytes -= buffered.bytes;
+    return buffered.messages;
+  }
+
+  releasePendingTurnStart(threadId) {
+    const remaining = (this.pendingTurnStarts.get(threadId) || 0) - 1;
+    if (remaining > 0) {
+      this.pendingTurnStarts.set(threadId, remaining);
+      return;
+    }
+    this.pendingTurnStarts.delete(threadId);
+    for (const [key, buffered] of this.earlyTurnEvents) {
+      if (buffered.threadId === threadId) this.takeEarlyTurnEvents(key);
+    }
+  }
+
+  clearEarlyTurnEvents() {
+    this.earlyTurnEvents.clear();
+    this.pendingTurnStarts.clear();
+    this.earlyTurnEventCount = 0;
+    this.earlyTurnEventBytes = 0;
+  }
+
   applyTurnEvent(message, active) {
     if (!active) {
       return;
     }
-    if (active.timeoutError && (
-      message.method === "turn/completed"
-      || (message.method === "error" && message.params?.willRetry === false)
-    )) {
-      this.finishTurnWithError(active.key, active.timeoutError);
+    if (active.stopError) {
+      if (message.method === "turn/completed"
+        || (message.method === "error" && message.params?.willRetry === false)) {
+        this.finishTurnWithError(active.key, active.stopError);
+      }
       return;
     }
     if (message.method === "item/agentMessage/delta") {
       const delta = String(message.params?.delta || "");
+      const bytes = Buffer.byteLength(delta, "utf8");
+      if (active.textBytes + bytes > this.maxTurnOutputBytes) {
+        this.stopTurnWithError(active.key, new CodexRuntimeError("CliOutputLimit", "CLI 回答过大，已停止本次解读。"));
+        return;
+      }
+      active.textBytes += bytes;
       active.text += delta;
       active.onEvent({
         type: "delta",
@@ -633,11 +680,17 @@ class CodexAppServerRuntime {
       && message.params?.item?.type === "agentMessage"
     ) {
       const completedText = String(message.params.item.text || "");
+      const bytes = Buffer.byteLength(completedText, "utf8");
+      if (bytes > this.maxTurnOutputBytes) {
+        this.stopTurnWithError(active.key, new CodexRuntimeError("CliOutputLimit", "CLI 回答过大，已停止本次解读。"));
+        return;
+      }
       if (completedText && completedText !== active.text) {
         const delta = completedText.startsWith(active.text)
           ? completedText.slice(active.text.length)
           : completedText;
         active.text = completedText;
+        active.textBytes = bytes;
         active.onEvent({
           type: "delta",
           delta,
@@ -712,12 +765,10 @@ class CodexAppServerRuntime {
   }
 
   handleRuntimeExit(error) {
+    this.clearEarlyTurnEvents();
+    const exitError = this.mapProtocolError(error, "AppServerExited");
     for (const key of [...this.activeTurns.keys()]) {
-      this.finishTurnWithError(key, this.activeTurns.get(key)?.timeoutError || new CodexRuntimeError(
-        "AppServerExited",
-        "本地 Agent 意外退出，可手动重试。",
-        { cause: error }
-      ));
+      this.finishTurnWithError(key, this.activeTurns.get(key)?.stopError || exitError);
     }
     this.client = null;
     this.childProcess = null;
@@ -727,37 +778,42 @@ class CodexAppServerRuntime {
   }
 
   handleTurnTimeout(key) {
-    const active = this.activeTurns.get(key);
-    if (!active || active.timeoutError) {
-      return;
-    }
-    active.timeoutError = new CodexRuntimeError(
+    this.stopTurnWithError(key, new CodexRuntimeError(
       "TurnTimeout",
       "本地 Agent 生成超时，已停止本次解读，可重试该分段。"
-    );
+    ));
+  }
+
+  stopTurnWithError(key, error) {
+    const active = this.activeTurns.get(key);
+    if (!active || active.stopError) {
+      return;
+    }
+    active.stopError = error;
+    clearTimeout(active.timeout);
     // An interrupt ACK only accepts the request. Keep tracking the turn until
     // its terminal event, and close the runtime if stopping cannot be confirmed.
-    active.timeout = setTimeout(() => this.closeAfterTurnTimeout(key), this.requestTimeoutMs);
+    active.timeout = setTimeout(() => this.closeAfterTurnStop(key), this.requestTimeoutMs);
     if (!this.client || this.client.closed) {
-      this.closeAfterTurnTimeout(key);
+      this.closeAfterTurnStop(key);
       return;
     }
     void this.client.request("turn/interrupt", {
       threadId: active.threadId,
       turnId: active.turnId,
-    }).catch(() => this.closeAfterTurnTimeout(key));
+    }).catch(() => this.closeAfterTurnStop(key));
   }
 
-  closeAfterTurnTimeout(key) {
+  closeAfterTurnStop(key) {
     const active = this.activeTurns.get(key);
-    if (!active?.timeoutError) {
+    if (!active?.stopError) {
       return;
     }
-    this.finishTurnWithError(key, active.timeoutError);
+    this.finishTurnWithError(key, active.stopError);
     this.closeProcess();
     this.handleRuntimeExit(new CodexRuntimeError(
       "AppServerExited",
-      "无法确认超时任务已停止，本地 Agent 已关闭，请重试。"
+      "无法确认任务已停止，本地 Agent 已关闭，请重试。"
     ));
   }
 
@@ -818,9 +874,10 @@ class CodexAppServerRuntime {
     this.closeProcess();
   }
 
-  closeProcess() {
+  closeProcess(error) {
+    this.clearEarlyTurnEvents();
     if (this.client) {
-      this.client.close();
+      this.client.close(error);
     } else if (this.childProcess && typeof this.childProcess.kill === "function") {
       this.childProcess.kill();
     }
@@ -847,6 +904,9 @@ class CodexAppServerRuntime {
       return error;
     }
     if (error instanceof AppServerProtocolError) {
+      if (error.code === "AppServerOutputLimit" || error.code === "AppServerInputFailed") {
+        return new CodexRuntimeError(error.code, error.message, { cause: error });
+      }
       if (error.rpcCode === -32601 || error.rpcCode === -32602) {
         return new CodexRuntimeError(
           "AppServerIncompatible",
@@ -863,6 +923,7 @@ class CodexAppServerRuntime {
       }
     }
     const fallbackMessages = {
+      AppServerExited: "本地 Agent 意外退出，可手动重试。",
       AppServerIncompatible: "本地 Agent 初始化失败，请查看脱敏诊断后重试。",
       CapabilityIsolationFailed: "无法确认本地 Agent 已禁用外部工具。",
       ModelDiscoveryFailed: "无法从本机 Codex 获取模型列表，请检查 CLI 路径和登录状态。",
@@ -891,70 +952,6 @@ const buildAppServerArgs = () => {
     'shell_environment_policy.inherit="none"'
   );
   return args;
-};
-
-const buildCodexProcessEnvironment = (environment, cliPath) => {
-  const source = environment && typeof environment === "object"
-    ? environment
-    : {};
-  const pathKey = Object.keys(source).find(
-    (key) => key.toLowerCase() === "path"
-  ) || "PATH";
-  const currentEntries = String(source[pathKey] || "")
-    .split(path.delimiter)
-    .filter(Boolean);
-  const cliDirectory = path.dirname(path.resolve(cliPath));
-  const seen = new Set();
-  const entries = [cliDirectory, ...currentEntries].filter((entry) => {
-    const key = process.platform === "win32" ? entry.toLowerCase() : entry;
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
-  return {
-    ...source,
-    [pathKey]: entries.join(path.delimiter),
-  };
-};
-
-const resolveCodexCli = (configuredPath, environment = process.env) => {
-  const configured = String(configuredPath || "").trim();
-  if (configured) {
-    if (!path.isAbsolute(configured) || !isExecutable(configured)) {
-      throw new CodexRuntimeError(
-        "CodexNotFound",
-        "设置中的 Codex CLI 路径无效，请选择可执行文件的绝对路径。"
-      );
-    }
-    return configured;
-  }
-  const pathEntries = String(environment?.PATH || "").split(path.delimiter).filter(Boolean);
-  const executableNames = process.platform === "win32"
-    ? ["codex.exe", "codex.cmd", "codex"]
-    : ["codex"];
-  for (const directory of pathEntries) {
-    for (const executableName of executableNames) {
-      const candidate = path.join(directory, executableName);
-      if (isExecutable(candidate)) {
-        return candidate;
-      }
-    }
-  }
-  throw new CodexRuntimeError(
-    "CodexNotFound",
-    "未找到本地 Codex。请安装 Codex CLI，或在插件设置中配置其绝对路径。"
-  );
-};
-
-const isExecutable = (candidate) => {
-  try {
-    fs.accessSync(candidate, fs.constants.X_OK);
-    return fs.statSync(candidate).isFile();
-  } catch (_error) {
-    return false;
-  }
 };
 
 const validateInitializeResponse = (response) => {
@@ -1139,12 +1136,10 @@ module.exports = {
   DISABLED_FEATURES,
   READ_ONLY_SANDBOX_POLICY,
   buildAppServerArgs,
-  buildCodexProcessEnvironment,
   coerceCodexReasoningEffort,
   extractMcpServerNamesFromConfigRead,
   extractLatestAgentText,
   normalizeCodexModelCatalog,
-  resolveCodexCli,
   resolveCodexReasoningProfile,
   validateRestrictedThread,
 };

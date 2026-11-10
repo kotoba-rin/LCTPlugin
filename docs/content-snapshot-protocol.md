@@ -21,6 +21,12 @@ python3 scripts/import-reading-library.py \
 
 WordPress 继续使用下述只读版本接口和同源的单文件地址。客户端先读取清单，初始化研讨班时只同步术语表；点击课次同步时才获取对应原文、译文及引用的附件，不需要下载完整 ZIP。
 
+知识库采用同样的目录与正文分离方式。新版快照在 `manifest.json` 顶层提供可选 `knowledge_entries`，每项含 `path`、`title`、`tags`、`excerpt`，存在别名时含 `aliases`；`path` 必须对应 `files` 中非空的知识卡 Markdown。仅收录提交对象中 `type: knowledge-card` 的文件，不收录 README 和空文件；摘录直接截取正文首段，最多 120 个 Unicode 字符。标题上限 300 字符，标签最多 64 项、每项 160 字符，别名最多 32 项、每项 300 字符。
+
+客户端校验和缓存整个目录，在 Base 中搜索及筛选；只在用户选择词条时下载该卡及引用图片／PDF。旧快照缺少元数据时按文件名生成标题目录。目录缓存 v2 保留文件大小、校验值和知识元数据，并兼容旧 v1 缓存；缺少校验值时提示刷新目录。快照版本摘要覆盖生成器版本、文件记录与知识元数据，格式或索引变化生成新的不可变版本。
+
+`manifest.json` 顶层的 `snapshot_generator` 标识当前索引生成器（当前为 `lctp-public-library-snapshot/3`）。导入器复用同一内容提交前，必须确认生成器匹配、`knowledge_entries` 存在且与已校验知识卡重新提取的元数据一致；旧版目录会生成新版本，已有不可变版本不会被覆盖。
+
 ## 生成快照
 
 ```bash

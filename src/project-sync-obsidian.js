@@ -6,22 +6,37 @@ const { isTextPath } = require("./project-sync/base-cache");
 const digest = (bytes) => bytes === null ? null : createHash("sha256").update(bytes).digest("hex");
 const arrayBuffer = (bytes) => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 const abortError = () => Object.assign(new Error("文库同步已取消。"), { name: "AbortError" });
+const requestTails = new WeakMap();
 
 const createProjectTransport = (requestUrl) => async (url, { signal, maxBytes = 256 * 1024 * 1024 } = {}) => {
   if (signal?.aborted) throw abortError();
   const timeoutMs = maxBytes > 10 * 1024 * 1024 ? 300000 : 45000;
   let timer;
   let onAbort;
+  let stopped = false;
+  const requestController = new AbortController();
   try {
-    const stopped = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("下载文库超时，请检查网络后重试。")), timeoutMs);
-      onAbort = () => reject(abortError());
+    const stop = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        stopped = true;
+        reject(new Error("下载文库超时，请检查网络后重试。"));
+        requestController.abort();
+      }, timeoutMs);
+      onAbort = () => { stopped = true; reject(abortError()); requestController.abort(); };
       signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
     });
-    const response = await Promise.race([
-      requestUrl({ url, method: "GET", headers: { "Cache-Control": "no-cache" }, throw: false }),
-      stopped,
-    ]);
+    // Obsidian requests can outlive cancellation or timeout. Hold the shared
+    // queue until the actual request settles, even if its caller stops waiting.
+    const request = (requestTails.get(requestUrl) || Promise.resolve()).then(() => {
+      if (stopped || signal?.aborted) throw abortError();
+      return requestUrl({ url, method: "GET", headers: { "Cache-Control": "no-cache" }, throw: false },
+        { signal: requestController.signal, maxBytes });
+    });
+    const tail = request.then(() => {}, () => {});
+    requestTails.set(requestUrl, tail);
+    void tail.then(() => { if (requestTails.get(requestUrl) === tail) requestTails.delete(requestUrl); });
+    const response = await Promise.race([request, stop]);
     if (signal?.aborted) throw abortError();
     if (response.status !== 200) throw new Error(`文库服务返回 HTTP ${response.status}。`);
     const declared = Object.entries(response.headers || {}).find(([key]) => key.toLowerCase() === "content-length")?.[1];

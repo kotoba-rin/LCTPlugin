@@ -53,6 +53,31 @@ const validateUrl = (value, endpointUrl) => {
   }
   return url.href;
 };
+const isKnowledgePath = (path) => typeof path === "string" && /^知识库\/.+\.md$/i.test(path)
+  && !/(?:^|\/)README\.md$/i.test(path);
+const validateKnowledgeEntries = (value, files) => {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_FILES) throw new Error("知识库目录格式或数量无效。");
+  const published = new Map(files.map((file) => [file.path, file]));
+  const seen = new Set();
+  const field = (text, limit, required = false) => {
+    if (typeof text !== "string" || [...text].length > limit || (required && !text.trim()) || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text)) {
+      throw new Error("知识库目录字段无效或超出长度限制。");
+    }
+    return text;
+  };
+  const list = (items, count, length) => {
+    if (!Array.isArray(items) || items.length > count) throw new Error("知识库目录列表无效或超出数量限制。");
+    return [...new Set(items.map((item) => field(item, length, true)))];
+  };
+  return value.map((entry) => {
+    const path = validateContentPath(entry?.path);
+    if (!isKnowledgePath(path) || !published.has(path) || published.get(path).size === 0 || seen.has(path)) throw new Error(`知识库目录路径无效或重复：${path}`);
+    seen.add(path);
+    return { path, title: field(entry.title, 300, true), tags: list(entry.tags, 64, 160), excerpt: field(entry.excerpt, 120),
+      ...(entry.aliases === undefined ? {} : { aliases: list(entry.aliases, 32, 300) }) };
+  });
+};
 const validateLatest = (value, endpointUrl) => {
   if (value?.schema_version !== 1 || !HASH_RE.test(value.manifest_sha256 || "")) throw new Error("不支持的文库版本清单。");
   validateVersion(value.version);
@@ -94,7 +119,8 @@ const validateManifest = (value, latest, endpointUrl) => {
       directorySpellings.set(directoryKey, spelling);
     }
   }
-  return { ...value, files, total_size: total };
+  const knowledgeEntries = validateKnowledgeEntries(value.knowledge_entries, files);
+  return { ...value, files, total_size: total, ...(knowledgeEntries === undefined ? {} : { knowledge_entries: knowledgeEntries }) };
 };
 
-module.exports = { DEFAULT_PROJECT_ENDPOINT, HASH_RE, MAX_ARCHIVE_BYTES, asBytes, sha256, encodeJson, parseJson, validateVersion, validateContentPath, validateUrl, validateLatest, validateManifest };
+module.exports = { DEFAULT_PROJECT_ENDPOINT, HASH_RE, MAX_ARCHIVE_BYTES, asBytes, sha256, encodeJson, parseJson, validateVersion, validateContentPath, validateUrl, validateLatest, validateManifest, isKnowledgePath, validateKnowledgeEntries };

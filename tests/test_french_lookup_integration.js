@@ -182,7 +182,7 @@ async function run() {
   };
   settingTab.containerEl = parentEl;
   settingTab.display();
-  assert.ok(settingRows.some((row) => row.name === "更新文本清单"), "project settings refresh only the published catalog");
+  assert.ok(settingRows.some((row) => row.name === "更新文库目录"), "project settings refresh only the published catalog");
   assert.ok(!settingRows.some((row) => /首次下载完整文库|立即同步/.test(`${row.name} ${row.description}`)), "project settings must not offer whole-library downloads");
   assert.ok(!settingRows.some((row) => /Reader|Editer|GitHub|上游分支/.test(`${row.name} ${row.description}`)), "project settings expose one HTTP sync behavior without Git configuration");
   assert.ok(!/fork/i.test(JSON.stringify({ createdElements, settingRows })), "project settings must not expose retired Fork configuration or descriptions");

@@ -99,7 +99,9 @@ var require_segment_parser = __commonJS({
       parse(text, sourcePath = "") {
         const source = String(text || "");
         const comments = this.parseComments(source);
-        const blocks = [];
+        const markers = [];
+        let cursor = 0;
+        let line = 0;
         for (let index = 0; index < comments.length; index += 1) {
           const comment = comments[index];
           if (comment.label !== "id") {
@@ -112,23 +114,30 @@ var require_segment_parser = __commonJS({
           const hasAttachedGroup = hasAttachedIds || hasAttachedRepeatedPrimaryGroup;
           const ids = this.mergeIds(comment.ids, hasAttachedGroup ? attached.ids : []);
           const contentStart = hasAttachedGroup ? attached.end : comment.end;
-          const nextPrimary = comments.slice(index + (hasAttachedGroup ? 2 : 1)).find((candidate) => candidate.label === "id");
-          const contentEnd = nextPrimary ? nextPrimary.start : source.length;
-          const markdown = source.slice(contentStart, contentEnd).trim();
-          blocks.push({
-            primaryId: ids[0],
-            ids,
-            markdown,
-            visibleText: this.visibleText(markdown),
-            sourcePath,
-            startLine: this.lineAtOffset(source, comment.start),
-            endLine: nextPrimary ? Math.max(this.lineAtOffset(source, nextPrimary.start) - 1, 0) : Math.max(source.split(/\r?\n/).length - 1, 0)
-          });
+          for (; cursor < comment.start; cursor += 1) {
+            if (source.charCodeAt(cursor) === 10) line += 1;
+          }
+          markers.push({ ids, start: comment.start, contentStart, line });
           if (hasAttachedGroup) {
             index += 1;
           }
         }
-        return blocks;
+        for (; cursor < source.length; cursor += 1) {
+          if (source.charCodeAt(cursor) === 10) line += 1;
+        }
+        return markers.map((marker, index) => {
+          const next = markers[index + 1];
+          const markdown = source.slice(marker.contentStart, next ? next.start : source.length).trim();
+          return {
+            primaryId: marker.ids[0],
+            ids: marker.ids,
+            markdown,
+            visibleText: this.visibleText(markdown),
+            sourcePath,
+            startLine: marker.line,
+            endLine: next ? Math.max(next.line - 1, 0) : line
+          };
+        });
       }
       findByRequestedId(blocks, requestedId) {
         const normalizedId = this.normalizeId(requestedId);
@@ -249,11 +258,15 @@ var require_bilingual_reading_search = __commonJS({
         };
         visit(body);
         pattern.lastIndex = 0;
+        let firstIndex = 0;
+        let lastIndex = 0;
         for (const match of text.matchAll(pattern)) {
           const end = match.index + match[0].length;
-          const first = nodes.find((entry) => entry.end > match.index);
-          const last = nodes.find((entry) => entry.start < end && entry.end >= end);
-          if (!first || !last) continue;
+          while (firstIndex < nodes.length && nodes[firstIndex].end <= match.index) firstIndex += 1;
+          while (lastIndex < nodes.length && nodes[lastIndex].end < end) lastIndex += 1;
+          const first = nodes[firstIndex];
+          const last = nodes[lastIndex];
+          if (!first || !last || last.start >= end) continue;
           const range = doc.createRange();
           range.setStart(first.node, match.index - first.start);
           range.setEnd(last.node, end - last.start);
@@ -548,11 +561,13 @@ var require_bilingual_reading_view = __commonJS({
         ids: group.ids.sort(compareId)
       })).sort((left, right) => compareId(left.ids[0], right.ids[0]));
     }
-    function blockReadingMarkdown(block, fileText, namespace) {
-      const definitions = new Map(Array.from(
+    function collectFootnoteDefinitions(fileText) {
+      return new Map(Array.from(
         String(fileText || "").matchAll(FOOTNOTE_DEFINITION_RE),
         (match) => [match[1], match[0].trimEnd()]
       ));
+    }
+    function blockReadingMarkdown(block, fileText, namespace, definitions = collectFootnoteDefinitions(fileText)) {
       const sourceMarkdown = String(block.markdown || "");
       const hasLocalFootnoteDefinitions = Array.from(sourceMarkdown.matchAll(FOOTNOTE_DEFINITION_RE)).length > 0;
       let markdown = sourceMarkdown.replace(FOOTNOTE_DEFINITION_RE, "").replace(/<!--[\s\S]*?-->/g, "").trim();
@@ -754,6 +769,8 @@ ${appended.join("\n\n")}`;
               parser.parse(originalText, paths.originalPath),
               parser.parse(translationText, paths.translationPath)
             );
+            const originalDefinitions = collectFootnoteDefinitions(originalText);
+            const translationDefinitions = collectFootnoteDefinitions(translationText);
             if (!pairs.length) {
               stagingEl.createDiv({ cls: "lacan-bilingual-empty", text: "没有找到可供双语阅读的分段。" });
             }
@@ -761,16 +778,16 @@ ${appended.join("\n\n")}`;
             for (const pair of pairs) {
               const pairEl = pairsEl.createEl("section", { cls: "lacan-bilingual-pair" });
               pairEl.dataset.segmentId = pair.ids[0];
-              for (const [language, blocks, text, sourcePath] of [
-                ["original", pair.originals, originalText, paths.originalPath],
-                ["translation", pair.translations, translationText, paths.translationPath]
+              for (const [language, blocks, text, sourcePath, definitions] of [
+                ["original", pair.originals, originalText, paths.originalPath, originalDefinitions],
+                ["translation", pair.translations, translationText, paths.translationPath, translationDefinitions]
               ]) {
                 if (!blocks.length) {
                   const laneEl = pairEl.createDiv({ cls: `lacan-bilingual-language is-${language}`, attr: { lang: language === "original" ? "fr" : "zh" } });
                   laneEl.createDiv({ cls: "lacan-bilingual-empty", text: language === "original" ? "[没有对应法语原文]" : "[没有对应中文译文]" });
                 }
                 for (const block of blocks) {
-                  await this.renderBlock(pairEl, language, block, text, sourcePath, rendered);
+                  await this.renderBlock(pairEl, language, block, text, sourcePath, rendered, definitions);
                   if (this.closed || token !== this.renderToken) {
                     return;
                   }
@@ -806,7 +823,7 @@ ${appended.join("\n\n")}`;
           }
         }
       }
-      async renderBlock(pairEl, language, block, fileText, sourcePath, rendered) {
+      async renderBlock(pairEl, language, block, fileText, sourcePath, rendered, definitions) {
         const isOriginal = language === "original";
         const laneEl = pairEl.createDiv({ cls: `lacan-bilingual-language is-${language}`, attr: { lang: isOriginal ? "fr" : "zh" } });
         laneEl.dataset.segmentId = block.primaryId;
@@ -819,7 +836,7 @@ ${appended.join("\n\n")}`;
         }
         const bodyEl = laneEl.createDiv({ cls: "lacan-bilingual-content markdown-rendered" });
         if (!isOriginal) this.plugin.bindTranslationBlockEditing?.(bodyEl, sourcePath, block.primaryId);
-        const markdown = blockReadingMarkdown(block, fileText, `${isOriginal ? "fr" : "zh"}-${block.primaryId}`);
+        const markdown = blockReadingMarkdown(block, fileText, `${isOriginal ? "fr" : "zh"}-${block.primaryId}`, definitions);
         if (!markdown) {
           bodyEl.createDiv({ cls: "lacan-bilingual-empty", text: !isOriginal && /<!--\s*untranslated\s*-->/i.test(block.markdown) ? "[该段尚未翻译]" : "[该段暂无正文]" });
           return;
@@ -2164,7 +2181,7 @@ var require_translation_inline_editor = __commonJS({
           cancelButton.textContent = "取消";
           const hint = editor.appendChild(doc.createElement("div"));
           hint.className = "lacan-translation-inline-hint";
-          hint.textContent = "⌘ / Ctrl + Enter 保存 · Esc 取消 · 支持 Markdown、粘贴图片、注释和建言";
+          hint.textContent = "Ctrl + Enter 保存 · Esc 取消 · 支持 Markdown、粘贴图片、注释和建言";
           const errorEl = editor.appendChild(doc.createElement("div"));
           errorEl.className = "lacan-translation-inline-error";
           errorEl.setAttribute("role", "alert");
@@ -2200,7 +2217,7 @@ var require_translation_inline_editor = __commonJS({
             if (event.key === "Escape") {
               event.preventDefault();
               this.close();
-            } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            } else if (event.key === "Enter" && event.ctrlKey) {
               event.preventDefault();
               void this.save();
             }
@@ -2882,6 +2899,35 @@ var require_validation = __commonJS({
       }
       return url.href;
     };
+    var isKnowledgePath = (path) => typeof path === "string" && /^知识库\/.+\.md$/i.test(path) && !/(?:^|\/)README\.md$/i.test(path);
+    var validateKnowledgeEntries = (value, files) => {
+      if (value === void 0) return void 0;
+      if (!Array.isArray(value) || value.length > MAX_FILES) throw new Error("知识库目录格式或数量无效。");
+      const published = new Map(files.map((file) => [file.path, file]));
+      const seen = /* @__PURE__ */ new Set();
+      const field = (text, limit, required = false) => {
+        if (typeof text !== "string" || [...text].length > limit || required && !text.trim() || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text)) {
+          throw new Error("知识库目录字段无效或超出长度限制。");
+        }
+        return text;
+      };
+      const list = (items, count, length) => {
+        if (!Array.isArray(items) || items.length > count) throw new Error("知识库目录列表无效或超出数量限制。");
+        return [...new Set(items.map((item) => field(item, length, true)))];
+      };
+      return value.map((entry) => {
+        const path = validateContentPath(entry?.path);
+        if (!isKnowledgePath(path) || !published.has(path) || published.get(path).size === 0 || seen.has(path)) throw new Error(`知识库目录路径无效或重复：${path}`);
+        seen.add(path);
+        return {
+          path,
+          title: field(entry.title, 300, true),
+          tags: list(entry.tags, 64, 160),
+          excerpt: field(entry.excerpt, 120),
+          ...entry.aliases === void 0 ? {} : { aliases: list(entry.aliases, 32, 300) }
+        };
+      });
+    };
     var validateLatest = (value, endpointUrl) => {
       if (value?.schema_version !== 1 || !HASH_RE.test(value.manifest_sha256 || "")) throw new Error("不支持的文库版本清单。");
       validateVersion(value.version);
@@ -2923,9 +2969,10 @@ var require_validation = __commonJS({
           directorySpellings.set(directoryKey, spelling);
         }
       }
-      return { ...value, files, total_size: total };
+      const knowledgeEntries = validateKnowledgeEntries(value.knowledge_entries, files);
+      return { ...value, files, total_size: total, ...knowledgeEntries === void 0 ? {} : { knowledge_entries: knowledgeEntries } };
     };
-    module2.exports = { DEFAULT_PROJECT_ENDPOINT: DEFAULT_PROJECT_ENDPOINT2, HASH_RE, MAX_ARCHIVE_BYTES, asBytes, sha256, encodeJson, parseJson, validateVersion, validateContentPath, validateUrl, validateLatest, validateManifest };
+    module2.exports = { DEFAULT_PROJECT_ENDPOINT: DEFAULT_PROJECT_ENDPOINT2, HASH_RE, MAX_ARCHIVE_BYTES, asBytes, sha256, encodeJson, parseJson, validateVersion, validateContentPath, validateUrl, validateLatest, validateManifest, isKnowledgePath, validateKnowledgeEntries };
   }
 });
 
@@ -5565,21 +5612,44 @@ var require_project_sync_obsidian = __commonJS({
     var digest = (bytes) => bytes === null ? null : createHash("sha256").update(bytes).digest("hex");
     var arrayBuffer = (bytes) => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     var abortError = () => Object.assign(new Error("文库同步已取消。"), { name: "AbortError" });
+    var requestTails = /* @__PURE__ */ new WeakMap();
     var createProjectTransport2 = (requestUrl) => async (url, { signal, maxBytes = 256 * 1024 * 1024 } = {}) => {
       if (signal?.aborted) throw abortError();
       const timeoutMs = maxBytes > 10 * 1024 * 1024 ? 3e5 : 45e3;
       let timer;
       let onAbort;
+      let stopped = false;
+      const requestController = new AbortController();
       try {
-        const stopped = new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error("下载文库超时，请检查网络后重试。")), timeoutMs);
-          onAbort = () => reject(abortError());
+        const stop = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            stopped = true;
+            reject(new Error("下载文库超时，请检查网络后重试。"));
+            requestController.abort();
+          }, timeoutMs);
+          onAbort = () => {
+            stopped = true;
+            reject(abortError());
+            requestController.abort();
+          };
           signal?.addEventListener("abort", onAbort, { once: true });
+          if (signal?.aborted) onAbort();
         });
-        const response = await Promise.race([
-          requestUrl({ url, method: "GET", headers: { "Cache-Control": "no-cache" }, throw: false }),
-          stopped
-        ]);
+        const request = (requestTails.get(requestUrl) || Promise.resolve()).then(() => {
+          if (stopped || signal?.aborted) throw abortError();
+          return requestUrl(
+            { url, method: "GET", headers: { "Cache-Control": "no-cache" }, throw: false },
+            { signal: requestController.signal, maxBytes }
+          );
+        });
+        const tail = request.then(() => {
+        }, () => {
+        });
+        requestTails.set(requestUrl, tail);
+        void tail.then(() => {
+          if (requestTails.get(requestUrl) === tail) requestTails.delete(requestUrl);
+        });
+        const response = await Promise.race([request, stop]);
         if (signal?.aborted) throw abortError();
         if (response.status !== 200) throw new Error(`文库服务返回 HTTP ${response.status}。`);
         const declared = Object.entries(response.headers || {}).find(([key]) => key.toLowerCase() === "content-length")?.[1];
@@ -5723,6 +5793,13 @@ var require_project_sync_obsidian = __commonJS({
 var require_plugin_http_request = __commonJS({
   "src/plugin-http-request.js"(exports2, module2) {
     var { randomBytes } = require("crypto");
+    var DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
+    var MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
+    var abortError = () => Object.assign(new Error("插件网络请求已取消。"), { name: "AbortError" });
+    var checkResponseSize = (headers, maxBytes) => {
+      const declared = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === "content-length")?.[1];
+      if (Number(declared) > maxBytes) throw new Error("插件网络响应超出允许的大小。");
+    };
     var normalizeProxyUrl = (value) => {
       const input = String(value || "").trim();
       let url;
@@ -5741,15 +5818,13 @@ var require_plugin_http_request = __commonJS({
       for (const [key, value] of Object.entries(rawHeaders || {})) {
         headers[key.toLowerCase()] = Array.isArray(value) ? value.join(", ") : String(value);
       }
-      const response = {
-        status,
-        headers,
-        arrayBuffer: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
-      };
+      const response = { status, headers };
+      let arrayBuffer;
       let text;
       let json;
       let parsed = false;
       Object.defineProperties(response, {
+        arrayBuffer: { enumerable: true, get: () => arrayBuffer ??= bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) },
         text: { enumerable: true, get: () => text ??= bytes.toString("utf8") },
         json: { enumerable: true, get: () => {
           if (!parsed) {
@@ -5796,10 +5871,20 @@ var require_plugin_http_request = __commonJS({
         sessions.set(proxyRules, entry);
         return entry.ready;
       };
-      const pluginRequest = async (input) => {
+      const pluginRequest = async (input, { signal, maxBytes = DEFAULT_MAX_BYTES } = {}) => {
         if (disposed) throw new Error("插件网络请求已关闭。");
+        if (signal?.aborted) throw abortError();
+        if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > MAX_RESPONSE_BYTES) {
+          throw new Error("插件网络响应大小限制无效。");
+        }
         const settings = getSettings() || {};
-        if (!settings.pluginHttpProxyEnabled) return requestUrl(input);
+        if (!settings.pluginHttpProxyEnabled) {
+          const response = await requestUrl(input);
+          if (signal?.aborted) throw abortError();
+          checkResponseSize(response.headers, maxBytes);
+          if (response.arrayBuffer?.byteLength > maxBytes) throw new Error("插件网络响应超出允许的大小。");
+          return response;
+        }
         const proxyRules = normalizeProxyUrl(settings.pluginHttpProxyUrl);
         const options = typeof input === "string" ? { url: input } : input;
         if (!options || typeof options.url !== "string" || !/^https?:\/\//i.test(options.url)) {
@@ -5814,12 +5899,14 @@ var require_plugin_http_request = __commonJS({
           let request;
           let response;
           let chunks = [];
+          let receivedBytes = 0;
           let settled = false;
           let timer;
           const finish = (error, result) => {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
+            signal?.removeEventListener("abort", cancel);
             active.delete(cancel);
             response?.removeListener?.("data", onData);
             response?.removeListener?.("end", onEnd);
@@ -5832,11 +5919,16 @@ var require_plugin_http_request = __commonJS({
               reject(error);
             } else resolve(result);
           };
-          const cancel = () => finish(new Error("插件网络请求已取消。"));
+          const cancel = () => finish(abortError());
           const onData = (chunk) => {
             if (settled) return;
             try {
-              chunks.push(Buffer.from(chunk));
+              const length = typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.byteLength;
+              if (!Number.isSafeInteger(length) || length > maxBytes - receivedBytes) {
+                throw new Error("插件网络响应超出允许的大小。");
+              }
+              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+              receivedBytes += length;
             } catch (error) {
               finish(error);
             }
@@ -5844,7 +5936,7 @@ var require_plugin_http_request = __commonJS({
           const onEnd = () => {
             if (settled) return;
             try {
-              const result = makeResponse(response.statusCode, response.headers, Buffer.concat(chunks));
+              const result = makeResponse(response.statusCode, response.headers, Buffer.concat(chunks, receivedBytes));
               if (options.throw !== false && result.status >= 400) {
                 const error = new Error(`Request failed, status ${result.status}`);
                 error.status = result.status;
@@ -5855,6 +5947,11 @@ var require_plugin_http_request = __commonJS({
             }
           };
           active.add(cancel);
+          signal?.addEventListener("abort", cancel, { once: true });
+          if (signal?.aborted) {
+            cancel();
+            return;
+          }
           timer = setTimeout(() => finish(new Error("插件代理请求超时，请检查代理连接后重试。")), timeoutMs);
           Promise.resolve().then(() => getSession(proxyRules)).then(({ electron, session }) => {
             if (settled) return;
@@ -5877,6 +5974,12 @@ var require_plugin_http_request = __commonJS({
               response = incoming;
               response.on("error", (error) => finish(error));
               response.on("aborted", () => finish(new Error("插件代理响应已中止。")));
+              try {
+                checkResponseSize(response.headers, maxBytes);
+              } catch (error) {
+                finish(error);
+                return;
+              }
               response.on("end", onEnd);
               response.on("data", onData);
             });
@@ -5971,8 +6074,717 @@ views:
         direction: ASC
       - property: formula.lessonNumber
         direction: ASC
+  - type: lacan-knowledge-list
+    name: 知识库
 `;
-    module2.exports = { PROJECT_BASE_PATH: PROJECT_BASE_PATH2, PROJECT_BASE_CONTENT: PROJECT_BASE_CONTENT2 };
+    function migrateProjectBaseContent2(contents, { parseYaml, stringifyYaml } = {}) {
+      if (typeof contents !== "string") throw new Error("Base 内容必须是文本。");
+      const parsed = parseYaml?.(contents);
+      if (parsed != null && (typeof parsed !== "object" || Array.isArray(parsed))) throw new Error("Base 配置格式无效，已保留原文件。");
+      if (parsed?.views != null && !Array.isArray(parsed.views)) throw new Error("Base 的 views 必须是列表，已保留原文件。");
+      if (parsed?.views?.some((view) => view?.type === "lacan-knowledge-list")) return contents;
+      const newline = contents.includes("\r\n") ? "\r\n" : "\n";
+      const lines = contents.split(/\r?\n/);
+      const start = lines.findIndex((line) => /^(?:views|"views"|'views')\s*:/.test(line));
+      const addition = ["  - type: lacan-knowledge-list", "    name: 知识库"];
+      if (start < 0) return `${contents}${contents.endsWith("\n") || !contents ? "" : newline}views:${newline}${addition.join(newline)}${newline}`;
+      let end = start + 1;
+      while (end < lines.length && (!/^\S/.test(lines[end]) || /^(?:#|-\s)/.test(lines[end]))) end += 1;
+      const block = lines.slice(start, end).join("\n");
+      if (!parseYaml && /^\s*-\s+type:\s*["']?lacan-knowledge-list["']?\s*(?:#.*)?$/m.test(block)) return contents;
+      const tail = lines[start].replace(/^(?:views|"views"|'views')\s*:/, "").trim();
+      if (tail && !tail.startsWith("#") && !/^\[\s*\]\s*(?:#.*)?$/.test(tail)) {
+        if (!parsed || !stringifyYaml) throw new Error("当前 Base 使用复杂 views 格式，请保留原文件并手动添加知识库视图。");
+        const replacement = stringifyYaml({ views: [...parsed.views || [], { type: "lacan-knowledge-list", name: "知识库" }] }).trimEnd().split(/\r?\n/);
+        lines.splice(start, end - start, ...replacement);
+        return lines.join(newline);
+      }
+      if (!parseYaml) {
+        const first = lines.slice(start + 1, end).find((line) => line.trim() && !line.trim().startsWith("#"));
+        if (first && !/^\s*-\s/.test(first)) throw new Error("Base 的 views 必须是列表，已保留原文件。");
+      }
+      if (/^\[/.test(tail)) lines[start] = lines[start].replace(/:\s*\[\s*\]/, ":");
+      const indent = block.match(/\n( *)-\s/)?.[1] ?? "  ";
+      const inserted = [`${indent}- type: lacan-knowledge-list`, `${indent}  name: 知识库`];
+      while (end > start + 1 && !lines[end - 1].trim()) end -= 1;
+      lines.splice(end, 0, ...inserted);
+      return lines.join(newline);
+    }
+    module2.exports = { PROJECT_BASE_PATH: PROJECT_BASE_PATH2, PROJECT_BASE_CONTENT: PROJECT_BASE_CONTENT2, migrateProjectBaseContent: migrateProjectBaseContent2 };
+  }
+});
+
+// src/project-sync/catalog.js
+var require_catalog = __commonJS({
+  "src/project-sync/catalog.js"(exports2, module2) {
+    var nodePath = require("path");
+    var { validateContentPath, validateVersion, HASH_RE, isKnowledgePath, validateKnowledgeEntries } = require_validation();
+    var LESSON_PATH = /^texts\/([^/]+)\/(original|translation)\/((?:Leçon|Lecon|lesson)-(\d+)\.md)$/i;
+    var ASSET_EXTENSION = /\.(?:jpe?g|png|gif|svg|webp|avif|bmp|tiff?|emf|wmf|pdf)$/i;
+    var isAssetPath = (path) => typeof path === "string" && ASSET_EXTENSION.test(path);
+    var seminarIdentity = (slug) => {
+      const code = slug.match(/^(s\d+[a-z]?)(?:-|$)/i)?.[1]?.toLowerCase() || slug;
+      const number = Number(code.match(/^s(\d+)/)?.[1]);
+      return { code, order: Number.isFinite(number) ? number + (code === "s19b" ? 0.5 : 0) : Number.MAX_SAFE_INTEGER };
+    };
+    var buildCatalog = (manifest, latest) => {
+      const sourceRevision = latest.source_revision ?? null;
+      if (sourceRevision !== null && (typeof sourceRevision !== "string" || sourceRevision.length > 128)) throw new Error("文库来源版本记录无效。");
+      const paths = new Set(manifest.files.map((file) => validateContentPath(file.path)));
+      const translations = /* @__PURE__ */ new Map();
+      for (const path of paths) {
+        const match = path.match(LESSON_PATH);
+        if (match?.[2].toLowerCase() === "translation") translations.set(`${match[1]}/${Number(match[4])}`, path);
+      }
+      const seminars = /* @__PURE__ */ new Map();
+      for (const path of paths) {
+        const match = path.match(LESSON_PATH);
+        if (!match || match[2].toLowerCase() !== "original") continue;
+        const [, slug, , fileName, lessonPadded] = match;
+        const lessonNumber = Number(lessonPadded);
+        if (!Number.isSafeInteger(lessonNumber)) throw new Error("文库课次编号无效。");
+        const { code, order } = seminarIdentity(slug);
+        if (!seminars.has(slug)) {
+          const glossaryPath = `texts/${slug}/glossary.md`;
+          seminars.set(slug, { slug, code, order, title: slug, glossaryPath: paths.has(glossaryPath) ? glossaryPath : null, lessons: [] });
+        }
+        const expectedTranslation = `texts/${slug}/translation/${fileName}`;
+        const translationPath = paths.has(expectedTranslation) ? expectedTranslation : translations.get(`${slug}/${lessonNumber}`) || expectedTranslation;
+        seminars.get(slug).lessons.push({
+          key: path,
+          seminarSlug: slug,
+          seminarCode: code,
+          lessonNumber,
+          lessonPadded,
+          title: `${code}-${lessonNumber} · Leçon ${lessonPadded}`,
+          originalPath: path,
+          translationPath
+        });
+      }
+      const values = [...seminars.values()].sort((a, b) => a.order - b.order || a.slug.localeCompare(b.slug));
+      for (const seminar of values) seminar.lessons.sort((a, b) => a.lessonNumber - b.lessonNumber || a.originalPath.localeCompare(b.originalPath));
+      const files = manifest.files.map(({ path, size, sha256 }) => ({
+        path,
+        ...size === void 0 ? {} : { size },
+        ...sha256 === void 0 ? {} : { sha256 }
+      }));
+      const metadata = validateKnowledgeEntries(manifest.knowledge_entries, files);
+      const byPath = new Map(files.map((file) => [file.path, file]));
+      const knowledgeEntries = (metadata || files.filter((file) => isKnowledgePath(file.path) && file.size !== 0).map((file) => ({ path: file.path, title: nodePath.posix.basename(file.path).replace(/\.md$/i, ""), tags: [], excerpt: "" }))).map((entry) => ({ ...entry, key: entry.path, aliases: entry.aliases || [], ...byPath.get(entry.path) })).sort((a, b) => a.title.localeCompare(b.title, "zh-CN") || a.path.localeCompare(b.path));
+      return {
+        version: validateVersion(latest.version),
+        sourceRevision,
+        files,
+        knowledgeEntries,
+        knowledgeMetadataAvailable: metadata !== void 0,
+        lessonCount: values.reduce((count, seminar) => count + seminar.lessons.length, 0),
+        seminars: values
+      };
+    };
+    var catalogCache = (manifest, latest, endpointUrl) => ({
+      schema_version: 2,
+      endpoint_url: endpointUrl,
+      version: latest.version,
+      source_revision: latest.source_revision || null,
+      files: manifest.files.map(({ path, size, sha256 }) => ({ path, size, sha256 })),
+      ...manifest.knowledge_entries === void 0 ? {} : { knowledge_entries: manifest.knowledge_entries }
+    });
+    var readCatalogCache = (value, endpointUrl) => {
+      if (![1, 2].includes(value?.schema_version) || value.endpoint_url !== endpointUrl) return null;
+      if (!Array.isArray(value.files) || value.files.length < 1 || value.files.length > 25e3 || value.source_revision !== null && (typeof value.source_revision !== "string" || value.source_revision.length > 128)) {
+        throw new Error("本地文库目录缓存损坏，请刷新文库目录。");
+      }
+      if (value.schema_version === 2 && value.files.some((file) => !Number.isSafeInteger(file.size) || file.size < 0 || file.size > 64 * 1024 * 1024 || !HASH_RE.test(file.sha256 || ""))) {
+        throw new Error("本地文库目录校验信息损坏，请刷新文库目录。");
+      }
+      return buildCatalog(value, value);
+    };
+    var lessonFromCatalog = (catalog, originalPath) => {
+      validateContentPath(originalPath);
+      return catalog.seminars.flatMap((seminar) => seminar.lessons).find((lesson) => lesson.originalPath === originalPath) || null;
+    };
+    var createAssetIndex = (files) => {
+      const assetPaths = new Set(files.filter((file) => isAssetPath(file.path)).map((file) => file.path));
+      const byName = /* @__PURE__ */ new Map();
+      for (const path of assetPaths) {
+        const name = nodePath.posix.basename(path);
+        byName.set(name, byName.has(name) ? null : path);
+      }
+      return { assetPaths, byName };
+    };
+    var referencedAssets = (text, sourcePath, files, index) => {
+      if (typeof text !== "string") return [];
+      const assets = /* @__PURE__ */ new Set();
+      const { assetPaths, byName } = index || createAssetIndex(files);
+      const add = (raw) => {
+        let reference = raw.trim().replace(/^<|>$/g, "");
+        if (!reference || /^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(reference)) return;
+        reference = reference.split(/[|#?]/, 1)[0];
+        try {
+          reference = decodeURIComponent(reference);
+        } catch {
+          return;
+        }
+        if (!ASSET_EXTENSION.test(reference) || reference.includes("\\")) return;
+        const relative = nodePath.posix.normalize(nodePath.posix.join(nodePath.posix.dirname(sourcePath), reference));
+        const candidates = reference.startsWith("/") ? [reference.slice(1)] : [relative, reference];
+        if (!reference.includes("/")) candidates.push(byName.get(reference));
+        for (const candidate of candidates) {
+          if (candidate && assetPaths.has(candidate)) {
+            assets.add(candidate);
+            break;
+          }
+        }
+      };
+      for (const match of text.matchAll(/!?\[\[([^\]\n]+)\]\]/g)) add(match[1]);
+      for (const match of text.matchAll(/!?\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^\s)]+)(?:\s+["'][^\n]*?["'])?\s*\)/g)) add(match[1]);
+      for (const match of text.matchAll(/<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi)) add(match[1]);
+      return [...assets];
+    };
+    module2.exports = { buildCatalog, catalogCache, readCatalogCache, lessonFromCatalog, referencedAssets, createAssetIndex, isAssetPath };
+  }
+});
+
+// src/knowledge-library.js
+var require_knowledge_library = __commonJS({
+  "src/knowledge-library.js"(exports2, module2) {
+    var nodePath = require("path");
+    var Obsidian2 = require("obsidian");
+    var { isAssetPath } = require_catalog();
+    var isKnowledgePath = (path) => typeof path === "string" && /^知识库\/.+\.md$/i.test(path) && !/(?:^|\/)README\.md$/i.test(path);
+    var knowledgeLinkParts = (raw) => {
+      if (typeof raw !== "string" || /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(raw)) return null;
+      let target;
+      try {
+        target = decodeURIComponent(raw).split("|", 1)[0];
+      } catch {
+        return null;
+      }
+      const anchor = target.indexOf("#");
+      const path = (anchor < 0 ? target : target.slice(0, anchor)).replace(/^\//, "");
+      if (!path || path.includes("\\")) return null;
+      return { path, subpath: anchor < 0 ? "" : target.slice(anchor) };
+    };
+    var resolveKnowledgeTargets = (raw, sourcePath, entries) => {
+      const parts = knowledgeLinkParts(raw);
+      if (!parts) return [];
+      const withExtension = (path) => /\.md$/i.test(path) ? path : `${path}.md`;
+      const paths = /* @__PURE__ */ new Set([withExtension(parts.path), withExtension(nodePath.posix.normalize(nodePath.posix.join(nodePath.posix.dirname(sourcePath || ""), parts.path)))]);
+      const exact = entries.filter((entry) => paths.has(entry.path));
+      if (exact.length) return exact.map((entry) => ({ ...entry, subpath: parts.subpath }));
+      if (parts.path.includes("/")) return [];
+      const name = parts.path.replace(/\.md$/i, "");
+      return entries.filter((entry) => nodePath.posix.basename(entry.path, ".md") === name || entry.title === name || entry.aliases?.includes(name)).map((entry) => ({ ...entry, subpath: parts.subpath }));
+    };
+    var KnowledgeLinkModal = class extends (Obsidian2.Modal || class {
+    }) {
+      constructor(library, targets, newLeaf) {
+        super(library.plugin.app);
+        this.library = library;
+        this.targets = targets;
+        this.newLeaf = newLeaf;
+      }
+      onOpen() {
+        this.titleEl.setText(this.targets.length > 1 ? "选择知识卡" : "同步知识卡");
+        this.contentEl.createEl("p", { text: this.targets.length > 1 ? "这个名称对应多个词条，请选择要打开的知识卡。" : "此词条尚未下载，同步后即可阅读。" });
+        for (const target of this.targets) {
+          const row = this.contentEl.createDiv("lacan-knowledge-link-choice");
+          row.createEl("p", { text: target.title });
+          if (this.targets.length > 1) row.createEl("small", { text: target.path });
+          const local = this.library.plugin.app.vault.getAbstractFileByPath(target.path);
+          const button = row.createEl("button", { text: local ? "打开" : "同步并打开", cls: "mod-cta" });
+          button.addEventListener("click", async () => {
+            button.disabled = true;
+            try {
+              if (local) await this.library.open(target.path, target.subpath, { newLeaf: this.newLeaf });
+              else await this.library.sync(target.path, { open: true, subpath: target.subpath, newLeaf: this.newLeaf });
+              this.close();
+            } catch (error) {
+              new Obsidian2.Notice(error.message || "知识卡同步失败，请重试。");
+            } finally {
+              button.disabled = false;
+            }
+          });
+        }
+      }
+      onClose() {
+        this.contentEl.empty();
+      }
+    };
+    var KnowledgeLibrary2 = class {
+      constructor(plugin) {
+        this.plugin = plugin;
+        this.statuses = {};
+        this.failures = {};
+        this.refreshGeneration = 0;
+        this.refreshRevision = 0;
+        this.changeRevision = 0;
+        plugin.projectKnowledgeViews ||= /* @__PURE__ */ new Set();
+        plugin.knowledgeSyncProgress ||= /* @__PURE__ */ new Map();
+      }
+      getEntries() {
+        const plugin = this.plugin;
+        const entries = new Map((plugin.projectCatalog?.knowledgeEntries || []).map((entry) => [entry.path, { ...entry }]));
+        for (const file of plugin.app.vault.getMarkdownFiles?.() || []) {
+          if (!isKnowledgePath(file.path)) continue;
+          const frontmatter = plugin.app.metadataCache?.getFileCache?.(file)?.frontmatter;
+          if (frontmatter?.type !== "knowledge-card") continue;
+          const published = entries.get(file.path);
+          if (published) {
+            if (!plugin.projectCatalog.knowledgeMetadataAvailable) entries.set(file.path, {
+              ...published,
+              title: frontmatter.title || published.title,
+              tags: Array.isArray(frontmatter.tags) ? frontmatter.tags : published.tags,
+              aliases: Array.isArray(frontmatter.aliases) ? frontmatter.aliases : published.aliases
+            });
+            continue;
+          }
+          entries.set(file.path, {
+            path: file.path,
+            title: frontmatter.title || file.basename,
+            tags: Array.isArray(frontmatter.tags) ? frontmatter.tags : [],
+            aliases: Array.isArray(frontmatter.aliases) ? frontmatter.aliases : [],
+            excerpt: "",
+            localOnly: true
+          });
+        }
+        return [...entries.values()].map((entry) => {
+          const local = Boolean(plugin.app.vault.getAbstractFileByPath(entry.path));
+          const known = this.failures[entry.path] || this.statuses[entry.path];
+          const status = known || (entry.localOnly ? { status: "local_only", label: "仅本地" } : local ? { status: "checking", label: "检查中" } : { status: "not_synced", label: "未同步" });
+          return { ...entry, ...status, local, removed: status.status === "removed" };
+        }).sort((a, b) => String(a.title).localeCompare(String(b.title), "zh-CN"));
+      }
+      render() {
+        for (const view of this.plugin.projectKnowledgeViews || []) view.onDataUpdated();
+      }
+      async refresh({ engine, signal } = {}) {
+        clearTimeout(this.refreshTimer);
+        this.refreshController?.abort();
+        const controller = new AbortController();
+        this.refreshController = controller;
+        const generation = ++this.refreshGeneration;
+        const onAbort = () => controller.abort();
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) controller.abort();
+        const run = async () => {
+          try {
+            if (signal?.aborted) throw Object.assign(new Error("知识库状态检查已取消。"), { name: "AbortError" });
+            if (generation !== this.refreshGeneration || this.disposed) return;
+            const catalog = this.plugin.projectCatalog;
+            const changeRevision = this.changeRevision;
+            if (!catalog) {
+              this.render();
+              return;
+            }
+            engine ||= this.plugin.createProjectSyncEngine();
+            if (typeof engine.getKnowledgeEntryStatuses !== "function") {
+              this.render();
+              return;
+            }
+            const statuses = await engine.getKnowledgeEntryStatuses(catalog, { signal: controller.signal });
+            if (signal?.aborted) throw Object.assign(new Error("知识库状态检查已取消。"), { name: "AbortError" });
+            if (generation !== this.refreshGeneration || catalog !== this.plugin.projectCatalog || this.disposed) return;
+            this.statuses = statuses;
+            this.refreshedCatalog = catalog;
+            this.refreshedChangeRevision = changeRevision;
+            this.refreshRevision += 1;
+            this.render();
+          } catch (error) {
+            if (controller.signal.aborted && !signal?.aborted && generation !== this.refreshGeneration) return;
+            throw error;
+          } finally {
+            signal?.removeEventListener("abort", onAbort);
+            if (this.refreshController === controller) this.refreshController = null;
+          }
+        };
+        this.refreshWork = (this.refreshWork || Promise.resolve()).catch(() => {
+        }).then(run);
+        return this.refreshWork;
+      }
+      scheduleRefresh() {
+        clearTimeout(this.refreshTimer);
+        if (this.disposed || this.plugin.syncInProgress || !this.plugin.projectCatalog) return;
+        this.pauseRefresh();
+        this.refreshTimer = setTimeout(() => {
+          if (this.plugin.syncInProgress) return;
+          void this.refresh().catch((error) => console.warn("Knowledge library status refresh failed", error));
+        }, 200);
+      }
+      pauseRefresh() {
+        clearTimeout(this.refreshTimer);
+        this.refreshGeneration += 1;
+        this.refreshController?.abort();
+      }
+      hasRefreshedSince(revision, catalog = this.plugin.projectCatalog) {
+        return this.refreshRevision > revision && this.refreshedCatalog === catalog && this.refreshedChangeRevision === this.changeRevision;
+      }
+      affectsStatus(file, oldPath) {
+        const paths = [typeof file === "string" ? file : file?.path, oldPath].filter((path) => typeof path === "string" && path);
+        if (!paths.length) return true;
+        const folder = Array.isArray(file?.children) || paths.some((path) => !nodePath.posix.extname(path));
+        if (paths.some((path) => isKnowledgePath(path) || folder && (path === "知识库" || path.startsWith("知识库/")))) return true;
+        if (!folder && !paths.some(isAssetPath)) return false;
+        return (this.plugin.projectCatalog?.files || []).some(({ path }) => isAssetPath(path) && paths.some((changed) => changed === path || folder && path.startsWith(`${changed}/`)));
+      }
+      scheduleRefreshForChange(file, oldPath) {
+        if (this.affectsStatus(file, oldPath)) {
+          this.changeRevision += 1;
+          this.scheduleRefresh();
+        }
+      }
+      setProgress(path, percent) {
+        this.plugin.knowledgeSyncProgress.set(path, Math.max(0, Math.min(100, percent)));
+        for (const view of this.plugin.projectKnowledgeViews || []) view.updateSyncProgress(path);
+      }
+      async sync(path, { open = false, subpath = "", newLeaf = false } = {}) {
+        const plugin = this.plugin;
+        if (plugin.syncInProgress) throw new Error("已有文库同步正在进行，请等待完成或取消后再试。");
+        delete this.failures[path];
+        this.setProgress(path, 0);
+        try {
+          const result = await plugin.runProjectLibraryTask(async (engine, signal) => {
+            const result2 = await engine.syncKnowledgeEntry(path, { signal });
+            if (result2.catalog) plugin.projectCatalog = result2.catalog;
+            if (result2.removed) {
+              this.statuses[path] = { status: "removed", label: "上游已移除" };
+              new Obsidian2.Notice("该词条已不在发布目录中，本地内容已保留。");
+              return result2;
+            }
+            plugin.recordProjectSyncResult(result2);
+            await plugin.saveSettings();
+            if (!result2.catalog) plugin.projectCatalog = await engine.getCatalog({ signal });
+            await this.refresh({ engine, signal });
+            const skipped = result2.skippedFiles || [];
+            this.setProgress(path, skipped.length ? 0 : 100);
+            if (skipped.length) new Obsidian2.Notice(`知识卡或引用附件已有本地修改，已跳过同步。
+${skipped.map((item) => item.path).join("\n")}`, 12e3);
+            else new Obsidian2.Notice("知识卡及引用附件已同步。");
+            return result2;
+          }, { label: "正在同步知识卡…", knowledgePath: path });
+          if (open && !result.removed && !result.skippedFiles?.length) await this.open(path, subpath, { newLeaf });
+          return result;
+        } catch (error) {
+          this.setProgress(path, 0);
+          this.statuses[path] = { status: "error", label: error.name === "AbortError" ? "已取消，可重试" : "同步失败，可重试" };
+          this.failures[path] = this.statuses[path];
+          this.render();
+          throw error;
+        }
+      }
+      async syncAll() {
+        const plugin = this.plugin;
+        if (plugin.syncInProgress) throw new Error("已有文库同步正在进行，请等待完成或取消后再试。");
+        plugin.knowledgeBulkSync = { completed: 0, total: 0, title: "正在读取目录…" };
+        try {
+          const result = await plugin.runProjectLibraryTask(async (engine, signal) => {
+            let activePath;
+            let recorded = false;
+            const updateProgress = () => {
+              for (const view of plugin.projectKnowledgeViews || []) view.updateBulkSyncProgress?.();
+            };
+            try {
+              const result2 = await engine.syncAllKnowledgeEntries({
+                signal,
+                getOrderedPaths: (catalog) => {
+                  plugin.projectCatalog = catalog;
+                  plugin.projectCatalogError = null;
+                  return this.getEntries().filter((entry) => !entry.localOnly).map((entry) => entry.path);
+                },
+                onEntry: ({ entry, index, total, catalog, result: result3, summary }) => {
+                  plugin.projectCatalog = catalog;
+                  plugin.projectCatalogError = null;
+                  if (!result3) {
+                    activePath = entry.path;
+                    plugin.activeKnowledgeSync = entry.path;
+                    delete this.failures[entry.path];
+                    plugin.knowledgeBulkSync = { completed: index, total, title: entry.title };
+                    this.setProgress(entry.path, 0);
+                    if (index === 0) this.render();
+                  } else {
+                    activePath = null;
+                    plugin.activeKnowledgeSync = null;
+                    this.statuses[entry.path] = result3.skippedFiles.length ? { status: "modified", label: "本地已修改" } : { status: "synced", label: "已同步" };
+                    plugin.knowledgeBulkSync = { completed: index + 1, total, title: "" };
+                    this.setProgress(entry.path, result3.skippedFiles.length ? 0 : 100);
+                    plugin.recordProjectSyncResult(summary);
+                    recorded = true;
+                  }
+                  updateProgress();
+                }
+              });
+              plugin.projectCatalog = result2.catalog;
+              plugin.recordProjectSyncResult(result2);
+              recorded = true;
+              return result2;
+            } catch (error) {
+              if (activePath) {
+                this.statuses[activePath] = { status: "error", label: error.name === "AbortError" ? "已取消，可重试" : "同步失败，可重试" };
+                this.failures[activePath] = this.statuses[activePath];
+                this.setProgress(activePath, 0);
+              }
+              throw error;
+            } finally {
+              if (recorded) await plugin.saveSettings();
+              await this.refresh({ engine });
+            }
+          }, { label: "正在依次同步全部知识库…" });
+          new Obsidian2.Notice(`知识库同步完成：已处理 ${result.completedEntries} 个词条${result.skippedEntries ? `，其中 ${result.skippedEntries} 个因本地修改跳过` : ""}。`, 1e4);
+          return result;
+        } finally {
+          plugin.knowledgeBulkSync = null;
+          this.render();
+        }
+      }
+      async open(path, subpath = "", { newLeaf = false } = {}) {
+        if (!isKnowledgePath(path) || !this.plugin.app.vault.getAbstractFileByPath(path)) throw new Error("该知识卡尚未下载，请先同步。");
+        if (this.plugin.app.workspace.openLinkText) await this.plugin.app.workspace.openLinkText(`${path}${subpath}`, "", newLeaf);
+        else await this.plugin.openFile(this.plugin.app.vault.getAbstractFileByPath(path), subpath ? { eState: { subpath } } : void 0);
+      }
+      decorateLinks(element, sourcePath) {
+        for (const link of element.querySelectorAll?.("a.internal-link") || []) link.dataset.lacanKnowledgeSource = sourcePath;
+      }
+      handleLinkClick(event) {
+        if (event.button > 0 || event.defaultPrevented) return false;
+        const link = event.target?.closest?.("a.internal-link");
+        if (!link) return false;
+        const sourcePath = link.dataset?.lacanKnowledgeSource || this.plugin.app.workspace.getActiveFile?.()?.path || "";
+        const raw = link.getAttribute("data-href") || link.getAttribute("href");
+        const parts = knowledgeLinkParts(raw);
+        if (!parts) return false;
+        const resolved = this.plugin.app.metadataCache?.getFirstLinkpathDest?.(parts.path, sourcePath);
+        if (resolved && !isKnowledgePath(resolved.path)) return false;
+        const targets = resolveKnowledgeTargets(raw, sourcePath, this.getEntries());
+        if (!targets.length) return false;
+        if (resolved && targets.some((target) => target.path === resolved.path)) return true;
+        event.preventDefault();
+        event.stopImmediatePropagation?.();
+        event.stopPropagation();
+        if (targets.length === 1 && this.plugin.app.vault.getAbstractFileByPath(targets[0].path)) {
+          void this.open(targets[0].path, targets[0].subpath, { newLeaf: Boolean(event.ctrlKey || event.metaKey || event.shiftKey) }).catch((error) => new Obsidian2.Notice(error.message || "打开知识卡失败。"));
+          return true;
+        }
+        new KnowledgeLinkModal(this, targets, Boolean(event.ctrlKey || event.metaKey || event.shiftKey)).open();
+        return true;
+      }
+      dispose() {
+        this.disposed = true;
+        this.pauseRefresh();
+        this.plugin.projectKnowledgeViews?.clear();
+      }
+    };
+    module2.exports = { KnowledgeLibrary: KnowledgeLibrary2, knowledgeLinkParts, resolveKnowledgeTargets, isKnowledgePath };
+  }
+});
+
+// src/knowledge-library-view.js
+var require_knowledge_library_view = __commonJS({
+  "src/knowledge-library-view.js"(exports2, module2) {
+    var STATUS_LABELS = {
+      not_synced: "未同步",
+      synced: "已同步",
+      update: "有更新",
+      missing_assets: "附件待补齐",
+      modified: "本地已修改",
+      local_only: "仅本地",
+      removed: "上游已移除",
+      error: "同步失败",
+      unknown: "目录待刷新",
+      checking: "检查中"
+    };
+    var strings = (values) => Array.isArray(values) ? values.filter((value) => typeof value === "string") : [];
+    var tagsOf = (entry) => strings(entry.tags);
+    var fieldValues = (entry, field) => {
+      const tags = tagsOf(entry);
+      if (field === "category") return tags.filter((tag) => tag.startsWith("领域/")).map((tag) => tag.split("/")[1]);
+      if (field === "topic") return tags.filter((tag) => tag.startsWith("领域/") && tag.split("/").length > 2).map((tag) => tag.split("/").slice(2).join("/"));
+      if (field === "seminar") return tags.filter((tag) => /^研讨班/.test(tag));
+      return [];
+    };
+    var entryStatus = (entry) => entry.removed ? "removed" : entry.localOnly ? "local_only" : entry.status || "not_synced";
+    var searchText = (entry) => [entry.title, entry.path, entry.excerpt, ...tagsOf(entry), ...strings(entry.aliases)].join(" ").normalize("NFKC").toLocaleLowerCase();
+    var searchWords = (value) => String(value || "").normalize("NFKC").trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    var matchesKnowledgeFilters = (entry, filters, words = searchWords(filters.search), haystack = searchText(entry)) => {
+      return words.every((word) => haystack.includes(word)) && ["category", "topic", "seminar"].every((field) => !filters[field] || fieldValues(entry, field).includes(filters[field])) && (!filters.status || entryStatus(entry) === filters.status);
+    };
+    function createKnowledgeBasesViewClass2(BasesView) {
+      return class KnowledgeLibraryBasesView extends BasesView {
+        constructor(controller, parentEl, plugin) {
+          super(controller);
+          this.plugin = plugin;
+          this.containerEl = parentEl.createDiv("lacan-bases-list lacan-knowledge-list");
+          this.catalogContainer = parentEl.closest?.(".view-content");
+          this.catalogContainer?.addClass("lacan-catalog-base");
+          this.filters = Object.fromEntries(["search", "category", "topic", "seminar", "status"].map((field) => [
+            field,
+            typeof plugin.settings?.projectKnowledgeFilters?.[field] === "string" ? plugin.settings.projectKnowledgeFilters[field] : ""
+          ]));
+          this.progressElements = /* @__PURE__ */ new Map();
+          this.statusElements = /* @__PURE__ */ new Map();
+          plugin.projectKnowledgeViews ||= /* @__PURE__ */ new Set();
+          plugin.projectKnowledgeViews.add(this);
+          this.onDataUpdated();
+        }
+        onunload() {
+          clearTimeout(this.searchRenderTimer);
+          void this.persistFilters();
+          this.plugin.projectKnowledgeViews?.delete(this);
+          this.catalogContainer?.removeClass("lacan-catalog-base");
+          this.progressElements.clear();
+          this.statusElements.clear();
+        }
+        onDataUpdated() {
+          clearTimeout(this.searchRenderTimer);
+          this.containerEl.empty();
+          this.entries = this.plugin.getKnowledgeEntries();
+          this.searchTexts = new Map(this.entries.map((entry) => [entry.path, searchText(entry)]));
+          this.containerEl.createEl("p", {
+            cls: "lacan-bases-catalog-status",
+            text: `${this.entries.length} 个知识词条 · 目录可搜索，正文按需同步`
+          });
+          if (!this.plugin.projectCatalog) this.containerEl.createEl("p", {
+            cls: "lacan-bases-catalog-status",
+            text: this.plugin.projectCatalogError || "尚无发布目录，更新目录后可查看未下载的词条。"
+          });
+          if (this.plugin.projectCatalog?.knowledgeMetadataAvailable === false) this.containerEl.createEl("p", {
+            cls: "lacan-bases-catalog-status",
+            text: "未下载词条的目录目前仅提供标题；已下载词条可按本地标签查询。"
+          });
+          const toolbar = this.containerEl.createDiv("lacan-knowledge-toolbar");
+          this.createActionLink(toolbar, "更新目录", () => this.plugin.refreshProjectCatalog({ notify: true }), true);
+          this.createActionLink(toolbar, "同步全部知识库", () => this.plugin.syncAllProjectKnowledge(), true);
+          this.bulkSyncProgressEl = toolbar.createSpan({ cls: "lacan-bases-catalog-status", attr: { role: "status", "aria-live": "polite" } });
+          this.bulkSyncCancelLink = this.createActionLink(toolbar, "取消同步", () => {
+            if (this.plugin.knowledgeBulkSync) this.plugin.cancelProjectSync();
+          });
+          this.updateBulkSyncProgress();
+          const search = this.containerEl.createEl("input", {
+            cls: "lacan-bases-catalog-search",
+            type: "search",
+            placeholder: "搜索词条、标签或正文摘录",
+            attr: { "aria-label": "搜索完整知识库目录" }
+          });
+          search.value = this.filters.search;
+          search.addEventListener("input", () => this.changeFilter("search", search.value, { debounce: true }));
+          const controls = this.containerEl.createDiv("lacan-knowledge-filters");
+          for (const [field, label] of [["category", "分类"], ["topic", "主题"], ["seminar", "关联研讨班"], ["status", "同步状态"]]) {
+            const values = field === "status" ? Object.keys(STATUS_LABELS) : [...new Set(this.entries.flatMap((entry) => fieldValues(entry, field)))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+            const wrapper = controls.createEl("label", { cls: "lacan-knowledge-filter" });
+            wrapper.createSpan({ text: label });
+            const select = wrapper.createEl("select", { attr: { "aria-label": label } });
+            select.createEl("option", { value: "", text: "全部" });
+            for (const value of values) select.createEl("option", { value, text: field === "status" ? STATUS_LABELS[value] : value });
+            if (this.filters[field] && !values.includes(this.filters[field])) select.createEl("option", { value: this.filters[field], text: this.filters[field] });
+            select.value = this.filters[field];
+            select.addEventListener("change", () => this.changeFilter(field, select.value));
+          }
+          this.resultsEl = this.containerEl.createDiv("lacan-knowledge-results");
+          this.renderEntries();
+        }
+        changeFilter(field, value, { debounce = false } = {}) {
+          this.filters[field] = value;
+          this.plugin.settings.projectKnowledgeFilters = { ...this.filters };
+          this.filtersDirty = true;
+          clearTimeout(this.filterSaveTimer);
+          this.filterSaveTimer = setTimeout(() => {
+            void this.persistFilters();
+          }, 300);
+          clearTimeout(this.searchRenderTimer);
+          if (debounce) this.searchRenderTimer = setTimeout(() => this.renderEntries(), 100);
+          else this.renderEntries();
+        }
+        persistFilters() {
+          clearTimeout(this.filterSaveTimer);
+          if (!this.filtersDirty) return Promise.resolve();
+          this.filtersDirty = false;
+          return Promise.resolve().then(() => this.plugin.saveSettings?.()).catch((error) => console.error("无法保存知识库筛选条件。", error));
+        }
+        renderEntries() {
+          this.resultsEl.empty();
+          this.progressElements.clear();
+          this.statusElements.clear();
+          const words = searchWords(this.filters.search);
+          const matching = this.entries.filter((entry) => matchesKnowledgeFilters(entry, this.filters, words, this.searchTexts.get(entry.path)));
+          this.resultsEl.createEl("p", { cls: "lacan-bases-catalog-status", text: `${matching.length} / ${this.entries.length} 个词条` });
+          if (!matching.length) {
+            this.resultsEl.createEl("p", { cls: "lacan-bases-catalog-status", text: "没有符合条件的词条。" });
+            return;
+          }
+          const scroll = this.resultsEl.createDiv("lacan-knowledge-table-scroll");
+          const table = scroll.createEl("table", { cls: "lacan-knowledge-table" });
+          const header = table.createEl("thead").createEl("tr");
+          for (const label of ["词条名称", "分类／主题", "关联研讨班", "同步状态", "操作"]) header.createEl("th", { text: label, attr: { scope: "col" } });
+          const body = table.createEl("tbody");
+          for (const entry of matching) this.renderEntry(body, entry);
+        }
+        renderEntry(body, entry) {
+          const row = body.createEl("tr", { attr: { "data-path": entry.path } });
+          const title = row.createEl("td");
+          title.createSpan({ cls: "lacan-knowledge-title", text: entry.title || entry.path });
+          if (entry.excerpt) title.createEl("p", { cls: "lacan-knowledge-excerpt", text: entry.excerpt });
+          title.createEl("div", { cls: "lacan-knowledge-path", text: entry.path });
+          row.createEl("td", { text: [.../* @__PURE__ */ new Set([...fieldValues(entry, "category"), ...fieldValues(entry, "topic")])].join(" · ") || "—" });
+          row.createEl("td", { text: fieldValues(entry, "seminar").join(" · ") || "—" });
+          const status = entryStatus(entry);
+          const state = row.createEl("td");
+          this.statusElements.set(entry.path, { element: state.createSpan(), entry });
+          const progress = state.createSpan({ cls: "lacan-bases-progress lacan-knowledge-progress" });
+          progress.setAttribute("role", "progressbar");
+          progress.setAttribute("aria-label", `${entry.title || entry.path} 同步进度`);
+          progress.setAttribute("aria-valuemin", "0");
+          progress.setAttribute("aria-valuemax", "100");
+          this.progressElements.set(entry.path, progress);
+          this.updateSyncProgress(entry.path);
+          const actions = row.createEl("td", { cls: "lacan-knowledge-actions" });
+          const local = typeof entry.local === "boolean" ? entry.local : status !== "not_synced";
+          if (local) this.createActionLink(actions, "打开", () => this.plugin.openKnowledgeEntry(entry.path));
+          if (entry.localOnly || entry.removed) return;
+          const syncLabel = status === "error" ? "重试" : !local ? "同步" : status === "missing_assets" ? "补齐附件" : status === "update" ? "更新" : "检查更新";
+          this.createActionLink(actions, syncLabel, () => this.plugin.syncProjectKnowledgeEntry(entry.path, { open: false }), true);
+          if (!local) this.createActionLink(actions, "同步并打开", () => this.plugin.syncProjectKnowledgeEntry(entry.path, { open: true }), true);
+        }
+        updateSyncProgress(path) {
+          const element = this.progressElements.get(path);
+          if (!element) return;
+          const value = this.plugin.knowledgeSyncProgress?.get(path);
+          const active = this.plugin.activeKnowledgeSync === path;
+          const state = this.statusElements.get(path);
+          if (state) {
+            const library = this.plugin.getKnowledgeLibrary?.();
+            const current = library?.failures?.[path] || library?.statuses?.[path];
+            const entry = current ? { ...state.entry, ...current } : state.entry;
+            const status = entryStatus(entry);
+            state.element.textContent = active ? "同步中…" : entry.label || STATUS_LABELS[status] || status;
+          }
+          element.hidden = !active && !Number.isFinite(value);
+          const percent = Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
+          element.textContent = element.hidden ? "" : ` ${percent}%`;
+          element.setAttribute("aria-valuenow", `${percent}`);
+        }
+        updateBulkSyncProgress() {
+          const bulk = this.plugin.knowledgeBulkSync;
+          if (this.bulkSyncProgressEl) {
+            this.bulkSyncProgressEl.hidden = !bulk;
+            this.bulkSyncProgressEl.textContent = !bulk ? "" : bulk.total > 0 ? `已处理 ${bulk.completed} / ${bulk.total} 个词条${bulk.title ? ` · 正在同步：${bulk.title}` : ""}` : bulk.title || "正在读取目录…";
+          }
+          if (this.bulkSyncCancelLink) this.bulkSyncCancelLink.hidden = !bulk;
+        }
+        createActionLink(parentEl, text, action, syncAction = false) {
+          const link = parentEl.createEl("a", { cls: "lacan-bases-link", href: "#", text });
+          const disabled = syncAction && Boolean(this.plugin.syncInProgress);
+          link.setAttribute("aria-disabled", `${disabled}`);
+          if (disabled) link.addClass("is-disabled");
+          link.addEventListener("click", async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (syncAction && this.plugin.syncInProgress) return;
+            await this.plugin.runWithNotice(action, "知识库操作失败");
+          });
+          return link;
+        }
+      };
+    }
+    module2.exports = { createKnowledgeBasesViewClass: createKnowledgeBasesViewClass2, matchesKnowledgeFilters, STATUS_LABELS };
   }
 });
 
@@ -7443,7 +8255,7 @@ ${stderr}` : ""}`);
 var require_json_line_rpc = __commonJS({
   "segment-ai/json-line-rpc.js"(exports2, module2) {
     var { EventEmitter } = require("events");
-    var { StringDecoder } = require("string_decoder");
+    var MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
     var AppServerProtocolError = class extends Error {
       constructor(code, message, details = {}) {
         super(message);
@@ -7453,23 +8265,37 @@ var require_json_line_rpc = __commonJS({
       }
     };
     var JsonLineRpcClient = class extends EventEmitter {
-      constructor(childProcess, { requestTimeoutMs = 3e4 } = {}) {
+      constructor(childProcess, { requestTimeoutMs = 3e4, maxMessageBytes = MAX_MESSAGE_BYTES } = {}) {
         super();
         if (!childProcess?.stdin || !childProcess?.stdout) {
           throw new TypeError("JsonLineRpcClient requires a process with stdin and stdout.");
         }
         this.process = childProcess;
         this.requestTimeoutMs = requestTimeoutMs;
+        if (!Number.isSafeInteger(maxMessageBytes) || maxMessageBytes <= 0) {
+          throw new TypeError("maxMessageBytes must be a positive integer.");
+        }
+        this.maxMessageBytes = maxMessageBytes;
         this.nextRequestId = 1;
         this.pending = /* @__PURE__ */ new Map();
-        this.stdoutBuffer = "";
-        this.stdoutDecoder = new StringDecoder("utf8");
+        this.stdoutBuffer = Buffer.alloc(0);
+        this.stdoutBytes = 0;
         this.closed = false;
         this.exitHandled = false;
         this.onStdoutData = (chunk) => this.handleStdoutData(chunk);
         this.onProcessExit = (code, signal) => this.handleProcessExit(code, signal);
         this.onProcessError = (error) => this.handleProcessError(error);
+        this.onStdinError = (cause) => this.failTransport(new AppServerProtocolError(
+          "AppServerInputFailed",
+          "无法把请求发送给本地 Agent。",
+          { cause }
+        ));
+        this.onStderrData = () => {
+        };
         this.process.stdout.on("data", this.onStdoutData);
+        this.process.stdin.on("error", this.onStdinError);
+        this.process.stdin.once("close", () => this.process.stdin.off("error", this.onStdinError));
+        this.process.stderr?.on("data", this.onStderrData);
         this.process.on("exit", this.onProcessExit);
         this.process.on("error", this.onProcessError);
       }
@@ -7515,10 +8341,33 @@ var require_json_line_rpc = __commonJS({
         }
       }
       handleStdoutData(chunk) {
-        this.stdoutBuffer += Buffer.isBuffer(chunk) ? this.stdoutDecoder.write(chunk) : String(chunk);
-        const lines = this.stdoutBuffer.split(/\r?\n/);
-        this.stdoutBuffer = lines.pop() || "";
-        for (const line of lines) {
+        if (this.closed) return;
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
+        let offset = 0;
+        while (offset < bytes.length && !this.closed) {
+          const newline = bytes.indexOf(10, offset);
+          const end = newline === -1 ? bytes.length : newline;
+          const length = this.stdoutBytes + end - offset;
+          if (length > this.maxMessageBytes) {
+            this.failTransport(new AppServerProtocolError(
+              "AppServerOutputLimit",
+              "本地 Agent 返回的单个事件过大，已停止连接。"
+            ));
+            return;
+          }
+          if (length > this.stdoutBuffer.length) {
+            const capacity = Math.min(this.maxMessageBytes, Math.max(length, this.stdoutBuffer.length * 2, 4096));
+            const expanded = Buffer.allocUnsafe(capacity);
+            this.stdoutBuffer.copy(expanded, 0, 0, this.stdoutBytes);
+            this.stdoutBuffer = expanded;
+          }
+          bytes.copy(this.stdoutBuffer, this.stdoutBytes, offset, end);
+          this.stdoutBytes = length;
+          if (newline === -1) return;
+          const line = this.stdoutBuffer.toString("utf8", 0, this.stdoutBytes);
+          this.stdoutBytes = 0;
+          if (this.stdoutBuffer.length > 64 * 1024) this.stdoutBuffer = Buffer.alloc(0);
+          offset = newline + 1;
           if (!line.trim()) {
             continue;
           }
@@ -7534,6 +8383,13 @@ var require_json_line_rpc = __commonJS({
           }
           this.handleMessage(message);
         }
+      }
+      failTransport(error) {
+        if (this.closed) return;
+        this.failure = error;
+        this.emit("protocolError", error);
+        this.handleProcessExit(null, null);
+        if (typeof this.process.kill === "function") this.process.kill();
       }
       handleMessage(message) {
         if (!message || typeof message !== "object" || Array.isArray(message)) {
@@ -7603,11 +8459,12 @@ var require_json_line_rpc = __commonJS({
         }
         this.exitHandled = true;
         this.closed = true;
-        const error = new AppServerProtocolError(
+        const error = this.failure || new AppServerProtocolError(
           "AppServerExited",
           "本地 Agent 进程意外退出。",
           { exitCode: code, signal }
         );
+        this.releaseOutput();
         this.rejectPending(error);
         this.emit("exit", error);
       }
@@ -7618,16 +8475,19 @@ var require_json_line_rpc = __commonJS({
         }
         this.pending.clear();
       }
-      close() {
+      releaseOutput() {
+        this.stdoutBuffer = Buffer.alloc(0);
+        this.stdoutBytes = 0;
+        this.process.stdout.off("data", this.onStdoutData);
+        this.process.stderr?.off("data", this.onStderrData);
+      }
+      close(error = new AppServerProtocolError("AppServerExited", "本地 Agent 客户端已关闭。")) {
         if (this.closed) {
           return;
         }
         this.closed = true;
-        this.rejectPending(new AppServerProtocolError(
-          "AppServerExited",
-          "本地 Agent 客户端已关闭。"
-        ));
-        this.process.stdout.off("data", this.onStdoutData);
+        this.rejectPending(error);
+        this.releaseOutput();
         this.process.off("exit", this.onProcessExit);
         this.process.off("error", this.onProcessError);
         if (typeof this.process.kill === "function") {
@@ -7659,7 +8519,6 @@ var require_mcp_capability_registry = __commonJS({
 var require_codex_app_server_runtime = __commonJS({
   "segment-ai/codex-app-server-runtime.js"(exports2, module2) {
     var { spawn } = require("child_process");
-    var fs = require("fs");
     var path = require("path");
     var { discoverCli: discoverCli2, buildCliInvocation } = require_cli_discovery();
     var {
@@ -7683,6 +8542,7 @@ var require_codex_app_server_runtime = __commonJS({
       "in_app_browser",
       "computer_use"
     ]);
+    var MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
     var CodexRuntimeError = class extends Error {
       constructor(code, message, details = {}) {
         super(message);
@@ -7701,6 +8561,10 @@ var require_codex_app_server_runtime = __commonJS({
         spawnProcess = spawn,
         requestTimeoutMs = 3e4,
         turnTimeoutMs = 10 * 60 * 1e3,
+        maxMessageBytes = MAX_OUTPUT_BYTES,
+        maxTurnOutputBytes = MAX_OUTPUT_BYTES,
+        maxEarlyTurnEvents = 1e3,
+        maxEarlyTurnEventBytes = MAX_OUTPUT_BYTES,
         ephemeralThreads = false,
         environment = process.env,
         discoverCli: discoverCliProcess = discoverCli2
@@ -7716,6 +8580,10 @@ var require_codex_app_server_runtime = __commonJS({
         this.spawnProcess = spawnProcess;
         this.requestTimeoutMs = requestTimeoutMs;
         this.turnTimeoutMs = turnTimeoutMs;
+        for (const [name, limit] of Object.entries({ maxMessageBytes, maxTurnOutputBytes, maxEarlyTurnEvents, maxEarlyTurnEventBytes })) {
+          if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError(`${name} must be a positive integer.`);
+          this[name] = limit;
+        }
         this.ephemeralThreads = ephemeralThreads === true;
         this.environment = environment;
         this.discoverCli = discoverCliProcess;
@@ -7725,6 +8593,9 @@ var require_codex_app_server_runtime = __commonJS({
         this.lifecycleVersion = 0;
         this.activeTurns = /* @__PURE__ */ new Map();
         this.earlyTurnEvents = /* @__PURE__ */ new Map();
+        this.pendingTurnStarts = /* @__PURE__ */ new Map();
+        this.earlyTurnEventCount = 0;
+        this.earlyTurnEventBytes = 0;
         this.skillChangeListeners = /* @__PURE__ */ new Set();
         this.threadPreparationQueue = Promise.resolve();
         this.globalMcpServerNames = [];
@@ -7794,7 +8665,8 @@ var require_codex_app_server_runtime = __commonJS({
         }
         this.childProcess = childProcess;
         this.client = new JsonLineRpcClient(childProcess, {
-          requestTimeoutMs: this.requestTimeoutMs
+          requestTimeoutMs: this.requestTimeoutMs,
+          maxMessageBytes: this.maxMessageBytes
         });
         this.client.on("notification", (message) => this.handleNotification(message));
         this.client.on("serverRequest", (message) => this.handleServerRequest(message));
@@ -7889,6 +8761,7 @@ var require_codex_app_server_runtime = __commonJS({
         });
         this.assertExternalCapabilitiesDisabled();
         const activeThreadId = prepared.thread.id;
+        this.pendingTurnStarts.set(activeThreadId, (this.pendingTurnStarts.get(activeThreadId) || 0) + 1);
         let response;
         try {
           response = await this.client.request("turn/start", {
@@ -7903,16 +8776,18 @@ var require_codex_app_server_runtime = __commonJS({
             ...effectiveReasoningEffort ? { effort: effectiveReasoningEffort } : {}
           });
         } catch (error) {
+          this.releasePendingTurnStart(activeThreadId);
           throw this.rememberError(this.mapProtocolError(error, "TurnFailed"));
         }
         const turnId = response?.turn?.id;
         if (!turnId) {
+          this.releasePendingTurnStart(activeThreadId);
           throw this.rememberError(new CodexRuntimeError(
             "AppServerIncompatible",
             "App Server 未返回有效的 turn ID。"
           ));
         }
-        return new Promise((resolve, reject) => {
+        const result = new Promise((resolve, reject) => {
           const key = turnEventKey(activeThreadId, turnId);
           const timeout = setTimeout(() => {
             this.handleTurnTimeout(key);
@@ -7922,6 +8797,7 @@ var require_codex_app_server_runtime = __commonJS({
             threadId: activeThreadId,
             turnId,
             text: "",
+            textBytes: 0,
             onEvent,
             resolve,
             reject,
@@ -7934,6 +8810,8 @@ var require_codex_app_server_runtime = __commonJS({
           });
           this.replayEarlyTurnEvents(activeThreadId, turnId);
         });
+        this.releasePendingTurnStart(activeThreadId);
+        return result;
       }
       async startThread({ baseInstructions, model, researchEnabled = true, allowSkillRead = false } = {}) {
         try {
@@ -7996,7 +8874,7 @@ var require_codex_app_server_runtime = __commonJS({
         };
       }
       prepareRestrictedThread({ threadId, baseInstructions, model, researchEnabled = true, allowSkillRead = false } = {}) {
-        const prepare = this.threadPreparationQueue.then(async () => {
+        const prepareThread = async () => {
           await this.refreshMcpServerCatalog();
           this.assertExternalCapabilitiesDisabled();
           const response = String(threadId || "").trim() ? await this.resumeThread(String(threadId).trim(), {
@@ -8009,20 +8887,8 @@ var require_codex_app_server_runtime = __commonJS({
           await this.assertAppsIsolated(response.thread.id);
           this.diagnostics.disallowedCapabilitiesIsolated = true;
           return response;
-        }, async () => {
-          await this.refreshMcpServerCatalog();
-          this.assertExternalCapabilitiesDisabled();
-          const response = String(threadId || "").trim() ? await this.resumeThread(String(threadId).trim(), {
-            baseInstructions,
-            model,
-            researchEnabled,
-            allowSkillRead
-          }) : await this.startThread({ baseInstructions, model, researchEnabled, allowSkillRead });
-          this.assertExternalCapabilitiesDisabled();
-          await this.assertAppsIsolated(response.thread.id);
-          this.diagnostics.disallowedCapabilitiesIsolated = true;
-          return response;
-        });
+        };
+        const prepare = this.threadPreparationQueue.then(prepareThread, prepareThread);
         this.threadPreparationQueue = prepare.catch(() => {
         });
         return prepare;
@@ -8190,19 +9056,26 @@ var require_codex_app_server_runtime = __commonJS({
           this.applyTurnEvent(message, active);
           return;
         }
-        if (threadId && turnId) {
+        if (threadId && turnId && this.pendingTurnStarts.has(threadId)) {
           const key2 = turnEventKey(threadId, turnId);
-          const buffered = this.earlyTurnEvents.get(key2) || [];
-          if (buffered.length < 1e3) {
-            buffered.push(message);
-            this.earlyTurnEvents.set(key2, buffered);
+          const bytes = Buffer.byteLength(JSON.stringify(message), "utf8");
+          if (this.earlyTurnEventCount >= this.maxEarlyTurnEvents || this.earlyTurnEventBytes + bytes > this.maxEarlyTurnEventBytes) {
+            const error = new CodexRuntimeError("EarlyTurnEventLimit", "本地 Agent 在启动回合前返回了过多事件，已停止连接。");
+            this.closeProcess(error);
+            this.handleRuntimeExit(error);
+            return;
           }
+          const buffered = this.earlyTurnEvents.get(key2) || { threadId, messages: [], bytes: 0 };
+          buffered.messages.push(message);
+          buffered.bytes += bytes;
+          this.earlyTurnEventCount += 1;
+          this.earlyTurnEventBytes += bytes;
+          this.earlyTurnEvents.set(key2, buffered);
         }
       }
       replayEarlyTurnEvents(threadId, turnId) {
         const key = turnEventKey(threadId, turnId);
-        const buffered = this.earlyTurnEvents.get(key) || [];
-        this.earlyTurnEvents.delete(key);
+        const buffered = this.takeEarlyTurnEvents(key);
         for (const message of buffered) {
           const active = this.activeTurns.get(key);
           if (!active) {
@@ -8211,16 +9084,49 @@ var require_codex_app_server_runtime = __commonJS({
           this.applyTurnEvent(message, active);
         }
       }
+      takeEarlyTurnEvents(key) {
+        const buffered = this.earlyTurnEvents.get(key);
+        if (!buffered) return [];
+        this.earlyTurnEvents.delete(key);
+        this.earlyTurnEventCount -= buffered.messages.length;
+        this.earlyTurnEventBytes -= buffered.bytes;
+        return buffered.messages;
+      }
+      releasePendingTurnStart(threadId) {
+        const remaining = (this.pendingTurnStarts.get(threadId) || 0) - 1;
+        if (remaining > 0) {
+          this.pendingTurnStarts.set(threadId, remaining);
+          return;
+        }
+        this.pendingTurnStarts.delete(threadId);
+        for (const [key, buffered] of this.earlyTurnEvents) {
+          if (buffered.threadId === threadId) this.takeEarlyTurnEvents(key);
+        }
+      }
+      clearEarlyTurnEvents() {
+        this.earlyTurnEvents.clear();
+        this.pendingTurnStarts.clear();
+        this.earlyTurnEventCount = 0;
+        this.earlyTurnEventBytes = 0;
+      }
       applyTurnEvent(message, active) {
         if (!active) {
           return;
         }
-        if (active.timeoutError && (message.method === "turn/completed" || message.method === "error" && message.params?.willRetry === false)) {
-          this.finishTurnWithError(active.key, active.timeoutError);
+        if (active.stopError) {
+          if (message.method === "turn/completed" || message.method === "error" && message.params?.willRetry === false) {
+            this.finishTurnWithError(active.key, active.stopError);
+          }
           return;
         }
         if (message.method === "item/agentMessage/delta") {
           const delta = String(message.params?.delta || "");
+          const bytes = Buffer.byteLength(delta, "utf8");
+          if (active.textBytes + bytes > this.maxTurnOutputBytes) {
+            this.stopTurnWithError(active.key, new CodexRuntimeError("CliOutputLimit", "CLI 回答过大，已停止本次解读。"));
+            return;
+          }
+          active.textBytes += bytes;
           active.text += delta;
           active.onEvent({
             type: "delta",
@@ -8233,9 +9139,15 @@ var require_codex_app_server_runtime = __commonJS({
         }
         if (message.method === "item/completed" && message.params?.item?.type === "agentMessage") {
           const completedText = String(message.params.item.text || "");
+          const bytes = Buffer.byteLength(completedText, "utf8");
+          if (bytes > this.maxTurnOutputBytes) {
+            this.stopTurnWithError(active.key, new CodexRuntimeError("CliOutputLimit", "CLI 回答过大，已停止本次解读。"));
+            return;
+          }
           if (completedText && completedText !== active.text) {
             const delta = completedText.startsWith(active.text) ? completedText.slice(active.text.length) : completedText;
             active.text = completedText;
+            active.textBytes = bytes;
             active.onEvent({
               type: "delta",
               delta,
@@ -8308,12 +9220,10 @@ var require_codex_app_server_runtime = __commonJS({
         }
       }
       handleRuntimeExit(error) {
+        this.clearEarlyTurnEvents();
+        const exitError = this.mapProtocolError(error, "AppServerExited");
         for (const key of [...this.activeTurns.keys()]) {
-          this.finishTurnWithError(key, this.activeTurns.get(key)?.timeoutError || new CodexRuntimeError(
-            "AppServerExited",
-            "本地 Agent 意外退出，可手动重试。",
-            { cause: error }
-          ));
+          this.finishTurnWithError(key, this.activeTurns.get(key)?.stopError || exitError);
         }
         this.client = null;
         this.childProcess = null;
@@ -8322,34 +9232,38 @@ var require_codex_app_server_runtime = __commonJS({
         this.diagnostics.disallowedCapabilitiesIsolated = false;
       }
       handleTurnTimeout(key) {
-        const active = this.activeTurns.get(key);
-        if (!active || active.timeoutError) {
-          return;
-        }
-        active.timeoutError = new CodexRuntimeError(
+        this.stopTurnWithError(key, new CodexRuntimeError(
           "TurnTimeout",
           "本地 Agent 生成超时，已停止本次解读，可重试该分段。"
-        );
-        active.timeout = setTimeout(() => this.closeAfterTurnTimeout(key), this.requestTimeoutMs);
+        ));
+      }
+      stopTurnWithError(key, error) {
+        const active = this.activeTurns.get(key);
+        if (!active || active.stopError) {
+          return;
+        }
+        active.stopError = error;
+        clearTimeout(active.timeout);
+        active.timeout = setTimeout(() => this.closeAfterTurnStop(key), this.requestTimeoutMs);
         if (!this.client || this.client.closed) {
-          this.closeAfterTurnTimeout(key);
+          this.closeAfterTurnStop(key);
           return;
         }
         void this.client.request("turn/interrupt", {
           threadId: active.threadId,
           turnId: active.turnId
-        }).catch(() => this.closeAfterTurnTimeout(key));
+        }).catch(() => this.closeAfterTurnStop(key));
       }
-      closeAfterTurnTimeout(key) {
+      closeAfterTurnStop(key) {
         const active = this.activeTurns.get(key);
-        if (!active?.timeoutError) {
+        if (!active?.stopError) {
           return;
         }
-        this.finishTurnWithError(key, active.timeoutError);
+        this.finishTurnWithError(key, active.stopError);
         this.closeProcess();
         this.handleRuntimeExit(new CodexRuntimeError(
           "AppServerExited",
-          "无法确认超时任务已停止，本地 Agent 已关闭，请重试。"
+          "无法确认任务已停止，本地 Agent 已关闭，请重试。"
         ));
       }
       finishTurnWithError(key, error) {
@@ -8406,9 +9320,10 @@ var require_codex_app_server_runtime = __commonJS({
         }
         this.closeProcess();
       }
-      closeProcess() {
+      closeProcess(error) {
+        this.clearEarlyTurnEvents();
         if (this.client) {
-          this.client.close();
+          this.client.close(error);
         } else if (this.childProcess && typeof this.childProcess.kill === "function") {
           this.childProcess.kill();
         }
@@ -8432,6 +9347,9 @@ var require_codex_app_server_runtime = __commonJS({
           return error;
         }
         if (error instanceof AppServerProtocolError) {
+          if (error.code === "AppServerOutputLimit" || error.code === "AppServerInputFailed") {
+            return new CodexRuntimeError(error.code, error.message, { cause: error });
+          }
           if (error.rpcCode === -32601 || error.rpcCode === -32602) {
             return new CodexRuntimeError(
               "AppServerIncompatible",
@@ -8448,6 +9366,7 @@ var require_codex_app_server_runtime = __commonJS({
           }
         }
         const fallbackMessages = {
+          AppServerExited: "本地 Agent 意外退出，可手动重试。",
           AppServerIncompatible: "本地 Agent 初始化失败，请查看脱敏诊断后重试。",
           CapabilityIsolationFailed: "无法确认本地 Agent 已禁用外部工具。",
           ModelDiscoveryFailed: "无法从本机 Codex 获取模型列表，请检查 CLI 路径和登录状态。",
@@ -8475,61 +9394,6 @@ var require_codex_app_server_runtime = __commonJS({
         'shell_environment_policy.inherit="none"'
       );
       return args;
-    };
-    var buildCodexProcessEnvironment = (environment, cliPath) => {
-      const source = environment && typeof environment === "object" ? environment : {};
-      const pathKey = Object.keys(source).find(
-        (key) => key.toLowerCase() === "path"
-      ) || "PATH";
-      const currentEntries = String(source[pathKey] || "").split(path.delimiter).filter(Boolean);
-      const cliDirectory = path.dirname(path.resolve(cliPath));
-      const seen = /* @__PURE__ */ new Set();
-      const entries = [cliDirectory, ...currentEntries].filter((entry) => {
-        const key = process.platform === "win32" ? entry.toLowerCase() : entry;
-        if (seen.has(key)) {
-          return false;
-        }
-        seen.add(key);
-        return true;
-      });
-      return {
-        ...source,
-        [pathKey]: entries.join(path.delimiter)
-      };
-    };
-    var resolveCodexCli = (configuredPath, environment = process.env) => {
-      const configured = String(configuredPath || "").trim();
-      if (configured) {
-        if (!path.isAbsolute(configured) || !isExecutable(configured)) {
-          throw new CodexRuntimeError(
-            "CodexNotFound",
-            "设置中的 Codex CLI 路径无效，请选择可执行文件的绝对路径。"
-          );
-        }
-        return configured;
-      }
-      const pathEntries = String(environment?.PATH || "").split(path.delimiter).filter(Boolean);
-      const executableNames = process.platform === "win32" ? ["codex.exe", "codex.cmd", "codex"] : ["codex"];
-      for (const directory of pathEntries) {
-        for (const executableName of executableNames) {
-          const candidate = path.join(directory, executableName);
-          if (isExecutable(candidate)) {
-            return candidate;
-          }
-        }
-      }
-      throw new CodexRuntimeError(
-        "CodexNotFound",
-        "未找到本地 Codex。请安装 Codex CLI，或在插件设置中配置其绝对路径。"
-      );
-    };
-    var isExecutable = (candidate) => {
-      try {
-        fs.accessSync(candidate, fs.constants.X_OK);
-        return fs.statSync(candidate).isFile();
-      } catch (_error) {
-        return false;
-      }
     };
     var validateInitializeResponse = (response) => {
       if (!response || typeof response.userAgent !== "string" || typeof response.platformOs !== "string") {
@@ -8674,12 +9538,10 @@ var require_codex_app_server_runtime = __commonJS({
       DISABLED_FEATURES,
       READ_ONLY_SANDBOX_POLICY,
       buildAppServerArgs,
-      buildCodexProcessEnvironment,
       coerceCodexReasoningEffort: coerceCodexReasoningEffort2,
       extractMcpServerNamesFromConfigRead,
       extractLatestAgentText,
       normalizeCodexModelCatalog: normalizeCodexModelCatalog2,
-      resolveCodexCli,
       resolveCodexReasoningProfile: resolveCodexReasoningProfile2,
       validateRestrictedThread
     };
@@ -13508,121 +14370,80 @@ var require_resolve_conflict = __commonJS({
   }
 });
 
-// src/project-sync/catalog.js
-var require_catalog = __commonJS({
-  "src/project-sync/catalog.js"(exports2, module2) {
-    var nodePath = require("path");
-    var { validateContentPath, validateVersion } = require_validation();
-    var LESSON_PATH = /^texts\/([^/]+)\/(original|translation)\/((?:Leçon|Lecon|lesson)-(\d+)\.md)$/i;
-    var ASSET_EXTENSION = /\.(?:jpe?g|png|gif|svg|webp|avif|bmp|tiff?|emf|wmf|pdf)$/i;
-    var seminarIdentity = (slug) => {
-      const code = slug.match(/^(s\d+[a-z]?)(?:-|$)/i)?.[1]?.toLowerCase() || slug;
-      const number = Number(code.match(/^s(\d+)/)?.[1]);
-      return { code, order: Number.isFinite(number) ? number + (code === "s19b" ? 0.5 : 0) : Number.MAX_SAFE_INTEGER };
-    };
-    var buildCatalog = (manifest, latest) => {
-      const sourceRevision = latest.source_revision ?? null;
-      if (sourceRevision !== null && (typeof sourceRevision !== "string" || sourceRevision.length > 128)) throw new Error("文库来源版本记录无效。");
-      const paths = new Set(manifest.files.map((file) => validateContentPath(file.path)));
-      const translations = /* @__PURE__ */ new Map();
-      for (const path of paths) {
-        const match = path.match(LESSON_PATH);
-        if (match?.[2].toLowerCase() === "translation") translations.set(`${match[1]}/${Number(match[4])}`, path);
-      }
-      const seminars = /* @__PURE__ */ new Map();
-      for (const path of paths) {
-        const match = path.match(LESSON_PATH);
-        if (!match || match[2].toLowerCase() !== "original") continue;
-        const [, slug, , fileName, lessonPadded] = match;
-        const lessonNumber = Number(lessonPadded);
-        if (!Number.isSafeInteger(lessonNumber)) throw new Error("文库课次编号无效。");
-        const { code, order } = seminarIdentity(slug);
-        if (!seminars.has(slug)) {
-          const glossaryPath = `texts/${slug}/glossary.md`;
-          seminars.set(slug, { slug, code, order, title: slug, glossaryPath: paths.has(glossaryPath) ? glossaryPath : null, lessons: [] });
-        }
-        const expectedTranslation = `texts/${slug}/translation/${fileName}`;
-        const translationPath = paths.has(expectedTranslation) ? expectedTranslation : translations.get(`${slug}/${lessonNumber}`) || expectedTranslation;
-        seminars.get(slug).lessons.push({
-          key: path,
-          seminarSlug: slug,
-          seminarCode: code,
-          lessonNumber,
-          lessonPadded,
-          title: `${code}-${lessonNumber} · Leçon ${lessonPadded}`,
-          originalPath: path,
-          translationPath
-        });
-      }
-      const values = [...seminars.values()].sort((a, b) => a.order - b.order || a.slug.localeCompare(b.slug));
-      for (const seminar of values) seminar.lessons.sort((a, b) => a.lessonNumber - b.lessonNumber || a.originalPath.localeCompare(b.originalPath));
-      return {
-        version: validateVersion(latest.version),
-        sourceRevision,
-        lessonCount: values.reduce((count, seminar) => count + seminar.lessons.length, 0),
-        seminars: values
+// src/project-sync/knowledge-status.js
+var require_knowledge_status = __commonJS({
+  "src/project-sync/knowledge-status.js"(exports2, module2) {
+    var { readBytes, digest, readState } = require_transactions();
+    var { decodeText } = require_text_merge();
+    var { referencedAssets, createAssetIndex } = require_catalog();
+    var { checkCancelled } = require_downloads();
+    var { isKnowledgePath } = require_validation();
+    var labels = { not_synced: "未同步", synced: "已同步", update: "有更新", missing_assets: "附件待补齐", modified: "本地已修改" };
+    var getKnowledgeEntryStatuses = async (engine, catalog, { signal } = {}) => {
+      checkCancelled(signal);
+      const state = await readState(engine.storage, `${engine.stateDir}/state.json`);
+      const files = catalog.files || catalog.knowledgeEntries || [];
+      const remote = new Map(files.map((file) => [file.path, file]));
+      const assetIndex = createAssetIndex(files);
+      const memo = /* @__PURE__ */ new Map();
+      const inspect = (path) => {
+        if (!memo.has(path)) memo.set(path, (async () => {
+          checkCancelled(signal);
+          const bytes = await readBytes(engine.storage, path);
+          const hash = digest(bytes);
+          const unsaved = Boolean(await engine.storage.hasUnsavedChanges?.(path, hash));
+          checkCancelled(signal);
+          const baseline = state.files[path];
+          const expected = remote.get(path)?.sha256;
+          return { bytes: isKnowledgePath(path) ? bytes : null, hash, unsaved, expected, modified: unsaved || hash !== null && (baseline ? hash !== baseline : Boolean(expected && hash !== expected)) };
+        })());
+        return memo.get(path);
       };
-    };
-    var catalogCache = (manifest, latest, endpointUrl) => ({
-      schema_version: 1,
-      endpoint_url: endpointUrl,
-      version: latest.version,
-      source_revision: latest.source_revision || null,
-      files: manifest.files.map(({ path }) => ({ path }))
-    });
-    var readCatalogCache = (value, endpointUrl) => {
-      if (value?.schema_version !== 1 || value.endpoint_url !== endpointUrl) return null;
-      if (!Array.isArray(value.files) || value.files.length < 1 || value.files.length > 25e3 || value.source_revision !== null && (typeof value.source_revision !== "string" || value.source_revision.length > 128)) {
-        throw new Error("本地文库目录缓存损坏，请刷新文库目录。");
-      }
-      return buildCatalog(value, value);
-    };
-    var lessonFromCatalog = (catalog, originalPath) => {
-      validateContentPath(originalPath);
-      return catalog.seminars.flatMap((seminar) => seminar.lessons).find((lesson) => lesson.originalPath === originalPath) || null;
-    };
-    var referencedAssets = (text, sourcePath, files) => {
-      if (typeof text !== "string") return [];
-      const assets = /* @__PURE__ */ new Set();
-      const assetPaths = new Set(files.filter((file) => ASSET_EXTENSION.test(file.path)).map((file) => file.path));
-      const byName = /* @__PURE__ */ new Map();
-      for (const path of assetPaths) {
-        const name = nodePath.posix.basename(path);
-        byName.set(name, byName.has(name) ? null : path);
-      }
-      const add = (raw) => {
-        let reference = raw.trim().replace(/^<|>$/g, "");
-        if (!reference || /^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(reference)) return;
-        reference = reference.split(/[|#?]/, 1)[0];
-        try {
-          reference = decodeURIComponent(reference);
-        } catch {
-          return;
-        }
-        if (!ASSET_EXTENSION.test(reference) || reference.includes("\\")) return;
-        const relative = nodePath.posix.normalize(nodePath.posix.join(nodePath.posix.dirname(sourcePath), reference));
-        const candidates = reference.startsWith("/") ? [reference.slice(1)] : [relative, reference];
-        if (!reference.includes("/")) candidates.push(byName.get(reference));
-        for (const candidate of candidates) {
-          if (candidate && assetPaths.has(candidate)) {
-            assets.add(candidate);
-            break;
+      const result = {};
+      for (const entry of catalog.knowledgeEntries || []) {
+        checkCancelled(signal);
+        const body = await inspect(entry.path);
+        const missingAssets = [];
+        const modifiedPaths = body.modified ? [entry.path] : [];
+        const updatedPaths = body.hash !== null && body.expected && body.hash !== body.expected ? [entry.path] : [];
+        const assets = body.bytes === null ? [] : referencedAssets(decodeText(body.bytes), entry.path, files, assetIndex);
+        body.bytes = null;
+        if (assets.length) {
+          for (const path of assets) {
+            const asset = await inspect(path);
+            if (asset.modified) modifiedPaths.push(path);
+            else if (asset.hash === null) missingAssets.push(path);
+            else if (asset.expected && asset.hash !== asset.expected) updatedPaths.push(path);
           }
         }
-      };
-      for (const match of text.matchAll(/!?\[\[([^\]\n]+)\]\]/g)) add(match[1]);
-      for (const match of text.matchAll(/!?\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^\s)]+)(?:\s+["'][^\n]*?["'])?\s*\)/g)) add(match[1]);
-      for (const match of text.matchAll(/<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi)) add(match[1]);
-      return [...assets];
+        const needsCatalogRefresh = !body.expected;
+        const status = modifiedPaths.length ? "modified" : body.hash === null ? "not_synced" : missingAssets.length ? "missing_assets" : updatedPaths.length ? "update" : needsCatalogRefresh ? "unknown" : "synced";
+        result[entry.path] = {
+          status,
+          label: status === "unknown" ? "目录待刷新" : labels[status],
+          missingAssets,
+          modifiedPaths,
+          updatedPaths,
+          ...needsCatalogRefresh ? { needsCatalogRefresh: true } : {}
+        };
+      }
+      const publishedPaths = new Set((catalog.knowledgeEntries || []).map((entry) => entry.path));
+      for (const path of Object.keys(state.files)) {
+        if (!isKnowledgePath(path) || publishedPaths.has(path)) continue;
+        const local = await inspect(path);
+        if (local.hash !== null) result[path] = { status: "removed", label: "上游已移除", ...local.modified ? { modifiedPaths: [path] } : {} };
+      }
+      checkCancelled(signal);
+      return result;
     };
-    module2.exports = { buildCatalog, catalogCache, readCatalogCache, lessonFromCatalog, referencedAssets };
+    module2.exports = { getKnowledgeEntryStatuses };
   }
 });
 
 // src/project-sync/index.js
 var require_project_sync = __commonJS({
   "src/project-sync/index.js"(exports2, module2) {
-    var { DEFAULT_PROJECT_ENDPOINT: DEFAULT_PROJECT_ENDPOINT2, sha256, encodeJson, parseJson, validateContentPath, validateUrl, validateLatest, validateManifest } = require_validation();
+    var { DEFAULT_PROJECT_ENDPOINT: DEFAULT_PROJECT_ENDPOINT2, sha256, encodeJson, parseJson, validateContentPath, validateUrl, validateLatest, validateManifest, isKnowledgePath } = require_validation();
     var { checkCancelled, fetchBytes, verifyFile, downloadArchive } = require_downloads();
     var { readBytes, digest, readHash, localChangesError, assertUnchanged, compareAndWrite, removeIfPresent, readState, rollback, cleanupTransaction, restorePreviousState, recoverTransaction, prepareTransaction } = require_transactions();
     var { readBase, cacheBase, isTextPath } = require_base_cache();
@@ -13630,6 +14451,7 @@ var require_project_sync = __commonJS({
     var { readComparison } = require_conflict_comparison();
     var { resolveConflict } = require_resolve_conflict();
     var { buildCatalog, catalogCache, readCatalogCache, lessonFromCatalog, referencedAssets } = require_catalog();
+    var { getKnowledgeEntryStatuses } = require_knowledge_status();
     var ProjectSyncEngine = class {
       constructor({ storage, transport, endpointUrl = DEFAULT_PROJECT_ENDPOINT2, stateDir = ".obsidian/plugins/lacan-translation-helper/project-sync", onProgress } = {}) {
         if (!storage?.read || !storage?.write || !storage?.remove || typeof transport !== "function") throw new Error("文库同步缺少存储或网络适配器。");
@@ -13660,6 +14482,92 @@ var require_project_sync = __commonJS({
       async syncFiles(paths, { signal } = {}) {
         const selected = this.validateScope(paths);
         return this.withSyncLock(() => this.runScopedSync(selected, signal));
+      }
+      async getKnowledgeEntryStatuses(catalog, options = {}) {
+        return getKnowledgeEntryStatuses(this, catalog, options);
+      }
+      async syncKnowledgeEntry(path, { signal } = {}) {
+        validateContentPath(path);
+        if (!isKnowledgePath(path)) throw new Error("请选择知识库中的知识卡。");
+        return this.withSyncLock(async () => {
+          const release = await this.loadRelease(signal);
+          const catalog = buildCatalog(release.manifest, release.latest);
+          const entry = catalog.knowledgeEntries.find((item) => item.path === path);
+          if (!entry) {
+            checkCancelled(signal);
+            return {
+              version: release.latest.version,
+              catalog,
+              removed: true,
+              path,
+              added: 0,
+              updated: 0,
+              deleted: 0,
+              merged: 0,
+              unchanged: 0,
+              conflicts: [],
+              skippedFiles: [],
+              downloadedFiles: 0,
+              usedArchive: false,
+              scopePaths: []
+            };
+          }
+          checkCancelled(signal);
+          await this.storage.write(`${this.stateDir}/catalog.json`, encodeJson(catalogCache(release.manifest, release.latest, this.endpointUrl)));
+          const result = await this.runScopedSync([path], signal, { release, assetSources: [path], strict: true });
+          return { ...result, catalog };
+        });
+      }
+      async syncAllKnowledgeEntries({ signal, getOrderedPaths, onEntry } = {}) {
+        return this.withSyncLock(async () => {
+          const release = await this.loadRelease(signal);
+          const catalog = buildCatalog(release.manifest, release.latest);
+          checkCancelled(signal);
+          await this.storage.write(`${this.stateDir}/catalog.json`, encodeJson(catalogCache(release.manifest, release.latest, this.endpointUrl)));
+          const orderedPaths = await getOrderedPaths?.(catalog) || [];
+          const order = new Map(orderedPaths.map((path, index) => [path, index]));
+          const entries = [...catalog.knowledgeEntries].sort((a, b) => (order.get(a.path) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.path) ?? Number.MAX_SAFE_INTEGER));
+          const summary = {
+            version: release.latest.version,
+            catalog,
+            entryCount: entries.length,
+            completedEntries: 0,
+            skippedEntries: 0,
+            added: 0,
+            updated: 0,
+            deleted: 0,
+            merged: 0,
+            unchanged: 0,
+            downloadedFiles: 0,
+            usedArchive: false,
+            conflicts: [],
+            skippedFiles: [],
+            scopePaths: []
+          };
+          const skipped = /* @__PURE__ */ new Map();
+          const scope = /* @__PURE__ */ new Set();
+          for (const [index, entry] of entries.entries()) {
+            checkCancelled(signal);
+            await onEntry?.({ entry, index, total: entries.length, catalog });
+            checkCancelled(signal);
+            const result = await this.runScopedSync([entry.path], signal, { release, assetSources: [entry.path], strict: true });
+            summary.completedEntries += 1;
+            if (result.skippedFiles.length) summary.skippedEntries += 1;
+            for (const key of ["added", "updated", "deleted", "merged", "unchanged", "downloadedFiles"]) summary[key] += result[key] || 0;
+            for (const file of result.skippedFiles) skipped.set(file.path, file);
+            for (const path of result.scopePaths) scope.add(path);
+            Object.assign(summary, {
+              conflicts: result.conflicts,
+              skippedFiles: [...skipped.values()],
+              scopePaths: [...scope],
+              statePath: result.statePath,
+              conflictReportPath: result.conflictReportPath
+            });
+            await onEntry?.({ entry, index, total: entries.length, catalog, result, summary });
+          }
+          checkCancelled(signal);
+          return summary;
+        });
       }
       async syncLesson(originalPath, { signal } = {}) {
         validateContentPath(originalPath);
@@ -14074,7 +14982,9 @@ var { bindTranslationPreview } = require_translation_reading_preview();
 var { registerPdfReading, addPdfFileMenuItems } = require_pdf_reading();
 var { createProjectTransport, createVaultSyncStorage } = require_project_sync_obsidian();
 var { createPluginRequest } = require_plugin_http_request();
-var { PROJECT_BASE_PATH, PROJECT_BASE_CONTENT } = require_project_library_base();
+var { PROJECT_BASE_PATH, PROJECT_BASE_CONTENT, migrateProjectBaseContent } = require_project_library_base();
+var { KnowledgeLibrary } = require_knowledge_library();
+var { createKnowledgeBasesViewClass } = require_knowledge_library_view();
 var { formatSkipNotice } = require_project_sync_status();
 var { ProjectSyncReportModal } = require_project_sync_report();
 var {
@@ -14160,6 +15070,7 @@ var LESSON_RE = /<!--\s*lesson:\s*([^>\s]+)\s*-->/i;
 var UNTRANSLATED_RE = /<!--\s*untranslated\s*-->/gi;
 var MARKDOWN_RENDER_COMPONENT_KEY = "__lacanMarkdownRenderComponent";
 var LACAN_LESSON_LIST_VIEW_TYPE = "lacan-lesson-list";
+var LACAN_KNOWLEDGE_LIST_VIEW_TYPE = "lacan-knowledge-list";
 var DEFAULT_PROJECT_ENDPOINT = "https://kotoba-rin.com/wp-json/lctp/v1/project";
 var PROJECT_GRAPH_CARD_QUERY = String.raw`path:/^知识库\/[^\/]+\.md$/`;
 var PROJECT_GRAPH_TRANSLATION_QUERY = String.raw`path:/^texts\/[^\/]+\/translation\/[^\/]+\.md$/`;
@@ -14177,6 +15088,7 @@ var DEFAULT_SETTINGS = {
   projectEndpointUrl: DEFAULT_PROJECT_ENDPOINT,
   projectSyncLastResult: null,
   projectLessonSync: {},
+  projectKnowledgeFilters: {},
   autoSyncOnStartup: false,
   pluginHttpProxyEnabled: false,
   pluginHttpProxyUrl: "",
@@ -14279,6 +15191,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.projectCatalog = null;
     this.projectCatalogViews = /* @__PURE__ */ new Set();
     this.projectLessonSyncProgress = /* @__PURE__ */ new Map();
+    this.knowledgeLibrary = new KnowledgeLibrary(this);
     this.settings.segmentAiSessions = Array.isArray(this.settings.segmentAiSessions) ? this.settings.segmentAiSessions : [];
     this.settings.segmentAiMaxOpenSessions = normalizeMaxOpenSessions(
       this.settings.segmentAiMaxOpenSessions
@@ -14376,6 +15289,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
       menu.addItem((item) => item.setTitle("翻译选区并解释法语语法").setIcon("languages").onClick(() => this.frenchLookupPopup?.lookupCurrentSelection("translation")));
     }));
     this.registerDomEvent(document, "click", (event) => {
+      if (this.handleKnowledgeInternalLinkClick(event)) return;
       this.handleSegmentInternalLinkClick(event);
     }, { capture: true });
     this.registerDomEvent(document, "mouseover", (event) => {
@@ -14391,6 +15305,9 @@ module.exports = class LacanTranslationHelper extends Plugin {
       this.handleSegmentLinkPreviewLeave(event);
     }, { capture: true });
     this.registerReadingNoteEditorExtension();
+    this.registerMarkdownPostProcessor((element, context) => {
+      this.getKnowledgeLibrary().decorateLinks(element, context.sourcePath || "");
+    });
     this.registerMarkdownPostProcessor((element, context) => {
       const sourcePath = normalizePath(context.sourcePath || "");
       if (!this.isTranslationLessonPath(sourcePath) || element.closest?.(".cm-editor, .markdown-source-view, .lacan-bilingual-content, .lacan-segment-preview")) return;
@@ -14449,6 +15366,11 @@ module.exports = class LacanTranslationHelper extends Plugin {
         this.handleModifiedFile(file);
       })
     );
+    for (const eventName of ["create", "modify", "delete", "rename"]) {
+      this.registerEvent(this.app.vault.on(eventName, (file, oldPath) => this.getKnowledgeLibrary().scheduleRefreshForChange(file, oldPath)));
+    }
+    this.registerEvent(this.app.workspace.on("editor-change", (_editor, info) => this.getKnowledgeLibrary().scheduleRefreshForChange(info?.file || this.app.workspace.getActiveFile?.())));
+    if (this.app.metadataCache?.on) this.registerEvent(this.app.metadataCache.on("changed", (file) => this.getKnowledgeLibrary().scheduleRefreshForChange(file)));
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
         this.addFileMenuItems(menu, file);
@@ -14512,7 +15434,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     });
     this.addCommand({
       id: "sync-configured-github-repositories",
-      name: "更新文库文本清单（不下载课文）",
+      name: "更新文库目录（正文按需同步）",
       callback: () => this.runWithNotice(
         () => this.syncConfiguredRepositories({ notify: true }),
         "文库同步失败"
@@ -14520,7 +15442,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     });
     this.addCommand({
       id: "open-project-library",
-      name: "打开文库文本清单",
+      name: "打开文库 Base（课文与知识库）",
       callback: () => this.runWithNotice(() => this.openProjectLibrary(), "打开文本清单失败")
     });
     this.addCommand({
@@ -14586,6 +15508,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.projectSyncController?.abort();
     this.projectSyncController = null;
     this.projectCatalogViews?.clear();
+    this.knowledgeLibrary?.dispose();
     this.pluginRequest?.dispose();
     this.pluginRequest = null;
   }
@@ -14640,6 +15563,12 @@ module.exports = class LacanTranslationHelper extends Plugin {
       console.warn("Lacan Translation Helper: Obsidian Bases view API is unavailable.");
       return;
     }
+    const KnowledgeBasesView = createKnowledgeBasesViewClass(ObsidianBasesView);
+    this.registerBasesView(LACAN_KNOWLEDGE_LIST_VIEW_TYPE, {
+      name: "知识库",
+      icon: "library",
+      factory: (controller, containerEl) => new KnowledgeBasesView(controller, containerEl, this)
+    });
     this.registerBasesView(LACAN_LESSON_LIST_VIEW_TYPE, {
       name: "Lacan Lesson List",
       icon: "list-tree",
@@ -15887,7 +16816,13 @@ ${section}`
   }
   async ensureProjectBase() {
     const existing = this.app.vault.getAbstractFileByPath(PROJECT_BASE_PATH);
-    if (existing) return { file: existing, created: false };
+    if (existing) {
+      if (this.app.vault.process) await this.app.vault.process(existing, (contents) => migrateProjectBaseContent(contents, {
+        parseYaml: Obsidian.parseYaml,
+        stringifyYaml: Obsidian.stringifyYaml
+      }));
+      return { file: existing, created: false };
+    }
     const file = await this.app.vault.create(PROJECT_BASE_PATH, PROJECT_BASE_CONTENT);
     return { file, created: true };
   }
@@ -15899,10 +16834,11 @@ ${section}`
     const { file, created } = await this.ensureProjectBase();
     const engine = this.createProjectSyncEngine();
     this.projectCatalog = await engine.readCachedCatalog();
+    await this.refreshKnowledgeLibrary({ engine });
     this.refreshProjectCatalogViews();
     await this.reloadProjectBaseViews();
     if (created) await this.openFile(file);
-    if (!this.projectCatalog || this.settings.autoSyncOnStartup) {
+    if (!this.projectCatalog || this.settings.autoSyncOnStartup || this.projectCatalog.files?.some((file2) => !file2.sha256)) {
       try {
         await this.refreshProjectCatalog();
       } catch (error) {
@@ -15925,6 +16861,28 @@ ${section}`
   }
   refreshProjectCatalogViews() {
     for (const view of this.projectCatalogViews || []) view.onDataUpdated();
+    for (const view of this.projectKnowledgeViews || []) view.onDataUpdated();
+  }
+  getKnowledgeLibrary() {
+    return this.knowledgeLibrary ||= new KnowledgeLibrary(this);
+  }
+  getKnowledgeEntries() {
+    return this.getKnowledgeLibrary().getEntries();
+  }
+  refreshKnowledgeLibrary(options) {
+    return this.getKnowledgeLibrary().refresh(options);
+  }
+  syncProjectKnowledgeEntry(path, options) {
+    return this.getKnowledgeLibrary().sync(path, options);
+  }
+  syncAllProjectKnowledge() {
+    return this.getKnowledgeLibrary().syncAll();
+  }
+  openKnowledgeEntry(path, subpath) {
+    return this.getKnowledgeLibrary().open(path, subpath);
+  }
+  handleKnowledgeInternalLinkClick(event) {
+    return this.getKnowledgeLibrary().handleLinkClick(event);
   }
   getLessonSyncPercent(originalPath) {
     const active = this.projectLessonSyncProgress?.get(originalPath);
@@ -15942,8 +16900,9 @@ ${section}`
       await this.ensureProjectBase();
       this.projectCatalog = await engine.getCatalog({ signal });
       this.projectCatalogError = null;
+      await this.refreshKnowledgeLibrary({ engine, signal });
       this.refreshProjectCatalogViews();
-      if (notify) new Notice(`文本清单已更新：${this.projectCatalog.lessonCount} 个课次。课文请在 Base 中逐课同步。`);
+      if (notify) new Notice(`文库目录已更新：${this.projectCatalog.lessonCount} 个课次、${this.projectCatalog.knowledgeEntries?.length || 0} 个知识词条。正文请在 Base 中按需同步。`);
       return this.projectCatalog;
     }, { label: "正在更新文本清单…" });
   }
@@ -15999,10 +16958,13 @@ ${formatSkipNotice(result.skippedFiles)}` : `${seminar.code.toUpperCase()} 已�
       conflictReportPath: result.conflictReportPath
     };
   }
-  async runProjectLibraryTask(action, { label = "正在同步文库…", originalPath } = {}) {
+  async runProjectLibraryTask(action, { label = "正在同步文库…", originalPath, knowledgePath } = {}) {
     if (this.syncInProgress) throw new Error("已有文库同步正在进行，请等待完成或取消后再试。");
+    const knowledgeRefreshRevision = this.knowledgeLibrary?.refreshRevision || 0;
+    this.knowledgeLibrary?.pauseRefresh();
     this.syncInProgress = true;
     this.activeLessonSync = originalPath || null;
+    this.activeKnowledgeSync = knowledgePath || null;
     const controller = new AbortController();
     this.projectSyncController = controller;
     const progress = new Notice(label, 0);
@@ -16015,7 +16977,13 @@ ${formatSkipNotice(result.skippedFiles)}` : `${seminar.code.toUpperCase()} 已�
           percent = Math.max(this.projectLessonSyncProgress?.get(originalPath) || 0, percent);
           this.setLessonSyncPercent(originalPath, percent);
         }
-        progress.setMessage?.(`${label}${originalPath ? ` ${percent}%` : ""}`);
+        const activeKnowledgePath = knowledgePath || this.activeKnowledgeSync;
+        if (activeKnowledgePath) {
+          percent = Math.max(this.knowledgeSyncProgress?.get(activeKnowledgePath) || 0, percent);
+          this.getKnowledgeLibrary().setProgress(activeKnowledgePath, percent);
+        }
+        const bulk = this.knowledgeBulkSync;
+        progress.setMessage?.(bulk ? `${label} ${bulk.completed} / ${bulk.total}${bulk.title ? ` · ${bulk.title}` : ""}` : `${label}${originalPath || knowledgePath ? ` ${percent}%` : ""}`);
       });
       return await action(engine, controller.signal);
     } finally {
@@ -16023,7 +16991,11 @@ ${formatSkipNotice(result.skippedFiles)}` : `${seminar.code.toUpperCase()} 已�
       if (this.projectSyncController === controller) this.projectSyncController = null;
       this.syncInProgress = false;
       this.activeLessonSync = null;
+      this.activeKnowledgeSync = null;
       this.refreshProjectCatalogViews();
+      if (!this.knowledgeLibrary?.hasRefreshedSince(knowledgeRefreshRevision, this.projectCatalog)) {
+        this.knowledgeLibrary?.scheduleRefresh();
+      }
     }
   }
   createProjectSyncEngine(onProgress) {
@@ -17433,21 +18405,24 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
-    new Setting(containerEl).setName("文库同步地址").setDesc("从 WordPress 获取完整文本清单，课文在 Base 中逐课同步，不会整库下载。").addText((text) => text.setPlaceholder(DEFAULT_PROJECT_ENDPOINT).setValue(this.plugin.settings.projectEndpointUrl || DEFAULT_PROJECT_ENDPOINT).onChange(async (value) => {
+    new Setting(containerEl).setName("文库同步地址").setDesc("获取课文和知识词条目录，在 Base 中按课、按词条同步正文与附件。").addText((text) => text.setPlaceholder(DEFAULT_PROJECT_ENDPOINT).setValue(this.plugin.settings.projectEndpointUrl || DEFAULT_PROJECT_ENDPOINT).onChange(async (value) => {
       this.plugin.settings.projectEndpointUrl = value.trim() || DEFAULT_PROJECT_ENDPOINT;
       this.plugin.projectCatalog = null;
       this.plugin.projectLessonSyncProgress?.clear();
+      this.plugin.knowledgeSyncProgress?.clear();
+      this.plugin.getKnowledgeLibrary().statuses = {};
+      this.plugin.getKnowledgeLibrary().failures = {};
       this.plugin.settings.projectLessonSync = {};
       await this.plugin.saveSettings();
       this.plugin.refreshProjectCatalogViews();
     }));
-    new Setting(containerEl).setName("本地笔记与修改保护").setDesc("识别到正文、备注、注释或建言有本地修改时，整课跳过，不合并、不覆盖。需要重新同步时，请先保留修改副本，再删除有改动的本地文件后同步。未保存的编辑同样受保护。");
-    new Setting(containerEl).setName("启动时更新文本清单").setDesc("仅刷新已发布课次目录，不下载课文。首次安装会自动获取清单。").addToggle((toggle) => toggle.setValue(Boolean(this.plugin.settings.autoSyncOnStartup)).onChange(async (value) => {
+    new Setting(containerEl).setName("本地笔记与修改保护").setDesc("课文或知识卡及引用附件有本地修改时，跳过本课或本词条。需要重新同步时，请先保留修改副本，再删除有改动的本地文件后同步。未保存的编辑同样受保护。");
+    new Setting(containerEl).setName("启动时更新文库目录").setDesc("仅刷新已发布课次和知识词条目录，不下载正文。首次安装会自动获取目录。").addToggle((toggle) => toggle.setValue(Boolean(this.plugin.settings.autoSyncOnStartup)).onChange(async (value) => {
       this.plugin.settings.autoSyncOnStartup = value;
       await this.plugin.saveSettings();
     }));
     let cancelSyncButton;
-    new Setting(containerEl).setName("更新文本清单").setDesc("只更新目录。打开 Base 后，先初始化研讨班，再点击每课的同步按钮，同时下载原文和译文。").addButton((button) => button.setButtonText(this.plugin.syncInProgress ? "处理中…" : "更新清单").setCta().setDisabled(this.plugin.syncInProgress).onClick(async () => {
+    new Setting(containerEl).setName("更新文库目录").setDesc("只更新目录。在 Base 的文本清单中逐课同步原译文，或在知识库中搜索并同步所需词条。").addButton((button) => button.setButtonText(this.plugin.syncInProgress ? "处理中…" : "更新清单").setCta().setDisabled(this.plugin.syncInProgress).onClick(async () => {
       button.setDisabled(true);
       button.setButtonText("同步中…");
       cancelSyncButton?.setDisabled(false);

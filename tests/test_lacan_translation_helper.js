@@ -1145,6 +1145,131 @@ try {
   assert.strictEqual(discoverySaves, 1);
   assert.strictEqual(discoveryPlugin.segmentAiSkillDiscoveryPromise, null);
 
+  const allReasoningEfforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
+  const refreshedModels = [{
+    model: "gpt-6.1-sol",
+    displayName: "GPT-6.1 Sol",
+    description: "Current workhorse model.",
+    isDefault: true,
+    defaultReasoningEffort: "low",
+    supportedReasoningEfforts: allReasoningEfforts.map((value) => ({
+      value, description: `${value} reasoning`,
+    })),
+  }];
+  const modelPlugin = Object.create(PluginClass.prototype);
+  modelPlugin.settings = {
+    segmentAiModel: "gpt-6.1-sol",
+    segmentAiReasoningEffort: "medium",
+    segmentAiModelCatalog: [],
+    segmentAiModelCatalogUpdatedAt: 0,
+  };
+  modelPlugin.segmentAiRuntime = { listModels: async () => refreshedModels };
+  let savedModelSettings;
+  modelPlugin.saveSettings = async () => {
+    savedModelSettings = JSON.parse(JSON.stringify(modelPlugin.settings));
+  };
+  assert.deepStrictEqual(await modelPlugin.discoverSegmentAiModels(), refreshedModels);
+  assert.strictEqual(savedModelSettings.segmentAiReasoningEffort, "medium");
+  assert.ok(savedModelSettings.segmentAiModelCatalogUpdatedAt > 0);
+  assert.strictEqual(modelPlugin.segmentAiRuntime.defaultReasoningEffort, "medium");
+  const reloadedModelPlugin = Object.create(PluginClass.prototype);
+  reloadedModelPlugin.settings = savedModelSettings;
+  const reloadedModels = reloadedModelPlugin.getSegmentAiModelCatalog();
+  assert.deepStrictEqual(
+    reloadedModels[0].supportedReasoningEfforts.map((effort) => effort.value),
+    allReasoningEfforts,
+    "refreshing and persisting the model catalog must retain every returned reasoning level"
+  );
+  const { resolveCodexReasoningProfile } = require("../segment-ai/codex-app-server-runtime");
+  assert.deepStrictEqual(
+    resolveCodexReasoningProfile(reloadedModels, savedModelSettings.segmentAiModel)
+      .supportedReasoningEfforts.map((effort) => effort.value),
+    allReasoningEfforts,
+    "the persisted model must expose its complete reasoning dropdown profile"
+  );
+  modelPlugin.settings.segmentAiReasoningEffort = "unsupported-effort";
+  await modelPlugin.discoverSegmentAiModels();
+  assert.strictEqual(savedModelSettings.segmentAiReasoningEffort, "");
+  assert.strictEqual(modelPlugin.segmentAiRuntime.defaultReasoningEffort, "");
+
+  const modelRacePlugin = Object.create(PluginClass.prototype);
+  modelRacePlugin.settings = {
+    segmentAiModel: "gpt-6.1-sol", segmentAiReasoningEffort: "medium",
+    segmentAiModelCatalog: [], segmentAiModelCatalogUpdatedAt: 0,
+  };
+  let finishOldModels;
+  let finishCurrentModels;
+  let modelDiscoverySaves = 0;
+  modelRacePlugin.saveSettings = async () => { modelDiscoverySaves += 1; };
+  modelRacePlugin.segmentAiRuntime = {
+    listModels: () => new Promise((resolve) => { finishOldModels = resolve; }),
+  };
+  const oldModelDiscovery = modelRacePlugin.discoverSegmentAiModels();
+  modelRacePlugin.segmentAiModelDiscoveryPromise = null;
+  const currentModelRuntime = {
+    defaultReasoningEffort: "unchanged",
+    listModels: () => new Promise((resolve) => { finishCurrentModels = resolve; }),
+  };
+  modelRacePlugin.segmentAiRuntime = currentModelRuntime;
+  const currentModelDiscovery = modelRacePlugin.discoverSegmentAiModels();
+  const currentModelPromise = modelRacePlugin.segmentAiModelDiscoveryPromise;
+  finishOldModels([{ ...refreshedModels[0], model: "old-agent-model" }]);
+  await assert.rejects(oldModelDiscovery, /Agent 配置已变化/);
+  assert.strictEqual(modelRacePlugin.segmentAiModelDiscoveryPromise, currentModelPromise,
+    "a stale model refresh must not clear the current Agent's pending refresh");
+  assert.deepStrictEqual(modelRacePlugin.settings.segmentAiModelCatalog, [],
+    "a stale Agent must not replace the current model catalog");
+  assert.strictEqual(modelRacePlugin.settings.segmentAiModelCatalogUpdatedAt, 0);
+  assert.strictEqual(currentModelRuntime.defaultReasoningEffort, "unchanged");
+  assert.strictEqual(modelDiscoverySaves, 0);
+  finishCurrentModels(refreshedModels);
+  assert.deepStrictEqual(await currentModelDiscovery, refreshedModels);
+  assert.deepStrictEqual(modelRacePlugin.settings.segmentAiModelCatalog, refreshedModels);
+  assert.strictEqual(modelRacePlugin.settings.segmentAiReasoningEffort, "medium");
+  assert.strictEqual(currentModelRuntime.defaultReasoningEffort, "medium");
+  assert.strictEqual(modelDiscoverySaves, 1);
+  assert.strictEqual(modelRacePlugin.segmentAiModelDiscoveryPromise, null);
+
+  const cliPathPlugin = Object.create(PluginClass.prototype);
+  cliPathPlugin.settings = {
+    segmentAiCodexPath: "/old/codex",
+    segmentAiModel: "gpt-6.1-sol", segmentAiReasoningEffort: "medium",
+    segmentAiModelCatalog: refreshedModels, segmentAiModelCatalogUpdatedAt: 1234,
+    segmentAiSkillCatalog: [{ name: "old-agent-skill" }], segmentAiSkillCatalogUpdatedAt: 5678,
+  };
+  const cliPathChanges = [];
+  cliPathPlugin.saveSettings = async () => { cliPathChanges.push("save"); };
+  cliPathPlugin.resetSegmentAiRuntime = async () => { cliPathChanges.push("reset"); };
+  await cliPathPlugin.setSegmentAiCodexPath("  /new/codex  ");
+  assert.strictEqual(cliPathPlugin.settings.segmentAiCodexPath, "/new/codex");
+  assert.deepStrictEqual(cliPathPlugin.settings.segmentAiModelCatalog, []);
+  assert.strictEqual(cliPathPlugin.settings.segmentAiModelCatalogUpdatedAt, 0);
+  assert.deepStrictEqual(cliPathPlugin.settings.segmentAiSkillCatalog, []);
+  assert.strictEqual(cliPathPlugin.settings.segmentAiSkillCatalogUpdatedAt, 0);
+  assert.strictEqual(cliPathPlugin.settings.segmentAiModel, "gpt-6.1-sol");
+  assert.strictEqual(cliPathPlugin.settings.segmentAiReasoningEffort, "medium");
+  assert.deepStrictEqual(cliPathChanges, ["save", "reset"]);
+  await cliPathPlugin.setSegmentAiCodexPath(" /new/codex ");
+  assert.deepStrictEqual(cliPathChanges, ["save", "reset"],
+    "saving the same trimmed CLI path must not clear catalogs or restart the runtime");
+
+  const resetModelPlugin = Object.create(PluginClass.prototype);
+  const staleModelPromise = Promise.resolve([]);
+  resetModelPlugin.segmentAiModelDiscoveryPromise = staleModelPromise;
+  let finishModelShutdown;
+  let modelRuntimeInitializations = 0;
+  resetModelPlugin.segmentAiRuntime = {
+    shutdown: () => new Promise((resolve) => { finishModelShutdown = resolve; }),
+  };
+  resetModelPlugin.initializeSegmentAi = () => { modelRuntimeInitializations += 1; };
+  resetModelPlugin.refreshSegmentAiEntrances = () => {};
+  const pendingModelReset = resetModelPlugin.resetSegmentAiRuntime();
+  assert.strictEqual(resetModelPlugin.segmentAiModelDiscoveryPromise, null,
+    "runtime reset must invalidate model discovery before waiting for old process shutdown");
+  finishModelShutdown();
+  await pendingModelReset;
+  assert.strictEqual(modelRuntimeInitializations, 1);
+
   const interpretationCalls = [];
   plugin.settings = {
     segmentAiEnabled: true,

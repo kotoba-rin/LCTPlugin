@@ -135,7 +135,7 @@ def current_release(output_dir: Path, revision: str, builder) -> dict | None:
         return None
     try:
         latest = json.loads(latest_path.read_text(encoding="utf-8"))
-        if latest.get("source_revision") != revision:
+        if not isinstance(latest, dict) or latest.get("source_revision") != revision:
             return None
         version = latest["version"]
         if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", version):
@@ -149,10 +149,17 @@ def current_release(output_dir: Path, revision: str, builder) -> dict | None:
             return None
         if builder.file_hash(manifest) != latest.get("manifest_sha256") or builder.file_hash(archive) != latest.get("archive_sha256"):
             return None
-        records = json.loads(manifest.read_bytes()).get("files")
+        manifest_data = json.loads(manifest.read_bytes())
+        if (not isinstance(manifest_data, dict) or manifest_data.get("schema_version") != 1
+                or manifest_data.get("version") != version
+                or manifest_data.get("snapshot_generator") != builder.SNAPSHOT_GENERATOR
+                or not isinstance(manifest_data.get("knowledge_entries"), list)):
+            return None
+        records = manifest_data.get("files")
         if not isinstance(records, list) or len(records) != latest.get("file_count"):
             return None
         expected = {"manifest.json", "project.zip", "release.json"}
+        knowledge_entries = []
         for record in records:
             path = record["path"]
             builder.validate_public_path(path)
@@ -162,6 +169,15 @@ def current_release(output_dir: Path, revision: str, builder) -> dict | None:
             expected.add("files/" + path)
             if not target.is_file() or builder.file_hash(target) != record.get("sha256") or target.stat().st_size != record.get("size"):
                 return None
+            if path.startswith("知识库/") and Path(path).suffix.lower() == ".md":
+                entry = builder.knowledge_entry(path, target.read_bytes())
+                if entry is not None:
+                    knowledge_entries.append(entry)
+        # A matching Git commit alone is insufficient after a generator upgrade.
+        # Re-derive the small catalog from already verified release content so
+        # missing or stale metadata can never be reported as unchanged.
+        if manifest_data["knowledge_entries"] != knowledge_entries:
+            return None
         actual = set()
         for path in release.rglob("*"):
             if path.is_symlink():

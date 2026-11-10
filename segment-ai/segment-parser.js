@@ -14,7 +14,9 @@ class SegmentParser {
   parse(text, sourcePath = "") {
     const source = String(text || "");
     const comments = this.parseComments(source);
-    const blocks = [];
+    const markers = [];
+    let cursor = 0;
+    let line = 0;
 
     for (let index = 0; index < comments.length; index += 1) {
       const comment = comments[index];
@@ -40,29 +42,33 @@ class SegmentParser {
       const hasAttachedGroup = hasAttachedIds || hasAttachedRepeatedPrimaryGroup;
       const ids = this.mergeIds(comment.ids, hasAttachedGroup ? attached.ids : []);
       const contentStart = hasAttachedGroup ? attached.end : comment.end;
-      const nextPrimary = comments.slice(index + (hasAttachedGroup ? 2 : 1))
-        .find((candidate) => candidate.label === "id");
-      const contentEnd = nextPrimary ? nextPrimary.start : source.length;
-      const markdown = source.slice(contentStart, contentEnd).trim();
-
-      blocks.push({
-        primaryId: ids[0],
-        ids,
-        markdown,
-        visibleText: this.visibleText(markdown),
-        sourcePath,
-        startLine: this.lineAtOffset(source, comment.start),
-        endLine: nextPrimary
-          ? Math.max(this.lineAtOffset(source, nextPrimary.start) - 1, 0)
-          : Math.max(source.split(/\r?\n/).length - 1, 0),
-      });
+      // Count each source character once, including lines in skipped comments.
+      for (; cursor < comment.start; cursor += 1) {
+        if (source.charCodeAt(cursor) === 10) line += 1;
+      }
+      markers.push({ ids, start: comment.start, contentStart, line });
 
       if (hasAttachedGroup) {
         index += 1;
       }
     }
 
-    return blocks;
+    for (; cursor < source.length; cursor += 1) {
+      if (source.charCodeAt(cursor) === 10) line += 1;
+    }
+    return markers.map((marker, index) => {
+      const next = markers[index + 1];
+      const markdown = source.slice(marker.contentStart, next ? next.start : source.length).trim();
+      return {
+        primaryId: marker.ids[0],
+        ids: marker.ids,
+        markdown,
+        visibleText: this.visibleText(markdown),
+        sourcePath,
+        startLine: marker.line,
+        endLine: next ? Math.max(next.line - 1, 0) : line,
+      };
+    });
   }
 
   findByRequestedId(blocks, requestedId) {

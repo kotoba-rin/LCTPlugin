@@ -134,6 +134,9 @@ const run = async () => {
     assert.strictEqual(blockReadingMarkdown({ markdown: `Dernière phrase.${wrapper}\n\n[^1]: Note.` }, "[^1]: Note.", "last"), "Dernière phrase.");
   }
   assert.strictEqual(blockReadingMarkdown({ markdown: "Une section.\n\n## Notes\n\nAnnotation conservée." }, "", "body"), "Une section.\n\n## Notes\n\nAnnotation conservée.");
+  const nestedFootnotes = "[^shared]: Note principale.[^nested]\n[^nested]: Suite.[^shared]\n[^unused]: Hors contexte.";
+  const nestedReading = blockReadingMarkdown({ markdown: "Texte.[^shared]" }, nestedFootnotes, "fr-nested");
+  assert.strictEqual(nestedReading, "Texte.[^fr-nested-shared]\n\n[^fr-nested-shared]: Note principale.[^fr-nested-nested]\n\n[^fr-nested-nested]: Suite.[^fr-nested-shared]");
 
   const files = new Map([
     [originalPath, { path: originalPath, extension: "md", content: originalText }],
@@ -373,6 +376,35 @@ const run = async () => {
   assert.strictEqual(invalid.getState().sourcePath, "");
   assert.ok(invalid.contentEl.children[0].textContent.includes("请从研讨班"));
   await invalid.onClose();
+
+  const footnoteSource = (language) => Array.from({ length: 160 }, (_, index) => (
+    `<!-- id: s7-01-${String(index + 1).padStart(4, "0")} -->\n${language} ${index}.[^shared]`
+  )).join("\n\n") + `\n\n${nestedFootnotes}`;
+  const largeOriginal = footnoteSource("Français");
+  const largeTranslation = footnoteSource("中文");
+  files.get(originalPath).content = largeOriginal;
+  files.get(translationPath).content = largeTranslation;
+  const scans = new Map([[largeOriginal, 0], [largeTranslation, 0]]);
+  const matchAll = String.prototype.matchAll;
+  const largeView = new LacanBilingualReadingView({ contentEl: new MockElement() }, plugin);
+  const renderStart = markdownRenders.length;
+  try {
+    String.prototype.matchAll = function (...args) {
+      const value = String(this);
+      if (scans.has(value)) scans.set(value, scans.get(value) + 1);
+      return matchAll.apply(this, args);
+    };
+    await largeView.setState({ sourcePath: originalPath });
+  } finally {
+    String.prototype.matchAll = matchAll;
+    await largeView.onClose();
+  }
+  assert.deepStrictEqual([...scans.values()], [1, 1], "a render scans each complete file for footnotes once");
+  const largeRenders = markdownRenders.slice(renderStart);
+  assert.strictEqual(largeRenders.length, 320);
+  assert.ok(largeRenders[0].markdown.includes("[^fr-s7-01-0001-shared]: Note principale."));
+  assert.ok(largeRenders[1].markdown.includes("[^zh-s7-01-0001-nested]: Suite."));
+  assert.ok(largeRenders.every(({ markdown }) => !markdown.includes("Hors contexte")), "cached definitions remain scoped to references in each block");
   console.log("bilingual reading tests passed");
 };
 

@@ -6,6 +6,96 @@ const path = require("path");
 const { createProjectTransport, createVaultSyncStorage } = require("../src/project-sync-obsidian");
 const bytes = (s) => new Uint8Array(Buffer.from(s));
 const hash = (s) => createHash("sha256").update(s).digest("hex");
+const deferred = () => {
+  let resolve, reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+};
+const flushRequests = () => new Promise((resolve) => setImmediate(resolve));
+
+const verifySerialRequests = async () => {
+  const requests = [];
+  let active = 0;
+  let maxActive = 0;
+  const requestUrl = ({ url }) => {
+    const response = deferred();
+    requests.push({ url, ...response });
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    return response.promise.finally(() => { active -= 1; });
+  };
+  const transport = createProjectTransport(requestUrl);
+  const answer = (index) => requests[index].resolve({ status: 200, headers: {}, arrayBuffer: bytes("ok").buffer });
+  const controller = new AbortController();
+  const interrupted = transport("https://example.org/interrupted", { signal: controller.signal });
+  await flushRequests();
+  assert.strictEqual(requests.length, 1);
+  controller.abort();
+  await assert.rejects(interrupted, { name: "AbortError" });
+  assert.strictEqual(active, 1, "cancelling the caller need not stop Obsidian's underlying request");
+
+  const retry = createProjectTransport(requestUrl)("https://example.org/retry");
+  const queuedController = new AbortController();
+  const cancelledQueueItem = transport("https://example.org/queued-cancel", { signal: queuedController.signal });
+  queuedController.abort();
+  await assert.rejects(cancelledQueueItem, { name: "AbortError" });
+  await flushRequests();
+  assert.deepStrictEqual(requests.map((item) => item.url), ["https://example.org/interrupted"],
+    "even a replacement transport must wait for the previous underlying request to settle");
+  answer(0);
+  await flushRequests();
+  assert.deepStrictEqual(requests.map((item) => item.url), ["https://example.org/interrupted", "https://example.org/retry"]);
+  answer(1);
+  await retry;
+  await flushRequests();
+  assert.strictEqual(requests.length, 2, "a cancelled queued item must never issue a network request");
+
+  const failed = transport("https://example.org/failed");
+  const rejected = assert.rejects(failed, /network failed/);
+  const recovery = createProjectTransport(requestUrl)("https://example.org/recovery");
+  await flushRequests();
+  assert.strictEqual(requests.length, 3, "new requests wait while a predecessor is pending");
+  requests[2].reject(new Error("network failed"));
+  await rejected;
+  await flushRequests();
+  assert.strictEqual(requests[3].url, "https://example.org/recovery", "request failure must not poison the queue");
+  answer(3);
+  await recovery;
+
+  const timers = [];
+  const originalSetTimeout = global.setTimeout;
+  try {
+    global.setTimeout = (callback, delay, ...args) => {
+      timers.push({ callback, delay });
+      return originalSetTimeout(callback, delay, ...args);
+    };
+    const timedOut = transport("https://example.org/timed-out", { maxBytes: 1024 });
+    const rejectedTimeout = assert.rejects(timedOut, /超时/);
+    await flushRequests();
+    assert.strictEqual(requests.length, 5);
+    timers[0].callback();
+    await rejectedTimeout;
+    assert.strictEqual(active, 1, "timeout must return while the underlying request is still pending");
+    const afterTimeout = createProjectTransport(requestUrl)("https://example.org/after-timeout", { maxBytes: 11 * 1024 * 1024 });
+    const queuedTimeout = transport("https://example.org/queued-timeout", { maxBytes: 1024 });
+    const rejectedQueueTimeout = assert.rejects(queuedTimeout, /超时/);
+    timers[2].callback();
+    await rejectedQueueTimeout;
+    await flushRequests();
+    assert.strictEqual(requests.length, 5, "timeout and retry must retain the underlying request lock");
+    assert.deepStrictEqual(timers.map((timer) => timer.delay), [45000, 300000, 45000], "existing timeout budgets are preserved");
+    answer(4);
+    await flushRequests();
+    assert.strictEqual(requests[5].url, "https://example.org/after-timeout");
+    answer(5);
+    await afterTimeout;
+    await flushRequests();
+    assert.strictEqual(requests.length, 6, "a queued timeout must never issue a network request");
+  } finally {
+    global.setTimeout = originalSetTimeout;
+  }
+  assert.strictEqual(maxActive, 1, "project downloads must never overlap, including cancellation and retry");
+};
 
 const run = async () => {
   const request = createProjectTransport(async () => ({ status: 200, headers: {}, arrayBuffer: bytes("ok").buffer }));
@@ -16,6 +106,7 @@ const run = async () => {
   const pending = createProjectTransport(() => new Promise(() => {}))("https://example.org", { signal: controller.signal });
   controller.abort();
   await assert.rejects(() => pending, { name: "AbortError" });
+  await verifySerialRequests();
 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "lctp-vault-"));
   let linkedPluginRoot;

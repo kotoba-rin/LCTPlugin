@@ -31,6 +31,8 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_FILES = 25000
+# Bump this when generated protocol data changes independently of source files.
+SNAPSHOT_GENERATOR = "lctp-public-library-snapshot/3"
 
 
 def git(source: Path, *args: str) -> bytes:
@@ -159,8 +161,115 @@ class GitBlobReader:
             raise ValueError(f"Git object reader failed: {detail}")
 
 
-def write_content(source: Path, entries: list[tuple[str, str]], stage: Path) -> list[dict]:
+def metadata_scalar(raw: str) -> str | None:
+    """Read the card format's strings without resolving YAML tags, aliases or objects."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    if raw.startswith('"'):
+        try:
+            value, end = json.JSONDecoder().raw_decode(raw)
+        except ValueError:
+            return None
+        trailing = raw[end:].strip()
+        return value if isinstance(value, str) and (not trailing or trailing.startswith("#")) else None
+    if raw.startswith("'"):
+        match = re.fullmatch(r"'((?:[^']|'')*)'\s*(?:#.*)?", raw)
+        return match[1].replace("''", "'") if match else None
+    if raw[0] in "[]{}&*!>|%@`":
+        return None
+    return re.split(r"\s+#", raw, maxsplit=1)[0].rstrip()
+
+
+def metadata_list(raw: str, continuation: list[str]) -> list[str] | None:
+    lines = [line for line in continuation if line.strip() and not line.lstrip().startswith("#")]
+    raw = raw.strip()
+    if not raw or raw.startswith("#"):
+        matches = [re.fullmatch(r"\s*-\s+(.+)", line) for line in lines]
+        if not all(matches):
+            return None
+        values = [metadata_scalar(match[1]) for match in matches]
+    else:
+        # A small string-only flow-list reader also accepts Obsidian's [one, two]
+        # form. Nested collections and every YAML construction are rejected.
+        match = re.fullmatch(r"\[(.*)\]\s*(?:#.*)?", raw)
+        if not match or lines:
+            return None
+        value = match[1]
+        parts, start, index, quoted = [], 0, 0, None
+        while index < len(value):
+            char = value[index]
+            if quoted:
+                if char == "\\" and quoted == '"':
+                    index += 1
+                elif char == quoted:
+                    if quoted == "'" and index + 1 < len(value) and value[index + 1] == "'":
+                        index += 1
+                    else:
+                        quoted = None
+            elif char in "\"'" and not value[start:index].strip():
+                quoted = char
+            elif char == ",":
+                parts.append(value[start:index])
+                start = index + 1
+            index += 1
+        if quoted:
+            return None
+        if value[start:].strip():
+            parts.append(value[start:])
+        values = [metadata_scalar(part) for part in parts]
+    return values if all(isinstance(value, str) and value.strip() for value in values) else None
+
+
+def knowledge_entry(path: str, content: bytes) -> dict | None:
+    if not path.startswith("知识库/") or Path(path).suffix.lower() != ".md" or Path(path).name.lower() == "readme.md":
+        return None
+    try:
+        lines = content.decode("utf-8-sig").splitlines()
+    except UnicodeDecodeError:
+        return None
+    if not lines or lines[0] != "---":
+        return None
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        return None
+    fields, duplicates, active = {}, set(), None
+    wanted = {"type", "title", "tags", "aliases"}
+    for line in lines[1:end]:
+        match = re.fullmatch(r"([^\s:#][^:]*):(.*)", line)
+        if match:
+            active = match[1].rstrip()
+            if active in wanted:
+                if active in fields:
+                    duplicates.add(active)
+                fields[active] = (match[2], [])
+        elif active in wanted:
+            fields[active][1].append(line)
+    if metadata_scalar(fields.get("type", ("", []))[0]) != "knowledge-card":
+        return None
+    title_raw, title_lines = fields.get("title", ("", []))
+    title = metadata_scalar(title_raw)
+    tags = metadata_list(*fields.get("tags", ("", [])))
+    aliases = metadata_list(*fields["aliases"]) if "aliases" in fields else None
+    scalar_lines = fields["type"][1] + title_lines
+    if (duplicates or any(line.strip() and not line.lstrip().startswith("#") for line in scalar_lines)
+            or not title or not title.strip() or len(title) > 300
+            or tags is None or len(tags) > 64 or any(len(tag) > 160 for tag in tags)
+            or ("aliases" in fields and (aliases is None or len(aliases) > 32 or any(len(alias) > 300 for alias in aliases)))):
+        raise ValueError(f"Invalid knowledge-card metadata: {path!r}")
+    body = "\n".join(lines[end + 1:]).strip()
+    first_paragraph = re.split(r"\n\s*\n", body, maxsplit=1)[0]
+    excerpt = re.sub(r"\s+", " ", first_paragraph).strip()[:120]
+    entry = {"path": path, "title": title, "tags": tags, "excerpt": excerpt}
+    if aliases:
+        entry["aliases"] = aliases
+    return entry
+
+
+def write_content(source: Path, entries: list[tuple[str, str]], stage: Path) -> tuple[list[dict], list[dict]]:
     records = []
+    knowledge_entries = []
     total = 0
     reader = GitBlobReader(source)
     try:
@@ -179,6 +288,9 @@ def write_content(source: Path, entries: list[tuple[str, str]], stage: Path) -> 
                 info.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(info, content, compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
                 records.append({"path": path, "size": len(content), "sha256": sha256(content)})
+                entry = knowledge_entry(path, content)
+                if entry is not None:
+                    knowledge_entries.append(entry)
     except BaseException:
         reader.close(abort=True)
         raise
@@ -186,7 +298,7 @@ def write_content(source: Path, entries: list[tuple[str, str]], stage: Path) -> 
         reader.close()
     if (stage / "project.zip").stat().st_size > MAX_ARCHIVE_BYTES:
         raise ValueError("Public ZIP exceeds the client compressed-size limit")
-    return records
+    return records, knowledge_entries
 
 
 def validate_existing_release(existing: Path, stage: Path, expected: dict) -> dict:
@@ -250,12 +362,15 @@ def build_snapshot(source: Path, output: Path, base_url: str, revision: str = "H
     releases.mkdir(exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".snapshot-", dir=output))
     try:
-        records = write_content(source, entries, stage)
-        content_digest = sha256(json_bytes(records))
+        records, knowledge_entries = write_content(source, entries, stage)
+        content_digest = sha256(json_bytes({
+            "generator": SNAPSHOT_GENERATOR, "files": records, "knowledge_entries": knowledge_entries,
+        }))
         version = version or f"r-{commit[:12]}-{content_digest[:12]}"
         release_url = f"{base_url}/{version}"
         files = [{**record, "url": f"{release_url}/files/{quote(record['path'], safe='/')}"} for record in records]
-        manifest = {"schema_version": 1, "version": version, "files": files}
+        manifest = {"schema_version": 1, "version": version, "snapshot_generator": SNAPSHOT_GENERATOR,
+                    "files": files, "knowledge_entries": knowledge_entries}
         manifest_bytes = json_bytes(manifest)
         (stage / "manifest.json").write_bytes(manifest_bytes)
         archive = stage / "project.zip"

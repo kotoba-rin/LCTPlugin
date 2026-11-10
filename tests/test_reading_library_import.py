@@ -78,6 +78,34 @@ class ReadingLibraryImportTests(unittest.TestCase):
     def latest_bytes(self):
         return (self.output / "latest.json").read_bytes()
 
+    def release_manifest(self):
+        latest = json.loads(self.latest_bytes())
+        return self.output / "releases" / latest["version"] / "manifest.json"
+
+    def rewrite_manifest_fixture(self, edit):
+        """Simulate another validly hashed protocol revision, not transport damage."""
+        builder = MODULE.load_snapshot_builder()
+        latest = json.loads(self.latest_bytes())
+        manifest_path = self.release_manifest()
+        manifest = json.loads(manifest_path.read_bytes())
+        edit(manifest)
+        manifest_bytes = builder.json_bytes(manifest)
+        manifest_path.write_bytes(manifest_bytes)
+        latest["manifest_sha256"] = builder.sha256(manifest_bytes)
+        latest_bytes = builder.json_bytes(latest)
+        (self.output / "latest.json").write_bytes(latest_bytes)
+        (manifest_path.parent / "release.json").write_bytes(latest_bytes)
+
+    def add_knowledge_card(self):
+        self.write("知识库/词条.md", "---\ntitle: 父之名\ntype: knowledge-card\ntags:\n  - 研讨班I\n  - 领域/精神分析/能指言说与书写\naliases: [Nom du Père]\n---\n词条首段摘录。\n\n第二段。\n")
+        self.reading_revision = self.commit()
+
+    def publish_older_generator(self):
+        builder = MODULE.load_snapshot_builder()
+        with patch.object(builder, "SNAPSHOT_GENERATOR", "lctp-public-library-snapshot/2"), \
+                patch.object(MODULE, "load_snapshot_builder", return_value=builder):
+            return self.publish()
+
     def test_imports_only_committed_reading_and_reuses_unchanged_release(self):
         self.write("texts/s1/translation/Leçon-01.md", "uncommitted private draft\n")
         result = self.publish()
@@ -95,6 +123,61 @@ class ReadingLibraryImportTests(unittest.TestCase):
             self.assertEqual(second["status"], "unchanged")
             self.assertTrue(loader.called)
         self.assertEqual(self.latest_bytes(), before)
+
+    def test_generator_upgrade_republishes_same_reading_commit_once(self):
+        self.add_knowledge_card()
+        older = self.publish_older_generator()
+        previous_manifest_path = self.release_manifest()
+        previous_manifest = previous_manifest_path.read_bytes()
+        current = self.publish()
+        self.assertEqual(current["status"], "published")
+        self.assertEqual(current["reading_revision"], older["reading_revision"])
+        self.assertNotEqual(current["release"]["version"], older["release"]["version"])
+        self.assertEqual(previous_manifest_path.read_bytes(), previous_manifest, "an upgrade must preserve the old immutable release")
+        manifest = json.loads(self.release_manifest().read_bytes())
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["snapshot_generator"], MODULE.load_snapshot_builder().SNAPSHOT_GENERATOR)
+        self.assertEqual(manifest["knowledge_entries"], [{
+            "path": "知识库/词条.md", "title": "父之名", "tags": ["研讨班I", "领域/精神分析/能指言说与书写"],
+            "excerpt": "词条首段摘录。", "aliases": ["Nom du Père"],
+        }])
+        current_bytes = self.latest_bytes()
+        self.assertEqual(self.publish()["status"], "unchanged")
+        self.assertEqual(self.latest_bytes(), current_bytes)
+
+    def test_legacy_manifest_without_generator_or_catalog_rebuilds_without_touching_old_release(self):
+        self.add_knowledge_card()
+        older = self.publish_older_generator()
+
+        def remove_catalog(manifest):
+            manifest.pop("snapshot_generator")
+            manifest.pop("knowledge_entries")
+
+        self.rewrite_manifest_fixture(remove_catalog)
+        legacy_manifest_path = self.release_manifest()
+        legacy_manifest_bytes = legacy_manifest_path.read_bytes()
+        result = self.publish()
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["reading_revision"], older["reading_revision"])
+        self.assertNotEqual(result["release"]["version"], older["release"]["version"])
+        self.assertEqual(legacy_manifest_path.read_bytes(), legacy_manifest_bytes)
+        self.assertEqual(len(json.loads(self.release_manifest().read_bytes())["knowledge_entries"]), 1)
+
+    def test_current_generator_with_stale_catalog_is_never_reported_unchanged(self):
+        self.add_knowledge_card()
+        self.publish()
+        self.rewrite_manifest_fixture(lambda manifest: manifest["knowledge_entries"][0].update(excerpt="旧目录摘录"))
+        previous = self.latest_bytes()
+        builder = MODULE.load_snapshot_builder()
+        self.assertIsNone(MODULE.current_release(self.output, self.reading_revision, builder))
+        with self.assertRaisesRegex(ValueError, "immutable"):
+            self.publish()
+        self.assertEqual(self.latest_bytes(), previous, "corrupt immutable metadata is never silently overwritten")
+
+    def test_current_generator_still_requires_an_explicit_catalog_for_an_empty_knowledge_library(self):
+        self.publish()
+        self.rewrite_manifest_fixture(lambda manifest: manifest.pop("knowledge_entries"))
+        self.assertIsNone(MODULE.current_release(self.output, self.reading_revision, MODULE.load_snapshot_builder()))
 
     def test_invalid_provenance_cannot_advance_public_latest(self):
         self.publish()

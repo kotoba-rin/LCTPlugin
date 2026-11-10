@@ -360,6 +360,76 @@
   margin-top: 3px;
 }
 
+.lacan-knowledge-toolbar,
+.lacan-knowledge-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0 8px 12px;
+}
+
+.lacan-knowledge-filter {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  font-size: var(--font-ui-small);
+}
+
+.lacan-knowledge-filter select {
+  max-width: 220px;
+}
+
+.lacan-knowledge-table-scroll {
+  overflow-x: auto;
+}
+
+.lacan-knowledge-table {
+  border-collapse: collapse;
+  font-size: var(--font-ui-small);
+  min-width: 760px;
+  width: 100%;
+}
+
+.lacan-knowledge-table th,
+.lacan-knowledge-table td {
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding: 10px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.lacan-knowledge-table th:first-child {
+  width: 42%;
+}
+
+.lacan-knowledge-table th:nth-child(4),
+.lacan-knowledge-table td:nth-child(4) {
+  min-width: 7em;
+}
+
+.lacan-knowledge-title {
+  font-weight: 600;
+}
+
+.lacan-knowledge-excerpt,
+.lacan-knowledge-path {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.lacan-knowledge-actions .lacan-bases-link {
+  display: inline-block;
+  margin: 0 10px 5px 0;
+  white-space: nowrap;
+}
+
+.lacan-knowledge-progress {
+  white-space: nowrap;
+}
+
 .lacan-mode-help {
   margin: -6px 0 14px;
 }

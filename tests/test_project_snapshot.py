@@ -77,6 +77,12 @@ class ProjectSnapshotTests(unittest.TestCase):
         latest = self.latest()
         return self.output / "releases" / latest["version"]
 
+    def snapshot_module(self):
+        spec = importlib.util.spec_from_file_location("project_snapshot_test_module", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
     def test_publishes_only_committed_public_content_with_consistent_hashes(self):
         revision = self.git("rev-parse", "HEAD")
         self.write("texts/s14/translation/Leçon-01.md", "Uncommitted local change\n")
@@ -111,6 +117,111 @@ class ProjectSnapshotTests(unittest.TestCase):
         unicode_entry = next(file for file in manifest["files"] if file["path"] == "知识库/测试.md")
         self.assertIn("%E7%9F%A5%E8%AF%86%E5%BA%93", unicode_entry["url"])
         self.assertEqual(latest["manifest_url"], f"{BASE_URL}/{latest['version']}/manifest.json")
+
+    def test_knowledge_catalog_uses_committed_card_metadata_without_loading_repository_code(self):
+        sentinel = self.root / "must-not-execute"
+        first_paragraph = "🙂界" * 70
+        committed_card = (
+            "---\ntitle: 'Agalma：珍宝与对象 a'\ntype: knowledge-card\n"
+            "tags:\n  - 研讨班VIII\n  - 领域/精神分析/欲望驱力与客体\n"
+            "aliases: [阿伽尔玛, \"hidden, treasure\", L'amour]\n"
+            f"custom: !!python/object/apply:os.system ['touch {sentinel}']\n"
+            f"---\n\n{first_paragraph}\n\n不纳入摘录的第二段。\n"
+        )
+        self.write("知识库/测试.md", committed_card)
+        self.write("知识库/README.md", "---\ntype: knowledge-card\ntitle: 目录\ntags: []\n---\n索引\n")
+        self.write("知识库/空文件.md", "")
+        self.write("知识库/索引.md", "---\ntype: index\ntitle: 索引\n---\n内容\n")
+        self.write("texts/s14/notes/not-a-card.md", committed_card)
+        self.write("scripts/build-catalog.py", f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\n")
+        revision = self.commit()
+        self.write("知识库/测试.md", committed_card.replace("珍宝与对象 a", "未提交的私人标题"))
+        self.write("知识库/未提交.md", committed_card)
+        self.build("--revision", revision)
+        manifest = json.loads((self.release() / "manifest.json").read_text())
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["snapshot_generator"], self.snapshot_module().SNAPSHOT_GENERATOR)
+        self.assertEqual(manifest["knowledge_entries"], [{
+            "path": "知识库/测试.md", "title": "Agalma：珍宝与对象 a",
+            "tags": ["研讨班VIII", "领域/精神分析/欲望驱力与客体"],
+            "excerpt": first_paragraph[:120], "aliases": ["阿伽尔玛", "hidden, treasure", "L'amour"],
+        }])
+        self.assertEqual(len(manifest["knowledge_entries"][0]["excerpt"]), 120)
+        file = next(record for record in manifest["files"] if record["path"] == "知识库/测试.md")
+        self.assertEqual(file["sha256"], hashlib.sha256(committed_card.encode()).hexdigest())
+        self.assertEqual((self.release() / "files" / "知识库/测试.md").read_text(), committed_card)
+        self.assertFalse(sentinel.exists())
+
+    def test_catalog_strings_are_read_as_data_and_optional_aliases_are_not_required(self):
+        module = self.snapshot_module()
+        data = (
+            '---\ntype: "knowledge-card" # card type\ntitle: "名字 # one"\n'
+            'tags: ["领域/文学/文学理论", \'作品/L\'\'amour\']\n'
+            '自定义.属性: !!python/object/apply:os.system\n'
+            'extra:\n  nested: [not, executable]\n---\n\n第一段\n继续本段。\n\n第二段。\n'
+        ).encode()
+        self.assertEqual(module.knowledge_entry("知识库/示例.md", data), {
+            "path": "知识库/示例.md", "title": "名字 # one",
+            "tags": ["领域/文学/文学理论", "作品/L'amour"], "excerpt": "第一段 继续本段。",
+        })
+        for data in (b"", b"# Legacy note\n", b"---\ntype: index\n---\n", b"---\ntype: !!python/object/apply:os.system\n---\n"):
+            with self.subTest(data=data):
+                self.assertIsNone(module.knowledge_entry("知识库/示例.md", data))
+
+    def test_invalid_knowledge_metadata_never_advances_latest(self):
+        self.build()
+        latest = (self.output / "latest.json").read_bytes()
+        self.write("知识库/测试.md", "---\ntype: knowledge-card\ntitle: !!python/object/apply:os.system\ntags: []\n---\n正文\n")
+        self.commit()
+        result = self.build(success=False)
+        self.assertIn("Invalid knowledge-card metadata", result.stderr)
+        self.assertEqual((self.output / "latest.json").read_bytes(), latest)
+        self.assertFalse(any(path.name.startswith(".snapshot-") for path in self.output.iterdir()))
+
+    def test_knowledge_metadata_limits_match_the_catalog_protocol(self):
+        module = self.snapshot_module()
+        invalid_fields = (
+            "title: " + "长" * 301 + "\ntags: []",
+            "title: 词条\ntags: [" + ", ".join(f"标签{i}" for i in range(65)) + "]",
+            "title: 词条\ntags: [" + "长" * 161 + "]",
+            "title: 词条\ntags: []\naliases: [" + ", ".join(f"别名{i}" for i in range(33)) + "]",
+            "title: 词条\ntags: []\naliases: [" + "长" * 301 + "]",
+            "title: 词条\ntitle: 重复字段\ntags: []",
+            "title: 词条\ntags:\n  - !!python/object/apply:os.system",
+        )
+        for fields in invalid_fields:
+            with self.subTest(fields=fields[:100]):
+                content = f"---\ntype: knowledge-card\n{fields}\n---\n正文\n".encode()
+                with self.assertRaisesRegex(ValueError, "Invalid knowledge-card metadata"):
+                    module.knowledge_entry("知识库/示例.md", content)
+
+    def test_generator_and_catalog_changes_create_new_immutable_versions(self):
+        self.write("知识库/测试.md", "---\ntitle: 词条\ntype: knowledge-card\ntags: []\n---\n正文\n")
+        self.commit()
+        module = self.snapshot_module()
+        first = module.build_snapshot(self.source, self.output, BASE_URL)
+        first_release = self.release()
+        first_manifest = (first_release / "manifest.json").read_bytes()
+        manifest = json.loads(first_manifest)
+        records = [{key: value for key, value in file.items() if key != "url"} for file in manifest["files"]]
+        legacy_digest = hashlib.sha256(module.json_bytes(records)).hexdigest()
+        self.assertNotEqual(first["version"], f"r-{first['source_revision'][:12]}-{legacy_digest[:12]}")
+        with patch.object(module, "SNAPSHOT_GENERATOR", "test-generator-next-version"):
+            second = module.build_snapshot(self.source, self.output, BASE_URL)
+        self.assertEqual(json.loads((self.release() / "manifest.json").read_text())["snapshot_generator"], "test-generator-next-version")
+        self.assertNotEqual(first["version"], second["version"])
+        original_reader = module.knowledge_entry
+
+        def changed_metadata(path, content):
+            entry = original_reader(path, content)
+            return {**entry, "excerpt": "同一正文的新目录摘录"} if entry else None
+
+        with patch.object(module, "knowledge_entry", side_effect=changed_metadata):
+            third = module.build_snapshot(self.source, self.output, BASE_URL)
+        self.assertNotEqual(first["version"], third["version"])
+        self.assertEqual((first_release / "manifest.json").read_bytes(), first_manifest)
+        self.assertEqual(first["source_revision"], third["source_revision"])
+        self.assertEqual(first["archive_sha256"], third["archive_sha256"])
 
     def test_same_revision_is_reproducible_and_reuses_immutable_version(self):
         self.build()

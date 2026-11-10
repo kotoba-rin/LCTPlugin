@@ -1,4 +1,4 @@
-const { DEFAULT_PROJECT_ENDPOINT, sha256, encodeJson, parseJson, validateContentPath, validateUrl, validateLatest, validateManifest } = require("./validation");
+const { DEFAULT_PROJECT_ENDPOINT, sha256, encodeJson, parseJson, validateContentPath, validateUrl, validateLatest, validateManifest, isKnowledgePath } = require("./validation");
 const { checkCancelled, fetchBytes, verifyFile, downloadArchive } = require("./downloads");
 const { readBytes, digest, readHash, localChangesError, assertUnchanged, compareAndWrite, removeIfPresent, readState, rollback, cleanupTransaction, restorePreviousState, recoverTransaction, prepareTransaction } = require("./transactions");
 const { readBase, cacheBase, isTextPath } = require("./base-cache");
@@ -6,6 +6,7 @@ const { decodeText } = require("./text-merge");
 const { readComparison } = require("./conflict-comparison");
 const { resolveConflict } = require("./resolve-conflict");
 const { buildCatalog, catalogCache, readCatalogCache, lessonFromCatalog, referencedAssets } = require("./catalog");
+const { getKnowledgeEntryStatuses } = require("./knowledge-status");
 
 class ProjectSyncEngine {
   constructor({ storage, transport, endpointUrl = DEFAULT_PROJECT_ENDPOINT, stateDir = ".obsidian/plugins/lacan-translation-helper/project-sync", onProgress } = {}) {
@@ -41,6 +42,65 @@ class ProjectSyncEngine {
   async syncFiles(paths, { signal } = {}) {
     const selected = this.validateScope(paths);
     return this.withSyncLock(() => this.runScopedSync(selected, signal));
+  }
+
+  async getKnowledgeEntryStatuses(catalog, options = {}) {
+    return getKnowledgeEntryStatuses(this, catalog, options);
+  }
+
+  async syncKnowledgeEntry(path, { signal } = {}) {
+    validateContentPath(path);
+    if (!isKnowledgePath(path)) throw new Error("请选择知识库中的知识卡。");
+    return this.withSyncLock(async () => {
+      const release = await this.loadRelease(signal);
+      const catalog = buildCatalog(release.manifest, release.latest);
+      const entry = catalog.knowledgeEntries.find((item) => item.path === path);
+      if (!entry) {
+        checkCancelled(signal);
+        return { version: release.latest.version, catalog, removed: true, path, added: 0, updated: 0, deleted: 0, merged: 0, unchanged: 0,
+          conflicts: [], skippedFiles: [], downloadedFiles: 0, usedArchive: false, scopePaths: [] };
+      }
+      checkCancelled(signal);
+      await this.storage.write(`${this.stateDir}/catalog.json`, encodeJson(catalogCache(release.manifest, release.latest, this.endpointUrl)));
+      const result = await this.runScopedSync([path], signal, { release, assetSources: [path], strict: true });
+      return { ...result, catalog };
+    });
+  }
+
+  async syncAllKnowledgeEntries({ signal, getOrderedPaths, onEntry } = {}) {
+    return this.withSyncLock(async () => {
+      const release = await this.loadRelease(signal);
+      const catalog = buildCatalog(release.manifest, release.latest);
+      checkCancelled(signal);
+      await this.storage.write(`${this.stateDir}/catalog.json`, encodeJson(catalogCache(release.manifest, release.latest, this.endpointUrl)));
+      const orderedPaths = await getOrderedPaths?.(catalog) || [];
+      const order = new Map(orderedPaths.map((path, index) => [path, index]));
+      const entries = [...catalog.knowledgeEntries].sort((a, b) =>
+        (order.get(a.path) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.path) ?? Number.MAX_SAFE_INTEGER));
+      const summary = { version: release.latest.version, catalog, entryCount: entries.length, completedEntries: 0, skippedEntries: 0,
+        added: 0, updated: 0, deleted: 0, merged: 0, unchanged: 0, downloadedFiles: 0, usedArchive: false,
+        conflicts: [], skippedFiles: [], scopePaths: [] };
+      const skipped = new Map();
+      const scope = new Set();
+      // Keep one release and one lock for the whole batch. Each card and its
+      // attachments must finish before the next card can start downloading.
+      for (const [index, entry] of entries.entries()) {
+        checkCancelled(signal);
+        await onEntry?.({ entry, index, total: entries.length, catalog });
+        checkCancelled(signal);
+        const result = await this.runScopedSync([entry.path], signal, { release, assetSources: [entry.path], strict: true });
+        summary.completedEntries += 1;
+        if (result.skippedFiles.length) summary.skippedEntries += 1;
+        for (const key of ["added", "updated", "deleted", "merged", "unchanged", "downloadedFiles"]) summary[key] += result[key] || 0;
+        for (const file of result.skippedFiles) skipped.set(file.path, file);
+        for (const path of result.scopePaths) scope.add(path);
+        Object.assign(summary, { conflicts: result.conflicts, skippedFiles: [...skipped.values()], scopePaths: [...scope],
+          statePath: result.statePath, conflictReportPath: result.conflictReportPath });
+        await onEntry?.({ entry, index, total: entries.length, catalog, result, summary });
+      }
+      checkCancelled(signal);
+      return summary;
+    });
   }
 
   async syncLesson(originalPath, { signal } = {}) {

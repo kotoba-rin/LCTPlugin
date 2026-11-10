@@ -1,5 +1,6 @@
 const { EventEmitter } = require("events");
-const { StringDecoder } = require("string_decoder");
+
+const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 
 class AppServerProtocolError extends Error {
   constructor(code, message, details = {}) {
@@ -11,24 +12,37 @@ class AppServerProtocolError extends Error {
 }
 
 class JsonLineRpcClient extends EventEmitter {
-  constructor(childProcess, { requestTimeoutMs = 30000 } = {}) {
+  constructor(childProcess, { requestTimeoutMs = 30000, maxMessageBytes = MAX_MESSAGE_BYTES } = {}) {
     super();
     if (!childProcess?.stdin || !childProcess?.stdout) {
       throw new TypeError("JsonLineRpcClient requires a process with stdin and stdout.");
     }
     this.process = childProcess;
     this.requestTimeoutMs = requestTimeoutMs;
+    if (!Number.isSafeInteger(maxMessageBytes) || maxMessageBytes <= 0) {
+      throw new TypeError("maxMessageBytes must be a positive integer.");
+    }
+    this.maxMessageBytes = maxMessageBytes;
     this.nextRequestId = 1;
     this.pending = new Map();
-    this.stdoutBuffer = "";
-    this.stdoutDecoder = new StringDecoder("utf8");
+    this.stdoutBuffer = Buffer.alloc(0);
+    this.stdoutBytes = 0;
     this.closed = false;
     this.exitHandled = false;
 
     this.onStdoutData = (chunk) => this.handleStdoutData(chunk);
     this.onProcessExit = (code, signal) => this.handleProcessExit(code, signal);
     this.onProcessError = (error) => this.handleProcessError(error);
+    this.onStdinError = (cause) => this.failTransport(new AppServerProtocolError(
+      "AppServerInputFailed", "无法把请求发送给本地 Agent。", { cause }
+    ));
+    this.onStderrData = () => {};
     this.process.stdout.on("data", this.onStdoutData);
+    this.process.stdin.on("error", this.onStdinError);
+    // A write may fail after close(), so retain this error handler until the
+    // stream itself closes rather than leaving a late EPIPE unhandled.
+    this.process.stdin.once("close", () => this.process.stdin.off("error", this.onStdinError));
+    this.process.stderr?.on("data", this.onStderrData);
     this.process.on("exit", this.onProcessExit);
     this.process.on("error", this.onProcessError);
   }
@@ -77,10 +91,33 @@ class JsonLineRpcClient extends EventEmitter {
   }
 
   handleStdoutData(chunk) {
-    this.stdoutBuffer += Buffer.isBuffer(chunk) ? this.stdoutDecoder.write(chunk) : String(chunk);
-    const lines = this.stdoutBuffer.split(/\r?\n/);
-    this.stdoutBuffer = lines.pop() || "";
-    for (const line of lines) {
+    if (this.closed) return;
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
+    let offset = 0;
+    while (offset < bytes.length && !this.closed) {
+      const newline = bytes.indexOf(10, offset);
+      const end = newline === -1 ? bytes.length : newline;
+      const length = this.stdoutBytes + end - offset;
+      if (length > this.maxMessageBytes) {
+        this.failTransport(new AppServerProtocolError(
+          "AppServerOutputLimit", "本地 Agent 返回的单个事件过大，已停止连接。"
+        ));
+        return;
+      }
+      if (length > this.stdoutBuffer.length) {
+        const capacity = Math.min(this.maxMessageBytes, Math.max(length, this.stdoutBuffer.length * 2, 4096));
+        const expanded = Buffer.allocUnsafe(capacity);
+        this.stdoutBuffer.copy(expanded, 0, 0, this.stdoutBytes);
+        this.stdoutBuffer = expanded;
+      }
+      bytes.copy(this.stdoutBuffer, this.stdoutBytes, offset, end);
+      this.stdoutBytes = length;
+      if (newline === -1) return;
+      // Decode only complete lines: UTF-8 characters can span stdout chunks.
+      const line = this.stdoutBuffer.toString("utf8", 0, this.stdoutBytes);
+      this.stdoutBytes = 0;
+      if (this.stdoutBuffer.length > 64 * 1024) this.stdoutBuffer = Buffer.alloc(0);
+      offset = newline + 1;
       if (!line.trim()) {
         continue;
       }
@@ -96,6 +133,14 @@ class JsonLineRpcClient extends EventEmitter {
       }
       this.handleMessage(message);
     }
+  }
+
+  failTransport(error) {
+    if (this.closed) return;
+    this.failure = error;
+    this.emit("protocolError", error);
+    this.handleProcessExit(null, null);
+    if (typeof this.process.kill === "function") this.process.kill();
   }
 
   handleMessage(message) {
@@ -168,11 +213,12 @@ class JsonLineRpcClient extends EventEmitter {
     }
     this.exitHandled = true;
     this.closed = true;
-    const error = new AppServerProtocolError(
+    const error = this.failure || new AppServerProtocolError(
       "AppServerExited",
       "本地 Agent 进程意外退出。",
       { exitCode: code, signal }
     );
+    this.releaseOutput();
     this.rejectPending(error);
     this.emit("exit", error);
   }
@@ -185,16 +231,20 @@ class JsonLineRpcClient extends EventEmitter {
     this.pending.clear();
   }
 
-  close() {
+  releaseOutput() {
+    this.stdoutBuffer = Buffer.alloc(0);
+    this.stdoutBytes = 0;
+    this.process.stdout.off("data", this.onStdoutData);
+    this.process.stderr?.off("data", this.onStderrData);
+  }
+
+  close(error = new AppServerProtocolError("AppServerExited", "本地 Agent 客户端已关闭。")) {
     if (this.closed) {
       return;
     }
     this.closed = true;
-    this.rejectPending(new AppServerProtocolError(
-      "AppServerExited",
-      "本地 Agent 客户端已关闭。"
-    ));
-    this.process.stdout.off("data", this.onStdoutData);
+    this.rejectPending(error);
+    this.releaseOutput();
     this.process.off("exit", this.onProcessExit);
     this.process.off("error", this.onProcessError);
     if (typeof this.process.kill === "function") {

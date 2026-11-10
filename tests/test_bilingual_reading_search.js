@@ -255,6 +255,39 @@ function run() {
   assert.ok(highlightedTexts(destination).includes("知识"), "the adopted view must paint its matches in the destination document");
   moving.controller.destroy();
   assert.strictEqual(destination.defaultView.CSS.highlights.size, 0, "destroying the adopted view must release the destination document's highlights");
+
+  const large = setup();
+  large.root.textContent = "";
+  const body = append(large.root, "div", "", "lacan-bilingual-content");
+  const boundaries = [];
+  for (let index = 0; index < 3000; index += 1) {
+    const paragraph = append(body, "p");
+    paragraph.append("");
+    const first = paragraph.appendChild(large.doc.createTextNode("pré ci"));
+    paragraph.append("");
+    const suffix = append(paragraph, "em", "ble cible").firstChild;
+    paragraph.append("");
+    boundaries.push({ first, suffix });
+  }
+  large.controller.open();
+  inputQuery(large, "cible");
+  assert.strictEqual(count(large), "1 / 6000");
+  for (const [index, { first, suffix }] of boundaries.entries()) {
+    const [crossInline, sameNode] = large.controller.matches.slice(index * 2, index * 2 + 2);
+    assert.strictEqual(crossInline.startContainer, first);
+    assert.strictEqual(crossInline.startOffset, 4);
+    assert.strictEqual(crossInline.endContainer, suffix);
+    assert.strictEqual(crossInline.endOffset, 3);
+    assert.strictEqual(sameNode.startContainer, suffix);
+    assert.strictEqual(sameNode.startOffset, 4);
+    assert.strictEqual(sameNode.endContainer, suffix);
+    assert.strictEqual(sameNode.endOffset, 9);
+  }
+  inputQuery(large, "\n");
+  assert.strictEqual(count(large), "0 / 0", "synthetic paragraph separators have no DOM range");
+  inputQuery(large, "cible");
+  assert.strictEqual(count(large), "1 / 6000", "node cursors reset for every search");
+  large.controller.destroy();
   console.log("bilingual reading search tests passed");
 }
 
