@@ -103,14 +103,27 @@ assert.match(
   "settings should expose the 1-5 open-session limit"
 );
 assert.ok(
-  source.includes('setName("自动发现 Skills")')
-    && source.includes('setName("Skills 来源")')
+  !source.includes('setName("自动发现 Skills")')
+    && !source.includes('setName("Skills 来源")')
+    && !source.includes('setButtonText("刷新 Skills")')
+    && !source.includes("lacan-ai-skill-list")
     && !source.includes('setName("默认 Skill 方案")')
     && !source.includes('setName("主要 Skill")')
     && !source.includes('setName("辅助 Skill")')
     && !source.includes('text: "新建 Skill 方案"'),
-  "AI settings should show discovered Skills and their sources without fixed profiles"
+  "AI settings should omit read-only Skills discovery details and fixed profiles"
 );
+const settingsStart = source.indexOf("  renderSegmentAiSettings(parentEl)");
+const settingsEnd = source.indexOf("class LacanLessonListBasesView", settingsStart);
+assert.ok(settingsStart >= 0 && settingsEnd > settingsStart);
+assert.doesNotMatch(
+  source.slice(settingsStart, settingsEnd),
+  /skills?/i,
+  "AI settings should keep automatic Skills handling out of the user interface"
+);
+for (const label of ["Skills 来源", "自动发现 Skills", "刷新 Skills", "解读提示词与 Skills"]) {
+  assert.ok(!main.includes(label), `released bundle should omit the removed UI label: ${label}`);
+}
 assert.match(
   source,
   /button\.textContent\s*=\s*includeSegmentId[\s\S]{0,100}`【\$\{segmentId\}】 Ф`[\s\S]{0,50}"Ф"/,

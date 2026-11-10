@@ -560,7 +560,8 @@ const run = async () => {
     const automaticIdentityLine = automaticIdentity.children.find(
       (child) => child.className === "lacan-ai-profile-line"
     ).textContent;
-    assert.ok(automaticIdentityLine.includes("Skills 自动发现"));
+    assert.ok(!/skills?/i.test(automaticIdentityLine), "conversation identity must not display Skills details");
+    assert.ok(automaticIdentityLine.includes("AI 解读"));
     assert.ok(!automaticIdentityLine.includes("标准解读"), "old Skill profiles must not appear as active configuration");
 
     const workspaceComposer = workspaceRoot.children.find(
@@ -652,6 +653,10 @@ const run = async () => {
       ).length,
       1
     );
+    const historyStatus = descendants(historyList).find(
+      (child) => child.tag === "span"
+    );
+    assert.strictEqual(historyStatus.textContent, "AI 解读 · 解读失败", "history should display analysis mode and status without Skills details");
     const clearAllButton = descendants(history).find(
       (child) => child.tag === "button" && child.textContent === "清空全部"
     );

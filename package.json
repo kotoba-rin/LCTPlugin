@@ -1,6 +1,6 @@
 {
   "name": "lacan-translation-helper",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Desktop Obsidian tools for reading and editing the Lacan Chinese Translation Project.",
   "license": "MIT",

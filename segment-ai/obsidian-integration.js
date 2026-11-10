@@ -807,7 +807,6 @@ class LacanInterpretationView extends ItemView {
       cls: "lacan-ai-profile-line",
       text: [
         analysisModeLabel(conversation),
-        "Skills 自动发现",
         conversation.model || "Codex 默认模型",
         conversation.effort || "默认推理强度",
       ].join(" · "),
@@ -1764,7 +1763,6 @@ const segmentAiStatusLabel = (status, analysisMode) => {
 
 const workspaceHistoryStatusLabel = (conversation) => [
   analysisModeLabel(conversation),
-  "Skills 自动发现",
   segmentAiStatusLabel(conversation.status, conversation.analysisMode),
 ].join(" · ");
 

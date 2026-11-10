@@ -8221,7 +8221,6 @@ var require_obsidian_integration = __commonJS({
           cls: "lacan-ai-profile-line",
           text: [
             analysisModeLabel(conversation),
-            "Skills 自动发现",
             conversation.model || "Codex 默认模型",
             conversation.effort || "默认推理强度"
           ].join(" · ")
@@ -9056,7 +9055,6 @@ var require_obsidian_integration = __commonJS({
     };
     var workspaceHistoryStatusLabel = (conversation) => [
       analysisModeLabel(conversation),
-      "Skills 自动发现",
       segmentAiStatusLabel(conversation.status, conversation.analysisMode)
     ].join(" · ");
     var workspaceStatusGlyph = (conversation) => {
@@ -12662,7 +12660,7 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
       text: "点击译文分段旁的“Ф”运行 AI 解读；点击原文分段旁的同一按钮，直接显示该 ID 的项目译文、完整注释与建言，并快速生成原文试译。"
     });
     descriptionEl.createEl("p", {
-      text: "译文解读使用下方提示词，Codex 可按任务选用已发现的 Skills；原文解析使用专用翻译流程，先查看试译与项目版本，需要词义、双关或语境分析时可继续追问。两种功能分别保存会话。"
+      text: "译文解读使用下方提示词；原文解析使用专用翻译流程，先查看试译与项目版本，需要词义、双关或语境分析时可继续追问。两种功能分别保存会话。"
     });
     descriptionEl.createEl("p", {
       text: "本地 Agent 指编排、文件检索和权限控制在本机运行，不等于使用本地模型。发送给模型的上下文和 Agent 读取的材料仍可能离开本机。"
@@ -12805,15 +12803,15 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
       });
       containerEl.createEl("p", {
         cls: "setting-item-description",
-        text: "Claude Code 使用内置只读与网页工具，禁用文件写入、Shell、Hooks 和 Slash Commands；当前适配不提供 Skill 清单。"
+        text: "Claude Code 使用内置只读与网页工具，禁用文件写入、Shell、Hooks 和 Slash Commands。"
       });
     } else {
       containerEl.createEl("p", {
         cls: "setting-item-description",
-        text: "DeepSeek Harness 使用 headless profile 中配置的模型、凭据和推理参数。请先在终端完成 dsh 配置；插件只向模型开放允许的只读／网页工具，profile 自带插件仍可能在启动时运行。当前适配不提供模型或 Skill 清单。"
+        text: "DeepSeek Harness 使用 headless profile 中配置的模型、凭据和推理参数。请先在终端完成 dsh 配置；插件只向模型开放允许的只读／网页工具，profile 自带插件仍可能在启动时运行。当前适配不提供模型清单。"
       });
     }
-    containerEl.createEl("h4", { text: provider === "codex" ? "解读提示词与 Skills" : "解读提示词" });
+    containerEl.createEl("h4", { text: "解读提示词" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
       text: "默认功能：术语与符号对照 + 语境性解读。术语表只读，缺项或不一致只提示，由用户判断是否修改。"
@@ -12838,66 +12836,6 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
         this.display();
       });
     });
-    if (provider === "codex") {
-      new Setting(containerEl).setName("Skills 来源").setDesc(`当前项目：${this.plugin.getVaultBasePath()}
-Agent：${this.plugin.getSegmentAiCliPath("codex") || "自动检测"}
-只使用当前项目与该 Agent 已安装、实际发现的 Skills，由 Agent 按请求自行选择，无需配置固定组合。`);
-      const skillCatalog = (this.plugin.segmentAiSkillCatalog?.list?.() || this.plugin.settings.segmentAiSkillCatalog || []).map(normalizeSkillMetadata).filter(Boolean);
-      const skillCatalogUpdatedAt = Number(
-        this.plugin.settings.segmentAiSkillCatalogUpdatedAt || 0
-      );
-      new Setting(containerEl).setName("自动发现 Skills").setDesc(
-        skillCatalog.length > 0 ? `上次发现 ${skillCatalog.length} 个${skillCatalogUpdatedAt ? `，最近刷新：${new Date(skillCatalogUpdatedAt).toLocaleString()}` : ""}。` : "尚未获取 Skills 清单。开启 AI 后自动发现，也可手动刷新。"
-      ).addButton((button) => {
-        button.setButtonText("刷新 Skills").onClick(async () => {
-          button.setDisabled(true);
-          button.setButtonText("获取中...");
-          try {
-            const skills = await this.plugin.discoverSegmentAiSkills({
-              forceReload: true
-            });
-            new Notice(`已从 Codex 获取 ${skills.length} 个 Skill。`);
-          } catch (error) {
-            new Notice(
-              `Skill 清单获取失败：${error?.message || "请检查 Codex CLI 和登录状态。"}`
-            );
-          } finally {
-            button.setDisabled(false);
-            button.setButtonText("刷新 Skills");
-            this.display();
-          }
-        });
-      });
-      const skillSources = {
-        repo: "当前项目",
-        user: "Agent 已安装 · 用户",
-        system: "Agent 已安装 · 系统",
-        admin: "Agent 已安装 · 管理员"
-      };
-      if (skillCatalog.length > 0) {
-        const skillListEl = containerEl.createDiv("lacan-ai-skill-list");
-        for (const skill of skillCatalog) {
-          const available = skill.enabled && skill.errors.length === 0;
-          const source = skillSources[skill.scope] || `Agent 已安装 · ${skill.scope}`;
-          const details = [
-            `${source} · ${available ? "可用" : skill.enabled ? "加载失败" : "已禁用"}`,
-            skill.description,
-            skill.path,
-            ...skill.errors
-          ].filter(Boolean).join("\n");
-          new Setting(skillListEl).setName(skill.name).setDesc(details);
-        }
-      }
-      const configuredAgent = this.plugin.getSegmentAiCliPath("codex");
-      if (this.plugin.settings.segmentAiEnabled && this.skillsRequestedForAgent !== configuredAgent) {
-        this.skillsRequestedForAgent = configuredAgent;
-        void this.plugin.discoverSegmentAiSkills({ forceReload: true }).then(() => {
-          if (this.activeSettingsTab === "ai") this.display();
-        }).catch((error) => {
-          new Notice(`Skills 自动发现失败：${error?.message || "请检查 Codex CLI 和登录状态。"}`);
-        });
-      }
-    }
     const diagnostics = this.plugin.getSegmentAiDiagnostics();
     new Setting(containerEl).setName("本地 Agent 诊断").setDesc(
       diagnostics.runtime?.userAgent ? `${diagnostics.runtime.userAgent} · ${diagnostics.status}` : `尚未启动 · ${diagnostics.status}`
