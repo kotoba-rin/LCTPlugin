@@ -16,7 +16,7 @@ class Control {
   setValue(value) { this.value = value; return this; }
   setPlaceholder() { return this; }
   setButtonText(text) { this.buttonText = text; return this; }
-  setDisabled() { return this; }
+  setDisabled(value) { this.disabled = value; return this; }
   setCta() { return this; }
   addOption() { return this; }
   onChange(callback) { this.change = callback; return this; }
@@ -103,6 +103,8 @@ async function run() {
   plugin.manifest = { version: "test-version" };
   plugin.loadData = async () => ({
     forks: [{ id: "legacy", name: "旧 Fork", localBranch: "old-fork", enabled: true }],
+    mode: "editer", repositoryUrl: "https://example.com/legacy.git", repositoryBranch: "main",
+    githubProxyEnabled: true, githubProxyUrl: " http://127.0.0.1:6789 ",
     frenchLookupEnabled: false,
     frenchLookupTrigger: "double-click",
     frenchLookupAutoTranslate: false,
@@ -123,6 +125,13 @@ async function run() {
   global.document = {};
   try { await plugin.onload(); } finally { global.document = previousDocument; }
   assert.strictEqual(Object.hasOwn(plugin.settings, "forks"), false, "startup must retire saved Fork settings");
+  assert.strictEqual(plugin.settings.projectEndpointUrl, "https://kotoba-rin.com/wp-json/lctp/v1/project");
+  assert.strictEqual(Object.hasOwn(plugin.settings, "mode"), false, "Reader and Editer are retired");
+  assert.strictEqual(plugin.settings.pluginHttpProxyEnabled, true, "existing proxy preference must migrate to the plugin HTTP proxy");
+  assert.strictEqual(plugin.settings.pluginHttpProxyUrl, "http://127.0.0.1:6789");
+  for (const key of ["githubProxyEnabled", "githubProxyUrl", "repositoryUrl", "repositoryBranch"]) {
+    assert.strictEqual(Object.hasOwn(plugin.settings, key), false, `retire ${key} after migration`);
+  }
   assert.ok(settingsSaves.length > 0);
   assert.ok(settingsSaves.every((settings) => !Object.hasOwn(settings, "forks")), "startup must persist the settings migration without restoring retired Forks");
   assert.ok(commands.has("open-pdf-reading"), "plugin startup must register the PDF reading command");
@@ -134,6 +143,7 @@ async function run() {
   assert.strictEqual(runtimeOptions.length, 0, "plugin initialization must not start a model process or translation");
   assert.strictEqual(plugin.getEudicToken(), storedToken);
   assert.strictEqual(serviceOptions[0].getToken(), storedToken);
+  assert.strictEqual(serviceOptions[0].requestUrl, plugin.getPluginRequest(), "dictionary requests must use the shared plugin transport");
   assert.ok(!JSON.stringify(settingsSaves).includes(storedToken), "saving settings must never serialize a resolved SecretStorage value");
 
   commands.get("lookup-french-selection").callback();
@@ -172,8 +182,24 @@ async function run() {
   };
   settingTab.containerEl = parentEl;
   settingTab.display();
-  assert.ok(settingRows.some((row) => row.name === "立即同步"), "project settings must retain upstream sync");
+  assert.ok(settingRows.some((row) => row.name === "更新文本清单"), "project settings refresh only the published catalog");
+  assert.ok(!settingRows.some((row) => /首次下载完整文库|立即同步/.test(`${row.name} ${row.description}`)), "project settings must not offer whole-library downloads");
+  assert.ok(!settingRows.some((row) => /Reader|Editer|GitHub|上游分支/.test(`${row.name} ${row.description}`)), "project settings expose one HTTP sync behavior without Git configuration");
   assert.ok(!/fork/i.test(JSON.stringify({ createdElements, settingRows })), "project settings must not expose retired Fork configuration or descriptions");
+  const proxyToggle = settingRows.find((row) => row.name === "启用插件 HTTP 代理").controls[0];
+  const proxyAddress = settingRows.find((row) => row.name === "插件 HTTP 代理地址").controls[0];
+  assert.strictEqual(proxyToggle.value, true);
+  assert.strictEqual(proxyAddress.value, "http://127.0.0.1:6789");
+  assert.strictEqual(proxyAddress.disabled, false);
+  await proxyToggle.change(false);
+  assert.strictEqual(plugin.settings.pluginHttpProxyEnabled, false);
+  assert.strictEqual(proxyAddress.disabled, true);
+  await proxyAddress.change(" http://127.0.0.1:7890 ");
+  assert.strictEqual(plugin.settings.pluginHttpProxyUrl, "http://127.0.0.1:7890");
+  await proxyToggle.change(true);
+  assert.strictEqual(proxyAddress.disabled, false);
+  assert.strictEqual(plugin.settings.pluginHttpProxyEnabled, true);
+  assert.strictEqual(settingsSaves.at(-1).pluginHttpProxyUrl, "http://127.0.0.1:7890", "proxy controls must persist their changes");
   settingRows.length = 0;
   createdElements.length = 0;
   let settingsRefreshes = 0;
@@ -225,6 +251,16 @@ async function run() {
   plugin.onunload();
   assert.strictEqual(popups[1].destroyed, 1, "unloading the plugin must destroy its current popup controller");
   assert.strictEqual(translators[1].destroyed, 1, "unloading the plugin must cancel its current translation controller");
+  plugin.loadData = async () => ({
+    frenchLookupEnabled: false, autoSyncOnStartup: false,
+    pluginHttpProxyEnabled: false, pluginHttpProxyUrl: "http://127.0.0.1:8888",
+    githubProxyEnabled: true, githubProxyUrl: "http://127.0.0.1:6789",
+  });
+  global.document = {};
+  try { await plugin.onload(); } finally { global.document = previousDocument; }
+  assert.strictEqual(plugin.settings.pluginHttpProxyEnabled, false, "explicit modern proxy preferences take precedence over legacy settings");
+  assert.strictEqual(plugin.settings.pluginHttpProxyUrl, "http://127.0.0.1:8888");
+  plugin.onunload();
   console.log("French lookup integration tests passed");
 }
 

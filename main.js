@@ -20,6 +20,62 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Bundled dependency: fflate
+MIT License
+
+Copyright (c) 2026 Arjun Barrett
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Bundled dependency: node-diff3
+### The MIT License (MIT)
+
+diff function extracted from Project Synchrotron.
+
+For more detail please visit:
+- https://leastfixedpoint.com/tonyg/kcbbs/projects/synchrotron.html
+- https://github.com/tonyg/synchrotron
+
+Copyright (c) 2006, 2008 Tony Garnock-Jones &lt;tonyg@lshift.net&gt;<br/>
+Copyright (c) 2006, 2008 LShift Ltd. &lt;query@lshift.net&gt;<br/>
+Copyright (c) 2019-2026 Bryan Housel &lt;bhousel@gmail.com&gt;<br/>
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation files
+(the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of the Software,
+and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 */
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __commonJS = (cb, mod) => function __require() {
@@ -2761,6 +2817,3510 @@ var require_pdf_reading = __commonJS({
       return true;
     }
     module2.exports = { registerPdfReading: registerPdfReading2, addPdfFileMenuItems: addPdfFileMenuItems2, openPdfReading };
+  }
+});
+
+// src/project-sync/validation.js
+var require_validation = __commonJS({
+  "src/project-sync/validation.js"(exports2, module2) {
+    var { createHash } = require("crypto");
+    var DEFAULT_PROJECT_ENDPOINT2 = "https://kotoba-rin.com/wp-json/lctp/v1/project";
+    var CONTENT_ROOTS = /* @__PURE__ */ new Set(["texts", "知识库", "术语表", "assets"]);
+    var ROOT_FILES = /* @__PURE__ */ new Set(["README.md", "LICENSE", "LICENSE.md", "NOTICE.md"]);
+    var EXTENSIONS = /* @__PURE__ */ new Set(["md", "jpeg", "jpg", "png", "gif", "svg", "webp", "avif", "bmp", "tif", "tiff", "emf", "wmf", "pdf", "csv", "txt"]);
+    var HASH_RE = /^[a-f0-9]{64}$/;
+    var VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+    var MAX_FILES = 25e3;
+    var MAX_TOTAL_BYTES = 512 * 1024 * 1024;
+    var MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
+    var MAX_FILE_BYTES = 64 * 1024 * 1024;
+    var asBytes = (value) => {
+      if (value instanceof ArrayBuffer) return new Uint8Array(value);
+      if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      throw new Error("同步下载没有返回二进制文件。");
+    };
+    var sha256 = (value) => createHash("sha256").update(asBytes(value)).digest("hex");
+    var encodeJson = (value) => Buffer.from(JSON.stringify(value, null, 2));
+    var parseJson = (value, label) => {
+      try {
+        return JSON.parse(Buffer.from(asBytes(value)).toString("utf8"));
+      } catch {
+        throw new Error(`${label}不是有效的 JSON。`);
+      }
+    };
+    var validateVersion = (value) => {
+      if (typeof value !== "string" || !VERSION_RE.test(value)) throw new Error("无效的文库版本号。");
+      return value;
+    };
+    var validateContentPath = (value) => {
+      if (typeof value !== "string" || !value || value.length > 700 || value.includes("\\") || value.normalize("NFC") !== value) throw new Error("无效的文库文件路径。");
+      const parts = value.split("/");
+      for (const part of parts) {
+        if (!part || part.startsWith(".") || /[<>:"|?*\x00-\x1f]/.test(part) || /[ .]$/.test(part) || /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(part)) {
+          throw new Error(`不安全的文库文件路径：${value}`);
+        }
+      }
+      if (parts.length === 1 && ROOT_FILES.has(value)) return value;
+      if (parts.length < 2 || !CONTENT_ROOTS.has(parts[0]) || !EXTENSIONS.has(value.split(".").pop().toLowerCase())) {
+        throw new Error(`同步清单包含未授权文件：${value}`);
+      }
+      return value;
+    };
+    var validateUrl = (value, endpointUrl) => {
+      if (typeof value !== "string" || !value.trim()) throw new Error("缺少文库下载地址。");
+      let endpoint;
+      let url;
+      try {
+        endpoint = new URL(endpointUrl);
+        url = new URL(value, endpointUrl);
+      } catch {
+        throw new Error("无效的文库下载地址。");
+      }
+      const localHttp = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+      if (!localHttp && url.protocol !== "https:" || url.origin !== endpoint.origin || url.username || url.password || url.hash) {
+        throw new Error("文库下载地址必须与同步接口同源，并使用 HTTPS。");
+      }
+      return url.href;
+    };
+    var validateLatest = (value, endpointUrl) => {
+      if (value?.schema_version !== 1 || !HASH_RE.test(value.manifest_sha256 || "")) throw new Error("不支持的文库版本清单。");
+      validateVersion(value.version);
+      if (!Number.isSafeInteger(value.file_count) || value.file_count < 1 || value.file_count > MAX_FILES) throw new Error("文库文件数量超出限制。");
+      const latest = { ...value, manifest_url: validateUrl(value.manifest_url, endpointUrl) };
+      if (value.archive_url) {
+        if (!HASH_RE.test(value.archive_sha256 || "") || !Number.isSafeInteger(value.archive_size) || value.archive_size < 1 || value.archive_size > MAX_ARCHIVE_BYTES) {
+          throw new Error("完整文库下载包超出限制或缺少校验值。");
+        }
+        latest.archive_url = validateUrl(value.archive_url, endpointUrl);
+      }
+      return latest;
+    };
+    var validateManifest = (value, latest, endpointUrl) => {
+      if (value?.schema_version !== 1 || value.version !== latest.version || !Array.isArray(value.files) || value.files.length !== latest.file_count) {
+        throw new Error("文库文件清单与发布版本不一致。");
+      }
+      let total = 0;
+      const names = /* @__PURE__ */ new Map();
+      const files = value.files.map((file) => {
+        const path = validateContentPath(file?.path);
+        const key = path.normalize("NFC").toLocaleLowerCase("en-US");
+        if (names.has(key)) throw new Error(`文库路径重复或在 Windows 上冲突：${path}`);
+        names.set(key, path);
+        if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_FILE_BYTES || !HASH_RE.test(file.sha256 || "")) throw new Error(`文件校验信息无效：${path}`);
+        total += file.size;
+        if (total > MAX_TOTAL_BYTES) throw new Error("文库解压大小超出限制。");
+        return { path, size: file.size, sha256: file.sha256, url: validateUrl(file.url, endpointUrl) };
+      });
+      const directorySpellings = /* @__PURE__ */ new Map();
+      for (const [key, path] of names.entries()) {
+        const parts = key.split("/");
+        const originalParts = path.split("/");
+        for (let i = 1; i < parts.length; i += 1) {
+          if (names.has(parts.slice(0, i).join("/"))) throw new Error("文库清单包含文件与目录路径冲突。");
+          const directoryKey = parts.slice(0, i).join("/");
+          const spelling = originalParts.slice(0, i).join("/");
+          if (directorySpellings.has(directoryKey) && directorySpellings.get(directoryKey) !== spelling) throw new Error("文库目录大小写在 Windows 上冲突。");
+          directorySpellings.set(directoryKey, spelling);
+        }
+      }
+      return { ...value, files, total_size: total };
+    };
+    module2.exports = { DEFAULT_PROJECT_ENDPOINT: DEFAULT_PROJECT_ENDPOINT2, HASH_RE, MAX_ARCHIVE_BYTES, asBytes, sha256, encodeJson, parseJson, validateVersion, validateContentPath, validateUrl, validateLatest, validateManifest };
+  }
+});
+
+// node_modules/fflate/lib/node.cjs
+var require_node = __commonJS({
+  "node_modules/fflate/lib/node.cjs"(exports2) {
+    "use strict";
+    exports2.deflate = deflate;
+    exports2.deflateSync = deflateSync;
+    exports2.inflate = inflate;
+    exports2.inflateSync = inflateSync;
+    exports2.gzip = gzip;
+    exports2.compress = gzip;
+    exports2.gzipSync = gzipSync;
+    exports2.compressSync = gzipSync;
+    exports2.gunzip = gunzip;
+    exports2.gunzipSync = gunzipSync;
+    exports2.zlib = zlib;
+    exports2.zlibSync = zlibSync;
+    exports2.unzlib = unzlib;
+    exports2.unzlibSync = unzlibSync;
+    exports2.gzip = gzip;
+    exports2.compress = gzip;
+    exports2.decompress = decompress;
+    exports2.decompressSync = decompressSync;
+    exports2.strToU8 = strToU8;
+    exports2.strFromU8 = strFromU8;
+    exports2.zip = zip;
+    exports2.zipSync = zipSync;
+    exports2.unzip = unzip;
+    exports2.unzipSync = unzipSync;
+    var _a;
+    var Worker;
+    var isMarkedAsUntransferable;
+    var workerAdd = ";var __w=require('worker_threads');__w.parentPort.on('message',function(m){onmessage({data:m})}),postMessage=function(m,t){__w.parentPort.postMessage(m,t)},close=process.exit;self=global";
+    try {
+      _a = require("worker_threads"), Worker = _a.Worker, isMarkedAsUntransferable = _a.isMarkedAsUntransferable;
+    } catch (e) {
+    }
+    var node_worker_1 = {};
+    node_worker_1["default"] = Worker ? function(c, _, msg, transfer, cb) {
+      var done = false;
+      var w = new Worker(c + workerAdd, { eval: true }).on("error", function(e) {
+        return cb(e, null);
+      }).on("message", function(m) {
+        return cb(null, m);
+      }).on("exit", function(c2) {
+        if (c2 && !done)
+          cb(new Error("exited with code " + c2), null);
+      });
+      if (isMarkedAsUntransferable)
+        transfer = transfer.filter(function(t) {
+          return !isMarkedAsUntransferable(t);
+        });
+      w.postMessage(msg, transfer);
+      w.terminate = function() {
+        done = true;
+        return Worker.prototype.terminate.call(w);
+      };
+      return w;
+    } : function(_, __, ___, ____, cb) {
+      setImmediate(function() {
+        return cb(new Error("async operations unsupported - update to Node 12+ (or Node 10-11 with the --experimental-worker CLI flag)"), null);
+      });
+      var NOP = function() {
+      };
+      return {
+        terminate: NOP,
+        postMessage: NOP
+      };
+    };
+    var u8 = Uint8Array;
+    var u16 = Uint16Array;
+    var i32 = Int32Array;
+    var fleb = new u8([
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      1,
+      2,
+      2,
+      2,
+      2,
+      3,
+      3,
+      3,
+      3,
+      4,
+      4,
+      4,
+      4,
+      5,
+      5,
+      5,
+      5,
+      0,
+      /* unused */
+      0,
+      0,
+      /* impossible */
+      0
+    ]);
+    var fdeb = new u8([
+      0,
+      0,
+      0,
+      0,
+      1,
+      1,
+      2,
+      2,
+      3,
+      3,
+      4,
+      4,
+      5,
+      5,
+      6,
+      6,
+      7,
+      7,
+      8,
+      8,
+      9,
+      9,
+      10,
+      10,
+      11,
+      11,
+      12,
+      12,
+      13,
+      13,
+      /* unused */
+      0,
+      0
+    ]);
+    var clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
+    var freb = function(eb, start) {
+      var b = new u16(31);
+      for (var i2 = 0; i2 < 31; ++i2) {
+        b[i2] = start += 1 << eb[i2 - 1];
+      }
+      var r = new i32(b[30]);
+      for (var i2 = 1; i2 < 30; ++i2) {
+        for (var j = b[i2]; j < b[i2 + 1]; ++j) {
+          r[j] = j - b[i2] << 5 | i2;
+        }
+      }
+      return { b, r };
+    };
+    var _a = freb(fleb, 2);
+    var fl = _a.b;
+    var revfl = _a.r;
+    fl[28] = 258, revfl[258] = 28;
+    var _b = freb(fdeb, 0);
+    var fd = _b.b;
+    var revfd = _b.r;
+    var rev = new u16(32768);
+    for (i = 0; i < 32768; ++i) {
+      x = (i & 43690) >> 1 | (i & 21845) << 1;
+      x = (x & 52428) >> 2 | (x & 13107) << 2;
+      x = (x & 61680) >> 4 | (x & 3855) << 4;
+      rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
+    }
+    var x;
+    var i;
+    var hMap = (function(cd, mb, r) {
+      var s = cd.length;
+      var i2 = 0;
+      var l = new u16(mb);
+      for (; i2 < s; ++i2) {
+        if (cd[i2])
+          ++l[cd[i2] - 1];
+      }
+      var le = new u16(mb);
+      for (i2 = 1; i2 < mb; ++i2) {
+        le[i2] = le[i2 - 1] + l[i2 - 1] << 1;
+      }
+      var co;
+      if (r) {
+        co = new u16(1 << mb);
+        var rvb = 15 - mb;
+        for (i2 = 0; i2 < s; ++i2) {
+          if (cd[i2]) {
+            var sv = i2 << 4 | cd[i2];
+            var r_1 = mb - cd[i2];
+            var v = le[cd[i2] - 1]++ << r_1;
+            for (var m = v | (1 << r_1) - 1; v <= m; ++v) {
+              co[rev[v] >> rvb] = sv;
+            }
+          }
+        }
+      } else {
+        co = new u16(s);
+        for (i2 = 0; i2 < s; ++i2) {
+          if (cd[i2]) {
+            co[i2] = rev[le[cd[i2] - 1]++] >> 15 - cd[i2];
+          }
+        }
+      }
+      return co;
+    });
+    var flt = new u8(288);
+    for (i = 0; i < 144; ++i)
+      flt[i] = 8;
+    var i;
+    for (i = 144; i < 256; ++i)
+      flt[i] = 9;
+    var i;
+    for (i = 256; i < 280; ++i)
+      flt[i] = 7;
+    var i;
+    for (i = 280; i < 288; ++i)
+      flt[i] = 8;
+    var i;
+    var fdt = new u8(32);
+    for (i = 0; i < 32; ++i)
+      fdt[i] = 5;
+    var i;
+    var flm = /* @__PURE__ */ hMap(flt, 9, 0);
+    var flrm = /* @__PURE__ */ hMap(flt, 9, 1);
+    var fdm = /* @__PURE__ */ hMap(fdt, 5, 0);
+    var fdrm = /* @__PURE__ */ hMap(fdt, 5, 1);
+    var max = function(a) {
+      var m = a[0];
+      for (var i2 = 1; i2 < a.length; ++i2) {
+        if (a[i2] > m)
+          m = a[i2];
+      }
+      return m;
+    };
+    var bits = function(d, p, m) {
+      var o = p / 8 | 0;
+      return (d[o] | d[o + 1] << 8) >> (p & 7) & m;
+    };
+    var bits16 = function(d, p) {
+      var o = p / 8 | 0;
+      return (d[o] | d[o + 1] << 8 | d[o + 2] << 16) >> (p & 7);
+    };
+    var shft = function(p) {
+      return (p + 7) / 8 | 0;
+    };
+    var slc = function(v, s, e) {
+      if (s == null || s < 0)
+        s = 0;
+      if (e == null || e > v.length)
+        e = v.length;
+      return new u8(v.subarray(s, e));
+    };
+    exports2.FlateErrorCode = {
+      UnexpectedEOF: 0,
+      InvalidBlockType: 1,
+      InvalidLengthLiteral: 2,
+      InvalidDistance: 3,
+      StreamFinished: 4,
+      NoStreamHandler: 5,
+      InvalidHeader: 6,
+      NoCallback: 7,
+      InvalidUTF8: 8,
+      ExtraFieldTooLong: 9,
+      InvalidDate: 10,
+      FilenameTooLong: 11,
+      StreamFinishing: 12,
+      InvalidZipData: 13,
+      UnknownCompressionMethod: 14
+    };
+    var ec = [
+      "unexpected EOF",
+      "invalid block type",
+      "invalid length/literal",
+      "invalid distance",
+      "stream finished",
+      "no stream handler",
+      ,
+      // determined by compression function
+      "no callback",
+      "invalid UTF-8 data",
+      "extra field too long",
+      "date not in range 1980-2099",
+      "filename too long",
+      "stream finishing",
+      "invalid zip data"
+      // determined by unknown compression method
+    ];
+    var err = function(ind, msg, nt) {
+      var e = new Error(msg || ec[ind]);
+      e.code = ind;
+      if (Error.captureStackTrace)
+        Error.captureStackTrace(e, err);
+      if (!nt)
+        throw e;
+      return e;
+    };
+    var inflt = function(dat, st, buf, dict) {
+      var sl = dat.length, dl = dict ? dict.length : 0;
+      if (!sl || st.f && !st.l)
+        return buf || new u8(0);
+      var noBuf = !buf;
+      var resize = noBuf || st.i != 2;
+      var noSt = st.i;
+      if (noBuf)
+        buf = new u8(sl * 3);
+      var cbuf = function(l2) {
+        var bl = buf.length;
+        if (l2 > bl) {
+          var nbuf = new u8(Math.max(bl * 2, l2));
+          nbuf.set(buf);
+          buf = nbuf;
+        }
+      };
+      var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
+      var tbts = sl * 8;
+      do {
+        if (!lm) {
+          final = bits(dat, pos, 1);
+          var type = bits(dat, pos + 1, 3);
+          pos += 3;
+          if (!type) {
+            var s = shft(pos) + 4, l = dat[s - 4] | dat[s - 3] << 8, t = s + l;
+            if (t > sl) {
+              if (noSt)
+                err(0);
+              break;
+            }
+            if (resize)
+              cbuf(bt + l);
+            buf.set(dat.subarray(s, t), bt);
+            st.b = bt += l, st.p = pos = t * 8, st.f = final;
+            continue;
+          } else if (type == 1)
+            lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
+          else if (type == 2) {
+            var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
+            var tl = hLit + bits(dat, pos + 5, 31) + 1;
+            pos += 14;
+            var ldt = new u8(tl);
+            var clt = new u8(19);
+            for (var i2 = 0; i2 < hcLen; ++i2) {
+              clt[clim[i2]] = bits(dat, pos + i2 * 3, 7);
+            }
+            pos += hcLen * 3;
+            var clb = max(clt), clbmsk = (1 << clb) - 1;
+            var clm = hMap(clt, clb, 1);
+            for (var i2 = 0; i2 < tl; ) {
+              var r = clm[bits(dat, pos, clbmsk)];
+              pos += r & 15;
+              var s = r >> 4;
+              if (s < 16) {
+                ldt[i2++] = s;
+              } else {
+                var c = 0, n = 0;
+                if (s == 16)
+                  n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i2 - 1];
+                else if (s == 17)
+                  n = 3 + bits(dat, pos, 7), pos += 3;
+                else if (s == 18)
+                  n = 11 + bits(dat, pos, 127), pos += 7;
+                while (n--)
+                  ldt[i2++] = c;
+              }
+            }
+            var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
+            lbt = max(lt);
+            dbt = max(dt);
+            lm = hMap(lt, lbt, 1);
+            dm = hMap(dt, dbt, 1);
+          } else
+            err(1);
+          if (pos > tbts) {
+            if (noSt)
+              err(0);
+            break;
+          }
+        }
+        if (resize)
+          cbuf(bt + 131072);
+        var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
+        var lpos = pos;
+        for (; ; lpos = pos) {
+          var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
+          pos += c & 15;
+          if (pos > tbts) {
+            if (noSt)
+              err(0);
+            break;
+          }
+          if (!c)
+            err(2);
+          if (sym < 256)
+            buf[bt++] = sym;
+          else if (sym == 256) {
+            lpos = pos, lm = null;
+            break;
+          } else {
+            var add = sym - 254;
+            if (sym > 264) {
+              var i2 = sym - 257, b = fleb[i2];
+              add = bits(dat, pos, (1 << b) - 1) + fl[i2];
+              pos += b;
+            }
+            var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
+            if (!d)
+              err(3);
+            pos += d & 15;
+            var dt = fd[dsym];
+            if (dsym > 3) {
+              var b = fdeb[dsym];
+              dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
+            }
+            if (pos > tbts) {
+              if (noSt)
+                err(0);
+              break;
+            }
+            if (resize)
+              cbuf(bt + 131072);
+            var end = bt + add;
+            if (bt < dt) {
+              var shift = dl - dt, dend = Math.min(dt, end);
+              if (shift + bt < 0)
+                err(3);
+              for (; bt < dend; ++bt)
+                buf[bt] = dict[shift + bt];
+            }
+            for (; bt < end; ++bt)
+              buf[bt] = buf[bt - dt];
+          }
+        }
+        st.l = lm, st.p = lpos, st.b = bt, st.f = final;
+        if (lm)
+          final = 1, st.m = lbt, st.d = dm, st.n = dbt;
+      } while (!final);
+      return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
+    };
+    var wbits = function(d, p, v) {
+      v <<= p & 7;
+      var o = p / 8 | 0;
+      d[o] |= v;
+      d[o + 1] |= v >> 8;
+    };
+    var wbits16 = function(d, p, v) {
+      v <<= p & 7;
+      var o = p / 8 | 0;
+      d[o] |= v;
+      d[o + 1] |= v >> 8;
+      d[o + 2] |= v >> 16;
+    };
+    var hTree = function(d, mb) {
+      var t = [];
+      for (var i2 = 0; i2 < d.length; ++i2) {
+        if (d[i2])
+          t.push({ s: i2, f: d[i2] });
+      }
+      var s = t.length;
+      var t2 = t.slice();
+      if (!s)
+        return { t: et, l: 0 };
+      if (s == 1) {
+        var v = new u8(t[0].s + 1);
+        v[t[0].s] = 1;
+        return { t: v, l: 1 };
+      }
+      t.sort(function(a, b) {
+        return a.f - b.f;
+      });
+      t.push({ s: -1, f: 25001 });
+      var l = t[0], r = t[1], i0 = 0, i1 = 1, i22 = 2;
+      t[0] = { s: -1, f: l.f + r.f, l, r };
+      while (i1 != s - 1) {
+        l = t[t[i0].f < t[i22].f ? i0++ : i22++];
+        r = t[i0 != i1 && t[i0].f < t[i22].f ? i0++ : i22++];
+        t[i1++] = { s: -1, f: l.f + r.f, l, r };
+      }
+      var maxSym = t2[0].s;
+      for (var i2 = 1; i2 < s; ++i2) {
+        if (t2[i2].s > maxSym)
+          maxSym = t2[i2].s;
+      }
+      var tr = new u16(maxSym + 1);
+      var mbt = ln(t[i1 - 1], tr, 0);
+      if (mbt > mb) {
+        var i2 = 0, dt = 0;
+        var lft = mbt - mb, cst = 1 << lft;
+        t2.sort(function(a, b) {
+          return tr[b.s] - tr[a.s] || a.f - b.f;
+        });
+        for (; i2 < s; ++i2) {
+          var i2_1 = t2[i2].s;
+          if (tr[i2_1] > mb) {
+            dt += cst - (1 << mbt - tr[i2_1]);
+            tr[i2_1] = mb;
+          } else
+            break;
+        }
+        dt >>= lft;
+        while (dt > 0) {
+          var i2_2 = t2[i2].s;
+          if (tr[i2_2] < mb)
+            dt -= 1 << mb - tr[i2_2]++ - 1;
+          else
+            ++i2;
+        }
+        for (; i2 >= 0 && dt; --i2) {
+          var i2_3 = t2[i2].s;
+          if (tr[i2_3] == mb) {
+            --tr[i2_3];
+            ++dt;
+          }
+        }
+        mbt = mb;
+      }
+      return { t: new u8(tr), l: mbt };
+    };
+    var ln = function(n, l, d) {
+      return n.s == -1 ? Math.max(ln(n.l, l, d + 1), ln(n.r, l, d + 1)) : l[n.s] = d;
+    };
+    var lc = function(c) {
+      var s = c.length;
+      while (s && !c[--s])
+        ;
+      var cl = new u16(++s);
+      var cli = 0, cln = c[0], cls = 1;
+      var w = function(v) {
+        cl[cli++] = v;
+      };
+      for (var i2 = 1; i2 <= s; ++i2) {
+        if (c[i2] == cln && i2 != s)
+          ++cls;
+        else {
+          if (!cln && cls > 2) {
+            for (; cls > 138; cls -= 138)
+              w(32754);
+            if (cls > 2) {
+              w(cls > 10 ? cls - 11 << 5 | 28690 : cls - 3 << 5 | 12305);
+              cls = 0;
+            }
+          } else if (cls > 3) {
+            w(cln), --cls;
+            for (; cls > 6; cls -= 6)
+              w(8304);
+            if (cls > 2)
+              w(cls - 3 << 5 | 8208), cls = 0;
+          }
+          while (cls--)
+            w(cln);
+          cls = 1;
+          cln = c[i2];
+        }
+      }
+      return { c: cl.subarray(0, cli), n: s };
+    };
+    var clen = function(cf, cl) {
+      var l = 0;
+      for (var i2 = 0; i2 < cl.length; ++i2)
+        l += cf[i2] * cl[i2];
+      return l;
+    };
+    var wfblk = function(out, pos, dat) {
+      var s = dat.length;
+      var o = shft(pos + 2);
+      out[o] = s & 255;
+      out[o + 1] = s >> 8;
+      out[o + 2] = out[o] ^ 255;
+      out[o + 3] = out[o + 1] ^ 255;
+      for (var i2 = 0; i2 < s; ++i2)
+        out[o + i2 + 4] = dat[i2];
+      return (o + 4 + s) * 8;
+    };
+    var wblk = function(dat, out, final, syms, lf, df, eb, li, bs, bl, p) {
+      wbits(out, p++, final);
+      ++lf[256];
+      var _a2 = hTree(lf, 15), dlt = _a2.t, mlb = _a2.l;
+      var _b2 = hTree(df, 15), ddt = _b2.t, mdb = _b2.l;
+      var _c = lc(dlt), lclt = _c.c, nlc = _c.n;
+      var _d = lc(ddt), lcdt = _d.c, ndc = _d.n;
+      var lcfreq = new u16(19);
+      for (var i2 = 0; i2 < lclt.length; ++i2)
+        ++lcfreq[lclt[i2] & 31];
+      for (var i2 = 0; i2 < lcdt.length; ++i2)
+        ++lcfreq[lcdt[i2] & 31];
+      var _e = hTree(lcfreq, 7), lct = _e.t, mlcb = _e.l;
+      var nlcc = 19;
+      for (; nlcc > 4 && !lct[clim[nlcc - 1]]; --nlcc)
+        ;
+      var flen = bl + 5 << 3;
+      var ftlen = clen(lf, flt) + clen(df, fdt) + eb;
+      var dtlen = clen(lf, dlt) + clen(df, ddt) + eb + 14 + 3 * nlcc + clen(lcfreq, lct) + 2 * lcfreq[16] + 3 * lcfreq[17] + 7 * lcfreq[18];
+      if (bs >= 0 && flen <= ftlen && flen <= dtlen)
+        return wfblk(out, p, dat.subarray(bs, bs + bl));
+      var lm, ll, dm, dl;
+      wbits(out, p, 1 + (dtlen < ftlen)), p += 2;
+      if (dtlen < ftlen) {
+        lm = hMap(dlt, mlb, 0), ll = dlt, dm = hMap(ddt, mdb, 0), dl = ddt;
+        var llm = hMap(lct, mlcb, 0);
+        wbits(out, p, nlc - 257);
+        wbits(out, p + 5, ndc - 1);
+        wbits(out, p + 10, nlcc - 4);
+        p += 14;
+        for (var i2 = 0; i2 < nlcc; ++i2)
+          wbits(out, p + 3 * i2, lct[clim[i2]]);
+        p += 3 * nlcc;
+        var lcts = [lclt, lcdt];
+        for (var it = 0; it < 2; ++it) {
+          var clct = lcts[it];
+          for (var i2 = 0; i2 < clct.length; ++i2) {
+            var len = clct[i2] & 31;
+            wbits(out, p, llm[len]), p += lct[len];
+            if (len > 15)
+              wbits(out, p, clct[i2] >> 5 & 127), p += clct[i2] >> 12;
+          }
+        }
+      } else {
+        lm = flm, ll = flt, dm = fdm, dl = fdt;
+      }
+      for (var i2 = 0; i2 < li; ++i2) {
+        var sym = syms[i2];
+        if (sym > 255) {
+          var len = sym >> 18 & 31;
+          wbits16(out, p, lm[len + 257]), p += ll[len + 257];
+          if (len > 7)
+            wbits(out, p, sym >> 23 & 31), p += fleb[len];
+          var dst = sym & 31;
+          wbits16(out, p, dm[dst]), p += dl[dst];
+          if (dst > 3)
+            wbits16(out, p, sym >> 5 & 8191), p += fdeb[dst];
+        } else {
+          wbits16(out, p, lm[sym]), p += ll[sym];
+        }
+      }
+      wbits16(out, p, lm[256]);
+      return p + ll[256];
+    };
+    var deo = /* @__PURE__ */ new i32([65540, 131080, 131088, 131104, 262176, 1048704, 1048832, 2114560, 2117632]);
+    var et = /* @__PURE__ */ new u8(0);
+    var dflt = function(dat, lvl, plvl, pre, post, st) {
+      var s = st.z || dat.length;
+      var o = new u8(pre + s + 5 * (1 + Math.ceil(s / 7e3)) + post);
+      var w = o.subarray(pre, o.length - post);
+      var lst = st.l;
+      var pos = (st.r || 0) & 7;
+      if (lvl) {
+        if (pos)
+          w[0] = st.r >> 3;
+        var opt = deo[lvl - 1];
+        var n = opt >> 13, c = opt & 8191;
+        var msk_1 = (1 << plvl) - 1;
+        var prev = st.p || new u16(32768), head = st.h || new u16(msk_1 + 1);
+        var bs1_1 = Math.ceil(plvl / 3), bs2_1 = 2 * bs1_1;
+        var hsh = function(i3) {
+          return (dat[i3] ^ dat[i3 + 1] << bs1_1 ^ dat[i3 + 2] << bs2_1) & msk_1;
+        };
+        var syms = new i32(25e3);
+        var lf = new u16(288), df = new u16(32);
+        var lc_1 = 0, eb = 0, i2 = st.i || 0, li = 0, wi = st.w || 0, bs = 0;
+        for (; i2 + 2 < s; ++i2) {
+          var hv = hsh(i2);
+          var imod = i2 & 32767, pimod = head[hv];
+          prev[imod] = pimod;
+          head[hv] = imod;
+          if (wi <= i2) {
+            var rem = s - i2;
+            if ((lc_1 > 7e3 || li > 24576) && (rem > 423 || !lst)) {
+              pos = wblk(dat, w, 0, syms, lf, df, eb, li, bs, i2 - bs, pos);
+              li = lc_1 = eb = 0, bs = i2;
+              for (var j = 0; j < 286; ++j)
+                lf[j] = 0;
+              for (var j = 0; j < 30; ++j)
+                df[j] = 0;
+            }
+            var l = 2, d = 0, ch_1 = c, dif = imod - pimod & 32767;
+            if (rem > 2 && hv == hsh(i2 - dif)) {
+              var maxn = Math.min(n, rem) - 1;
+              var maxd = Math.min(32767, i2);
+              var ml = Math.min(258, rem);
+              while (dif <= maxd && --ch_1 && imod != pimod) {
+                if (dat[i2 + l] == dat[i2 + l - dif]) {
+                  var nl = 0;
+                  for (; nl < ml && dat[i2 + nl] == dat[i2 + nl - dif]; ++nl)
+                    ;
+                  if (nl > l) {
+                    l = nl, d = dif;
+                    if (nl > maxn)
+                      break;
+                    var mmd = Math.min(dif, nl - 2);
+                    var md = 0;
+                    for (var j = 0; j < mmd; ++j) {
+                      var ti = i2 - dif + j & 32767;
+                      var pti = prev[ti];
+                      var cd = ti - pti & 32767;
+                      if (cd > md)
+                        md = cd, pimod = ti;
+                    }
+                  }
+                }
+                imod = pimod, pimod = prev[imod];
+                dif += imod - pimod & 32767;
+              }
+            }
+            if (d) {
+              syms[li++] = 268435456 | revfl[l] << 18 | revfd[d];
+              var lin = revfl[l] & 31, din = revfd[d] & 31;
+              eb += fleb[lin] + fdeb[din];
+              ++lf[257 + lin];
+              ++df[din];
+              wi = i2 + l;
+              ++lc_1;
+            } else {
+              syms[li++] = dat[i2];
+              ++lf[dat[i2]];
+            }
+          }
+        }
+        for (i2 = Math.max(i2, wi); i2 < s; ++i2) {
+          syms[li++] = dat[i2];
+          ++lf[dat[i2]];
+        }
+        pos = wblk(dat, w, lst, syms, lf, df, eb, li, bs, i2 - bs, pos);
+        if (!lst) {
+          st.r = pos & 7 | w[pos / 8 | 0] << 3;
+          pos -= 7;
+          st.h = head, st.p = prev, st.i = i2, st.w = wi;
+        }
+      } else {
+        for (var i2 = st.w || 0; i2 < s + lst; i2 += 65535) {
+          var e = i2 + 65535;
+          if (e >= s) {
+            w[pos / 8 | 0] = lst;
+            e = s;
+          }
+          pos = wfblk(w, pos + 1, dat.subarray(i2, e));
+        }
+        st.i = s;
+      }
+      return slc(o, 0, pre + shft(pos) + post);
+    };
+    var crct = /* @__PURE__ */ (function() {
+      var t = new Int32Array(256);
+      for (var i2 = 0; i2 < 256; ++i2) {
+        var c = i2, k = 9;
+        while (--k)
+          c = (c & 1 && -306674912) ^ c >>> 1;
+        t[i2] = c;
+      }
+      return t;
+    })();
+    var crc = function() {
+      var c = -1;
+      return {
+        p: function(d) {
+          var cr = c;
+          for (var i2 = 0; i2 < d.length; ++i2)
+            cr = crct[cr & 255 ^ d[i2]] ^ cr >>> 8;
+          c = cr;
+        },
+        d: function() {
+          return ~c;
+        }
+      };
+    };
+    var adler = function() {
+      var a = 1, b = 0;
+      return {
+        p: function(d) {
+          var n = a, m = b;
+          var l = d.length | 0;
+          for (var i2 = 0; i2 != l; ) {
+            var e = Math.min(i2 + 2655, l);
+            for (; i2 < e; ++i2)
+              m += n += d[i2];
+            n = (n & 65535) + 15 * (n >> 16), m = (m & 65535) + 15 * (m >> 16);
+          }
+          a = n, b = m;
+        },
+        d: function() {
+          a %= 65521, b %= 65521;
+          return (a & 255) << 24 | (a & 65280) << 8 | (b & 255) << 8 | b >> 8;
+        }
+      };
+    };
+    var dopt = function(dat, opt, pre, post, st) {
+      if (!st) {
+        st = { l: 1 };
+        if (opt.dictionary) {
+          var dict = opt.dictionary.subarray(-32768);
+          var newDat = new u8(dict.length + dat.length);
+          newDat.set(dict);
+          newDat.set(dat, dict.length);
+          dat = newDat;
+          st.w = dict.length;
+        }
+      }
+      return dflt(dat, opt.level == null ? 6 : opt.level, opt.mem == null ? st.l ? Math.ceil(Math.max(8, Math.min(13, Math.log(dat.length))) * 1.5) : 20 : 12 + opt.mem, pre, post, st);
+    };
+    var mrg = function(a, b) {
+      var o = {};
+      for (var k in a)
+        o[k] = a[k];
+      for (var k in b)
+        o[k] = b[k];
+      return o;
+    };
+    var wcln = function(fn, fnStr, td2) {
+      var dt = fn();
+      var st = fn.toString();
+      var ks = st.slice(st.indexOf("[") + 1, st.lastIndexOf("]")).replace(/\s+/g, "").split(",");
+      for (var i2 = 0; i2 < dt.length; ++i2) {
+        var v = dt[i2], k = ks[i2];
+        if (typeof v == "function") {
+          fnStr += ";" + k + "=";
+          var st_1 = v.toString();
+          if (v.prototype) {
+            if (st_1.indexOf("[native code]") != -1) {
+              var spInd = st_1.indexOf(" ", 8) + 1;
+              fnStr += st_1.slice(spInd, st_1.indexOf("(", spInd));
+            } else {
+              fnStr += st_1;
+              for (var t in v.prototype)
+                fnStr += ";" + k + ".prototype." + t + "=" + v.prototype[t].toString();
+            }
+          } else
+            fnStr += st_1;
+        } else
+          td2[k] = v;
+      }
+      return fnStr;
+    };
+    var ch = [];
+    var cbfs = function(v) {
+      var tl = [];
+      for (var k in v) {
+        if (v[k].buffer) {
+          tl.push((v[k] = new v[k].constructor(v[k])).buffer);
+        }
+      }
+      return tl;
+    };
+    var wrkr = function(fns, init, id, cb) {
+      if (!ch[id]) {
+        var fnStr = "", td_1 = {}, m = fns.length - 1;
+        for (var i2 = 0; i2 < m; ++i2)
+          fnStr = wcln(fns[i2], fnStr, td_1);
+        ch[id] = { c: wcln(fns[m], fnStr, td_1), e: td_1 };
+      }
+      var td2 = mrg({}, ch[id].e);
+      return (0, node_worker_1.default)(ch[id].c + ";onmessage=function(e){for(var k in e.data)self[k]=e.data[k];onmessage=" + init.toString() + "}", id, td2, cbfs(td2), cb);
+    };
+    var bInflt = function() {
+      return [u8, u16, i32, fleb, fdeb, clim, fl, fd, flrm, fdrm, rev, ec, hMap, max, bits, bits16, shft, slc, err, inflt, inflateSync, pbf, gopt];
+    };
+    var bDflt = function() {
+      return [u8, u16, i32, fleb, fdeb, clim, revfl, revfd, flm, flt, fdm, fdt, rev, deo, et, hMap, wbits, wbits16, hTree, ln, lc, clen, wfblk, wblk, shft, slc, dflt, dopt, deflateSync, pbf];
+    };
+    var gze = function() {
+      return [gzh, gzhl, wbytes, crc, crct];
+    };
+    var guze = function() {
+      return [gzs, gzl];
+    };
+    var zle = function() {
+      return [zlh, wbytes, adler];
+    };
+    var zule = function() {
+      return [zls];
+    };
+    var pbf = function(msg) {
+      return postMessage(msg, [msg.buffer]);
+    };
+    var gopt = function(o) {
+      return o && {
+        out: o.size && new u8(o.size),
+        dictionary: o.dictionary
+      };
+    };
+    var cbify = function(dat, opts, fns, init, id, cb) {
+      var w = wrkr(fns, init, id, function(err2, dat2) {
+        w.terminate();
+        cb(err2, dat2);
+      });
+      w.postMessage([dat, opts], opts.consume ? [dat.buffer] : []);
+      return function() {
+        w.terminate();
+      };
+    };
+    var astrm = function(strm) {
+      strm.ondata = function(dat, final) {
+        return postMessage([dat, final], [dat.buffer]);
+      };
+      return function(ev) {
+        if (ev.data[0]) {
+          strm.push(ev.data[0], ev.data[1]);
+          postMessage([ev.data[0].length]);
+        } else
+          strm.flush(ev.data[1]);
+      };
+    };
+    var astrmify = function(fns, strm, opts, init, id, flush, ext) {
+      var t;
+      var w = wrkr(fns, init, id, function(err2, dat) {
+        if (err2)
+          w.terminate(), strm.ondata.call(strm, err2);
+        else if (!Array.isArray(dat))
+          ext(dat);
+        else if (dat.length == 1) {
+          strm.queuedSize -= dat[0];
+          if (strm.ondrain)
+            strm.ondrain(dat[0]);
+        } else {
+          if (dat[1])
+            w.terminate();
+          strm.ondata.call(strm, err2, dat[0], dat[1]);
+        }
+      });
+      w.postMessage(opts);
+      strm.queuedSize = 0;
+      strm.push = function(d, f) {
+        if (!strm.ondata)
+          err(5);
+        if (t)
+          strm.ondata(err(4, 0, 1), null, !!f);
+        strm.queuedSize += d.length;
+        w.postMessage([d, t = f], d.buffer instanceof ArrayBuffer ? [d.buffer] : []);
+      };
+      strm.terminate = function() {
+        w.terminate();
+      };
+      if (flush) {
+        strm.flush = function(sync) {
+          w.postMessage([0, sync]);
+        };
+      }
+    };
+    var b2 = function(d, b) {
+      return d[b] | d[b + 1] << 8;
+    };
+    var b4 = function(d, b) {
+      return (d[b] | d[b + 1] << 8 | d[b + 2] << 16 | d[b + 3] << 24) >>> 0;
+    };
+    var b8 = function(d, b) {
+      return b4(d, b) + b4(d, b + 4) * 4294967296;
+    };
+    var wbytes = function(d, b, v) {
+      for (; v; ++b)
+        d[b] = v, v >>>= 8;
+    };
+    var gzh = function(c, o) {
+      var fn = o.filename;
+      c[0] = 31, c[1] = 139, c[2] = 8, c[8] = o.level < 2 ? 4 : o.level == 9 ? 2 : 0, c[9] = 3;
+      if (o.mtime != 0)
+        wbytes(c, 4, Math.floor(new Date(o.mtime || Date.now()) / 1e3));
+      if (fn) {
+        c[3] = 8;
+        for (var i2 = 0; i2 <= fn.length; ++i2)
+          c[i2 + 10] = fn.charCodeAt(i2);
+      }
+    };
+    var gzs = function(d) {
+      if (d[0] != 31 || d[1] != 139 || d[2] != 8)
+        err(6, "invalid gzip data");
+      var flg = d[3];
+      var st = 10;
+      if (flg & 4)
+        st += (d[10] | d[11] << 8) + 2;
+      for (var zs = (flg >> 3 & 1) + (flg >> 4 & 1); zs > 0; zs -= !d[st++])
+        ;
+      return st + (flg & 2);
+    };
+    var gzl = function(d) {
+      var l = d.length;
+      return (d[l - 4] | d[l - 3] << 8 | d[l - 2] << 16 | d[l - 1] << 24) >>> 0;
+    };
+    var gzhl = function(o) {
+      return 10 + (o.filename ? o.filename.length + 1 : 0);
+    };
+    var zlh = function(c, o) {
+      var lv = o.level, fl2 = lv == 0 ? 0 : lv < 6 ? 1 : lv == 9 ? 3 : 2;
+      c[0] = 120, c[1] = fl2 << 6 | (o.dictionary && 32);
+      c[1] |= 31 - (c[0] << 8 | c[1]) % 31;
+      if (o.dictionary) {
+        var h = adler();
+        h.p(o.dictionary);
+        wbytes(c, 2, h.d());
+      }
+    };
+    var zls = function(d, dict) {
+      if ((d[0] & 15) != 8 || d[0] >> 4 > 7 || (d[0] << 8 | d[1]) % 31)
+        err(6, "invalid zlib data");
+      if ((d[1] >> 5 & 1) == +!dict)
+        err(6, "invalid zlib data: " + (d[1] & 32 ? "need" : "unexpected") + " dictionary");
+      return (d[1] >> 3 & 4) + 2;
+    };
+    function StrmOpt(opts, cb) {
+      if (typeof opts == "function")
+        cb = opts, opts = {};
+      this.ondata = cb;
+      return opts;
+    }
+    var Deflate = /* @__PURE__ */ (function() {
+      function Deflate2(opts, cb) {
+        if (typeof opts == "function")
+          cb = opts, opts = {};
+        this.ondata = cb;
+        this.o = opts || {};
+        this.s = { l: 0, i: 32768, w: 32768, z: 32768 };
+        this.b = new u8(98304);
+        if (this.o.dictionary) {
+          var dict = this.o.dictionary.subarray(-32768);
+          this.b.set(dict, 32768 - dict.length);
+          this.s.i = 32768 - dict.length;
+        }
+      }
+      Deflate2.prototype.p = function(c, f) {
+        this.ondata(dopt(c, this.o, 0, 0, this.s), f);
+      };
+      Deflate2.prototype.push = function(chunk, final) {
+        if (!this.ondata)
+          err(5);
+        if (this.s.l)
+          err(4);
+        var endLen = chunk.length + this.s.z;
+        if (endLen > this.b.length) {
+          if (endLen > 2 * this.b.length - 32768) {
+            var newBuf = new u8(endLen & -32768);
+            newBuf.set(this.b.subarray(0, this.s.z));
+            this.b = newBuf;
+          }
+          var split = this.b.length - this.s.z;
+          this.b.set(chunk.subarray(0, split), this.s.z);
+          this.s.z = this.b.length;
+          this.p(this.b, false);
+          this.b.set(this.b.subarray(-32768));
+          this.b.set(chunk.subarray(split), 32768);
+          this.s.z = chunk.length - split + 32768;
+          this.s.i = 32766, this.s.w = 32768;
+        } else {
+          this.b.set(chunk, this.s.z);
+          this.s.z += chunk.length;
+        }
+        this.s.l = final & 1;
+        if (this.s.z > this.s.w + 8191 || final) {
+          this.p(this.b, final || false);
+          this.s.w = this.s.i, this.s.i -= 2;
+        }
+        if (final) {
+          this.s = this.o = {};
+          this.b = et;
+        }
+      };
+      Deflate2.prototype.flush = function(sync) {
+        if (!this.ondata)
+          err(5);
+        if (this.s.l)
+          err(4);
+        this.p(this.b, false);
+        this.s.w = this.s.i, this.s.i -= 2;
+        if (sync) {
+          var c = new u8(6);
+          c[0] = this.s.r >> 3;
+          var ep = wfblk(c, this.s.r, et);
+          this.s.r = 0;
+          this.ondata(c.subarray(0, ep >> 3), false);
+        }
+      };
+      return Deflate2;
+    })();
+    exports2.Deflate = Deflate;
+    var AsyncDeflate = /* @__PURE__ */ (function() {
+      function AsyncDeflate2(opts, cb) {
+        astrmify([
+          bDflt,
+          function() {
+            return [astrm, Deflate];
+          }
+        ], this, StrmOpt.call(this, opts, cb), function(ev) {
+          var strm = new Deflate(ev.data);
+          onmessage = astrm(strm);
+        }, 6, 1);
+      }
+      return AsyncDeflate2;
+    })();
+    exports2.AsyncDeflate = AsyncDeflate;
+    function deflate(data, opts, cb) {
+      if (!cb)
+        cb = opts, opts = {};
+      if (typeof cb != "function")
+        err(7);
+      return cbify(data, opts, [
+        bDflt
+      ], function(ev) {
+        return pbf(deflateSync(ev.data[0], ev.data[1]));
+      }, 0, cb);
+    }
+    function deflateSync(data, opts) {
+      return dopt(data, opts || {}, 0, 0);
+    }
+    var Inflate = /* @__PURE__ */ (function() {
+      function Inflate2(opts, cb) {
+        if (typeof opts == "function")
+          cb = opts, opts = {};
+        this.ondata = cb;
+        var dict = opts && opts.dictionary && opts.dictionary.subarray(-32768);
+        this.s = { i: 0, b: dict ? dict.length : 0 };
+        this.o = new u8(32768);
+        this.p = new u8(0);
+        if (dict)
+          this.o.set(dict);
+      }
+      Inflate2.prototype.e = function(c) {
+        if (!this.ondata)
+          err(5);
+        if (this.d)
+          err(4);
+        if (!this.p.length)
+          this.p = c;
+        else if (c.length) {
+          var n = new u8(this.p.length + c.length);
+          n.set(this.p), n.set(c, this.p.length), this.p = n;
+        }
+      };
+      Inflate2.prototype.c = function(final) {
+        this.s.i = +(this.d = final || false);
+        var bts = this.s.b;
+        var dt = inflt(this.p, this.s, this.o);
+        this.ondata(slc(dt, bts, this.s.b), this.d);
+        this.o = slc(dt, this.s.b - 32768), this.s.b = this.o.length;
+        this.p = slc(this.p, this.s.p / 8 | 0), this.s.p &= 7;
+      };
+      Inflate2.prototype.push = function(chunk, final) {
+        this.e(chunk), this.c(final);
+      };
+      return Inflate2;
+    })();
+    exports2.Inflate = Inflate;
+    var AsyncInflate = /* @__PURE__ */ (function() {
+      function AsyncInflate2(opts, cb) {
+        astrmify([
+          bInflt,
+          function() {
+            return [astrm, Inflate];
+          }
+        ], this, StrmOpt.call(this, opts, cb), function(ev) {
+          var strm = new Inflate(ev.data);
+          onmessage = astrm(strm);
+        }, 7, 0);
+      }
+      return AsyncInflate2;
+    })();
+    exports2.AsyncInflate = AsyncInflate;
+    function inflate(data, opts, cb) {
+      if (!cb)
+        cb = opts, opts = {};
+      if (typeof cb != "function")
+        err(7);
+      return cbify(data, opts, [
+        bInflt
+      ], function(ev) {
+        return pbf(inflateSync(ev.data[0], gopt(ev.data[1])));
+      }, 1, cb);
+    }
+    function inflateSync(data, opts) {
+      return inflt(data, { i: 2 }, opts && opts.out, opts && opts.dictionary);
+    }
+    var Gzip = /* @__PURE__ */ (function() {
+      function Gzip2(opts, cb) {
+        this.c = crc();
+        this.l = 0;
+        this.v = 1;
+        Deflate.call(this, opts, cb);
+      }
+      Gzip2.prototype.push = function(chunk, final) {
+        this.c.p(chunk);
+        this.l += chunk.length;
+        Deflate.prototype.push.call(this, chunk, final);
+      };
+      Gzip2.prototype.p = function(c, f) {
+        var raw = dopt(c, this.o, this.v && gzhl(this.o), f && 8, this.s);
+        if (this.v)
+          gzh(raw, this.o), this.v = 0;
+        if (f)
+          wbytes(raw, raw.length - 8, this.c.d()), wbytes(raw, raw.length - 4, this.l);
+        this.ondata(raw, f);
+      };
+      Gzip2.prototype.flush = function(sync) {
+        Deflate.prototype.flush.call(this, sync);
+      };
+      return Gzip2;
+    })();
+    exports2.Gzip = Gzip;
+    exports2.Compress = Gzip;
+    var AsyncGzip = /* @__PURE__ */ (function() {
+      function AsyncGzip2(opts, cb) {
+        astrmify([
+          bDflt,
+          gze,
+          function() {
+            return [astrm, Deflate, Gzip];
+          }
+        ], this, StrmOpt.call(this, opts, cb), function(ev) {
+          var strm = new Gzip(ev.data);
+          onmessage = astrm(strm);
+        }, 8, 1);
+      }
+      return AsyncGzip2;
+    })();
+    exports2.AsyncGzip = AsyncGzip;
+    exports2.AsyncCompress = AsyncGzip;
+    function gzip(data, opts, cb) {
+      if (!cb)
+        cb = opts, opts = {};
+      if (typeof cb != "function")
+        err(7);
+      return cbify(data, opts, [
+        bDflt,
+        gze,
+        function() {
+          return [gzipSync];
+        }
+      ], function(ev) {
+        return pbf(gzipSync(ev.data[0], ev.data[1]));
+      }, 2, cb);
+    }
+    function gzipSync(data, opts) {
+      if (!opts)
+        opts = {};
+      var c = crc(), l = data.length;
+      c.p(data);
+      var d = dopt(data, opts, gzhl(opts), 8), s = d.length;
+      return gzh(d, opts), wbytes(d, s - 8, c.d()), wbytes(d, s - 4, l), d;
+    }
+    var Gunzip = /* @__PURE__ */ (function() {
+      function Gunzip2(opts, cb) {
+        this.v = 1;
+        this.r = 0;
+        Inflate.call(this, opts, cb);
+      }
+      Gunzip2.prototype.push = function(chunk, final) {
+        Inflate.prototype.e.call(this, chunk);
+        this.r += chunk.length;
+        if (this.v) {
+          var p = this.p.subarray(this.v - 1);
+          var s = p.length > 3 ? gzs(p) : 4;
+          if (s > p.length) {
+            if (!final)
+              return;
+          } else if (this.v > 1 && this.onmember) {
+            this.onmember(this.r - p.length);
+          }
+          this.p = p.subarray(s), this.v = 0;
+        }
+        Inflate.prototype.c.call(this, 0);
+        if (this.s.f && !this.s.l) {
+          this.v = shft(this.s.p) + 9;
+          this.s = { i: 0 };
+          this.o = new u8(0);
+          this.push(new u8(0), final);
+        } else if (final) {
+          Inflate.prototype.c.call(this, final);
+        }
+      };
+      return Gunzip2;
+    })();
+    exports2.Gunzip = Gunzip;
+    var AsyncGunzip = /* @__PURE__ */ (function() {
+      function AsyncGunzip2(opts, cb) {
+        var _this = this;
+        astrmify([
+          bInflt,
+          guze,
+          function() {
+            return [astrm, Inflate, Gunzip];
+          }
+        ], this, StrmOpt.call(this, opts, cb), function(ev) {
+          var strm = new Gunzip(ev.data);
+          strm.onmember = function(offset) {
+            return postMessage(offset);
+          };
+          onmessage = astrm(strm);
+        }, 9, 0, function(offset) {
+          return _this.onmember && _this.onmember(offset);
+        });
+      }
+      return AsyncGunzip2;
+    })();
+    exports2.AsyncGunzip = AsyncGunzip;
+    function gunzip(data, opts, cb) {
+      if (!cb)
+        cb = opts, opts = {};
+      if (typeof cb != "function")
+        err(7);
+      return cbify(data, opts, [
+        bInflt,
+        guze,
+        function() {
+          return [gunzipSync];
+        }
+      ], function(ev) {
+        return pbf(gunzipSync(ev.data[0], ev.data[1]));
+      }, 3, cb);
+    }
+    function gunzipSync(data, opts) {
+      var st = gzs(data);
+      if (st + 8 > data.length)
+        err(6, "invalid gzip data");
+      return inflt(data.subarray(st, -8), { i: 2 }, opts && opts.out || new u8(gzl(data)), opts && opts.dictionary);
+    }
+    var Zlib = /* @__PURE__ */ (function() {
+      function Zlib2(opts, cb) {
+        this.c = adler();
+        this.v = 1;
+        Deflate.call(this, opts, cb);
+      }
+      Zlib2.prototype.push = function(chunk, final) {
+        this.c.p(chunk);
+        Deflate.prototype.push.call(this, chunk, final);
+      };
+      Zlib2.prototype.p = function(c, f) {
+        var raw = dopt(c, this.o, this.v && (this.o.dictionary ? 6 : 2), f && 4, this.s);
+        if (this.v)
+          zlh(raw, this.o), this.v = 0;
+        if (f)
+          wbytes(raw, raw.length - 4, this.c.d());
+        this.ondata(raw, f);
+      };
+      Zlib2.prototype.flush = function(sync) {
+        Deflate.prototype.flush.call(this, sync);
+      };
+      return Zlib2;
+    })();
+    exports2.Zlib = Zlib;
+    var AsyncZlib = /* @__PURE__ */ (function() {
+      function AsyncZlib2(opts, cb) {
+        astrmify([
+          bDflt,
+          zle,
+          function() {
+            return [astrm, Deflate, Zlib];
+          }
+        ], this, StrmOpt.call(this, opts, cb), function(ev) {
+          var strm = new Zlib(ev.data);
+          onmessage = astrm(strm);
+        }, 10, 1);
+      }
+      return AsyncZlib2;
+    })();
+    exports2.AsyncZlib = AsyncZlib;
+    function zlib(data, opts, cb) {
+      if (!cb)
+        cb = opts, opts = {};
+      if (typeof cb != "function")
+        err(7);
+      return cbify(data, opts, [
+        bDflt,
+        zle,
+        function() {
+          return [zlibSync];
+        }
+      ], function(ev) {
+        return pbf(zlibSync(ev.data[0], ev.data[1]));
+      }, 4, cb);
+    }
+    function zlibSync(data, opts) {
+      if (!opts)
+        opts = {};
+      var a = adler();
+      a.p(data);
+      var d = dopt(data, opts, opts.dictionary ? 6 : 2, 4);
+      return zlh(d, opts), wbytes(d, d.length - 4, a.d()), d;
+    }
+    var Unzlib = /* @__PURE__ */ (function() {
+      function Unzlib2(opts, cb) {
+        Inflate.call(this, opts, cb);
+        this.v = opts && opts.dictionary ? 2 : 1;
+      }
+      Unzlib2.prototype.push = function(chunk, final) {
+        Inflate.prototype.e.call(this, chunk);
+        if (this.v) {
+          if (this.p.length < 6 && !final)
+            return;
+          this.p = this.p.subarray(zls(this.p, this.v - 1)), this.v = 0;
+        }
+        if (final) {
+          if (this.p.length < 4)
+            err(6, "invalid zlib data");
+          this.p = this.p.subarray(0, -4);
+        }
+        Inflate.prototype.c.call(this, final);
+      };
+      return Unzlib2;
+    })();
+    exports2.Unzlib = Unzlib;
+    var AsyncUnzlib = /* @__PURE__ */ (function() {
+      function AsyncUnzlib2(opts, cb) {
+        astrmify([
+          bInflt,
+          zule,
+          function() {
+            return [astrm, Inflate, Unzlib];
+          }
+        ], this, StrmOpt.call(this, opts, cb), function(ev) {
+          var strm = new Unzlib(ev.data);
+          onmessage = astrm(strm);
+        }, 11, 0);
+      }
+      return AsyncUnzlib2;
+    })();
+    exports2.AsyncUnzlib = AsyncUnzlib;
+    function unzlib(data, opts, cb) {
+      if (!cb)
+        cb = opts, opts = {};
+      if (typeof cb != "function")
+        err(7);
+      return cbify(data, opts, [
+        bInflt,
+        zule,
+        function() {
+          return [unzlibSync];
+        }
+      ], function(ev) {
+        return pbf(unzlibSync(ev.data[0], gopt(ev.data[1])));
+      }, 5, cb);
+    }
+    function unzlibSync(data, opts) {
+      return inflt(data.subarray(zls(data, opts && opts.dictionary), -4), { i: 2 }, opts && opts.out, opts && opts.dictionary);
+    }
+    var Decompress = /* @__PURE__ */ (function() {
+      function Decompress2(opts, cb) {
+        this.o = StrmOpt.call(this, opts, cb) || {};
+        this.G = Gunzip;
+        this.I = Inflate;
+        this.Z = Unzlib;
+      }
+      Decompress2.prototype.i = function() {
+        var _this = this;
+        this.s.ondata = function(dat, final) {
+          _this.ondata(dat, final);
+        };
+      };
+      Decompress2.prototype.push = function(chunk, final) {
+        if (!this.ondata)
+          err(5);
+        if (!this.s) {
+          if (this.p && this.p.length) {
+            var n = new u8(this.p.length + chunk.length);
+            n.set(this.p), n.set(chunk, this.p.length);
+          } else
+            this.p = chunk;
+          if (this.p.length > 2) {
+            this.s = this.p[0] == 31 && this.p[1] == 139 && this.p[2] == 8 ? new this.G(this.o) : (this.p[0] & 15) != 8 || this.p[0] >> 4 > 7 || (this.p[0] << 8 | this.p[1]) % 31 ? new this.I(this.o) : new this.Z(this.o);
+            this.i();
+            this.s.push(this.p, final);
+            this.p = null;
+          }
+        } else
+          this.s.push(chunk, final);
+      };
+      return Decompress2;
+    })();
+    exports2.Decompress = Decompress;
+    var AsyncDecompress = /* @__PURE__ */ (function() {
+      function AsyncDecompress2(opts, cb) {
+        Decompress.call(this, opts, cb);
+        this.queuedSize = 0;
+        this.G = AsyncGunzip;
+        this.I = AsyncInflate;
+        this.Z = AsyncUnzlib;
+      }
+      AsyncDecompress2.prototype.i = function() {
+        var _this = this;
+        this.s.ondata = function(err2, dat, final) {
+          _this.ondata(err2, dat, final);
+        };
+        this.s.ondrain = function(size) {
+          _this.queuedSize -= size;
+          if (_this.ondrain)
+            _this.ondrain(size);
+        };
+      };
+      AsyncDecompress2.prototype.push = function(chunk, final) {
+        this.queuedSize += chunk.length;
+        Decompress.prototype.push.call(this, chunk, final);
+      };
+      return AsyncDecompress2;
+    })();
+    exports2.AsyncDecompress = AsyncDecompress;
+    function decompress(data, opts, cb) {
+      if (!cb)
+        cb = opts, opts = {};
+      if (typeof cb != "function")
+        err(7);
+      return data[0] == 31 && data[1] == 139 && data[2] == 8 ? gunzip(data, opts, cb) : (data[0] & 15) != 8 || data[0] >> 4 > 7 || (data[0] << 8 | data[1]) % 31 ? inflate(data, opts, cb) : unzlib(data, opts, cb);
+    }
+    function decompressSync(data, opts) {
+      return data[0] == 31 && data[1] == 139 && data[2] == 8 ? gunzipSync(data, opts) : (data[0] & 15) != 8 || data[0] >> 4 > 7 || (data[0] << 8 | data[1]) % 31 ? inflateSync(data, opts) : unzlibSync(data, opts);
+    }
+    var fltn = function(d, p, t, o) {
+      for (var k in d) {
+        var val = d[k], n = p + k, op = o;
+        if (Array.isArray(val))
+          op = mrg(o, val[1]), val = val[0];
+        if (ArrayBuffer.isView(val))
+          t[n] = [val, op];
+        else {
+          t[n += "/"] = [new u8(0), op];
+          fltn(val, n, t, o);
+        }
+      }
+    };
+    var te = typeof TextEncoder != "undefined" && /* @__PURE__ */ new TextEncoder();
+    var td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder();
+    var tds = 0;
+    try {
+      td.decode(et, { stream: true });
+      tds = 1;
+    } catch (e) {
+    }
+    var dutf8 = function(d) {
+      for (var r = "", i2 = 0; ; ) {
+        var c = d[i2++];
+        var eb = (c > 127) + (c > 223) + (c > 239);
+        if (i2 + eb > d.length)
+          return { s: r, r: slc(d, i2 - 1) };
+        if (!eb)
+          r += String.fromCharCode(c);
+        else if (eb == 3) {
+          c = ((c & 15) << 18 | (d[i2++] & 63) << 12 | (d[i2++] & 63) << 6 | d[i2++] & 63) - 65536, r += String.fromCharCode(55296 | c >> 10, 56320 | c & 1023);
+        } else if (eb & 1)
+          r += String.fromCharCode((c & 31) << 6 | d[i2++] & 63);
+        else
+          r += String.fromCharCode((c & 15) << 12 | (d[i2++] & 63) << 6 | d[i2++] & 63);
+      }
+    };
+    var DecodeUTF8 = /* @__PURE__ */ (function() {
+      function DecodeUTF82(cb) {
+        this.ondata = cb;
+        if (tds)
+          this.t = new TextDecoder();
+        else
+          this.p = et;
+      }
+      DecodeUTF82.prototype.push = function(chunk, final) {
+        if (!this.ondata)
+          err(5);
+        final = !!final;
+        if (this.t) {
+          this.ondata(this.t.decode(chunk, { stream: true }), final);
+          if (final) {
+            if (this.t.decode().length)
+              err(8);
+            this.t = null;
+          }
+          return;
+        }
+        if (!this.p)
+          err(4);
+        var dat = new u8(this.p.length + chunk.length);
+        dat.set(this.p);
+        dat.set(chunk, this.p.length);
+        var _a2 = dutf8(dat), s = _a2.s, r = _a2.r;
+        if (final) {
+          if (r.length)
+            err(8);
+          this.p = null;
+        } else
+          this.p = r;
+        this.ondata(s, final);
+      };
+      return DecodeUTF82;
+    })();
+    exports2.DecodeUTF8 = DecodeUTF8;
+    var EncodeUTF8 = /* @__PURE__ */ (function() {
+      function EncodeUTF82(cb) {
+        this.ondata = cb;
+      }
+      EncodeUTF82.prototype.push = function(chunk, final) {
+        if (!this.ondata)
+          err(5);
+        if (this.d)
+          err(4);
+        this.ondata(strToU8(chunk), this.d = final || false);
+      };
+      return EncodeUTF82;
+    })();
+    exports2.EncodeUTF8 = EncodeUTF8;
+    function strToU8(str, latin1) {
+      if (latin1) {
+        var ar_1 = new u8(str.length);
+        for (var i2 = 0; i2 < str.length; ++i2)
+          ar_1[i2] = str.charCodeAt(i2);
+        return ar_1;
+      }
+      if (te)
+        return te.encode(str);
+      var l = str.length;
+      var ar = new u8(str.length + (str.length >> 1));
+      var ai = 0;
+      var w = function(v) {
+        ar[ai++] = v;
+      };
+      for (var i2 = 0; i2 < l; ++i2) {
+        if (ai + 5 > ar.length) {
+          var n = new u8(ai + 8 + (l - i2 << 1));
+          n.set(ar);
+          ar = n;
+        }
+        var c = str.charCodeAt(i2);
+        if (c < 128 || latin1)
+          w(c);
+        else if (c < 2048)
+          w(192 | c >> 6), w(128 | c & 63);
+        else if (c > 55295 && c < 57344)
+          c = 65536 + (c & 1023 << 10) | str.charCodeAt(++i2) & 1023, w(240 | c >> 18), w(128 | c >> 12 & 63), w(128 | c >> 6 & 63), w(128 | c & 63);
+        else
+          w(224 | c >> 12), w(128 | c >> 6 & 63), w(128 | c & 63);
+      }
+      return slc(ar, 0, ai);
+    }
+    function strFromU8(dat, latin1) {
+      if (latin1) {
+        var r = "";
+        for (var i2 = 0; i2 < dat.length; i2 += 16384)
+          r += String.fromCharCode.apply(null, dat.subarray(i2, i2 + 16384));
+        return r;
+      } else if (td) {
+        return td.decode(dat);
+      } else {
+        var _a2 = dutf8(dat), s = _a2.s, r = _a2.r;
+        if (r.length)
+          err(8);
+        return s;
+      }
+    }
+    var dbf = function(l) {
+      return l == 1 ? 3 : l < 6 ? 2 : l == 9 ? 1 : 0;
+    };
+    var slzh = function(d, b) {
+      return b + 30 + b2(d, b + 26) + b2(d, b + 28);
+    };
+    var zh = function(d, b, z) {
+      var fnl = b2(d, b + 28), efl = b2(d, b + 30), fn = strFromU8(d.subarray(b + 46, b + 46 + fnl), !(b2(d, b + 8) & 2048)), es = b + 46 + fnl;
+      var _a2 = z64hs(d, es, efl, z, b4(d, b + 20), b4(d, b + 24), b4(d, b + 42)), sc = _a2[0], su = _a2[1], off = _a2[2];
+      return [b2(d, b + 10), sc, su, fn, es + efl + b2(d, b + 32), off];
+    };
+    var z64hs = function(d, b, l, z, sc, su, off) {
+      var nsc = sc == 4294967295, nsu = su == 4294967295, noff = off == 4294967295, e = b + l;
+      var nf = nsc + nsu + noff;
+      if (z && nf) {
+        for (; b + 4 < e; b += 4 + b2(d, b + 2)) {
+          if (b2(d, b) == 1) {
+            return [
+              nsc ? b8(d, b + 4 + 8 * nsu) : sc,
+              nsu ? b8(d, b + 4) : su,
+              noff ? b8(d, b + 4 + 8 * (nsu + nsc)) : off,
+              1
+            ];
+          }
+        }
+        if (z < 2)
+          err(13);
+      }
+      return [sc, su, off, 0];
+    };
+    var exfl = function(ex) {
+      var le = 0;
+      if (ex) {
+        for (var k in ex) {
+          var l = ex[k].length;
+          if (l > 65535)
+            err(9);
+          le += l + 4;
+        }
+      }
+      return le;
+    };
+    var wzh = function(d, b, f, fn, u, c, ce, co) {
+      var fl2 = fn.length, ex = f.extra, col = co && co.length;
+      var exl = exfl(ex);
+      wbytes(d, b, ce != null ? 33639248 : 67324752), b += 4;
+      if (ce != null)
+        d[b++] = 20, d[b++] = f.os;
+      d[b] = 20, b += 2;
+      d[b++] = f.flag << 1 | (c < 0 && 8), d[b++] = u && 8;
+      d[b++] = f.compression & 255, d[b++] = f.compression >> 8;
+      var dt = new Date(f.mtime == null ? Date.now() : f.mtime), y = dt.getFullYear() - 1980;
+      if (y < 0 || y > 119)
+        err(10);
+      wbytes(d, b, y << 25 | dt.getMonth() + 1 << 21 | dt.getDate() << 16 | dt.getHours() << 11 | dt.getMinutes() << 5 | dt.getSeconds() >> 1), b += 4;
+      if (c != -1) {
+        wbytes(d, b, f.crc);
+        wbytes(d, b + 4, c < 0 ? -c - 2 : c);
+        wbytes(d, b + 8, f.size);
+      }
+      wbytes(d, b + 12, fl2);
+      wbytes(d, b + 14, exl), b += 16;
+      if (ce != null) {
+        wbytes(d, b, col);
+        wbytes(d, b + 6, f.attrs);
+        wbytes(d, b + 10, ce), b += 14;
+      }
+      d.set(fn, b);
+      b += fl2;
+      if (exl) {
+        for (var k in ex) {
+          var exf = ex[k], l = exf.length;
+          wbytes(d, b, +k);
+          wbytes(d, b + 2, l);
+          d.set(exf, b + 4), b += 4 + l;
+        }
+      }
+      if (col)
+        d.set(co, b), b += col;
+      return b;
+    };
+    var wzf = function(o, b, c, d, e) {
+      wbytes(o, b, 101010256);
+      wbytes(o, b + 8, c);
+      wbytes(o, b + 10, c);
+      wbytes(o, b + 12, d);
+      wbytes(o, b + 16, e);
+    };
+    var ZipPassThrough = /* @__PURE__ */ (function() {
+      function ZipPassThrough2(filename) {
+        this.filename = filename;
+        this.c = crc();
+        this.size = 0;
+        this.compression = 0;
+      }
+      ZipPassThrough2.prototype.process = function(chunk, final) {
+        this.ondata(null, chunk, final);
+      };
+      ZipPassThrough2.prototype.push = function(chunk, final) {
+        if (!this.ondata)
+          err(5);
+        this.c.p(chunk);
+        this.size += chunk.length;
+        if (final)
+          this.crc = this.c.d();
+        this.process(chunk, final || false);
+      };
+      return ZipPassThrough2;
+    })();
+    exports2.ZipPassThrough = ZipPassThrough;
+    var ZipDeflate = /* @__PURE__ */ (function() {
+      function ZipDeflate2(filename, opts) {
+        var _this = this;
+        if (!opts)
+          opts = {};
+        ZipPassThrough.call(this, filename);
+        this.d = new Deflate(opts, function(dat, final) {
+          _this.ondata(null, dat, final);
+        });
+        this.compression = 8;
+        this.flag = dbf(opts.level);
+      }
+      ZipDeflate2.prototype.process = function(chunk, final) {
+        try {
+          this.d.push(chunk, final);
+        } catch (e) {
+          this.ondata(e, null, final);
+        }
+      };
+      ZipDeflate2.prototype.push = function(chunk, final) {
+        ZipPassThrough.prototype.push.call(this, chunk, final);
+      };
+      return ZipDeflate2;
+    })();
+    exports2.ZipDeflate = ZipDeflate;
+    var AsyncZipDeflate = /* @__PURE__ */ (function() {
+      function AsyncZipDeflate2(filename, opts) {
+        var _this = this;
+        if (!opts)
+          opts = {};
+        ZipPassThrough.call(this, filename);
+        this.d = new AsyncDeflate(opts, function(err2, dat, final) {
+          _this.ondata(err2, dat, final);
+        });
+        this.compression = 8;
+        this.flag = dbf(opts.level);
+        this.terminate = this.d.terminate;
+      }
+      AsyncZipDeflate2.prototype.process = function(chunk, final) {
+        this.d.push(chunk, final);
+      };
+      AsyncZipDeflate2.prototype.push = function(chunk, final) {
+        ZipPassThrough.prototype.push.call(this, chunk, final);
+      };
+      return AsyncZipDeflate2;
+    })();
+    exports2.AsyncZipDeflate = AsyncZipDeflate;
+    var Zip = /* @__PURE__ */ (function() {
+      function Zip2(cb) {
+        this.ondata = cb;
+        this.u = [];
+        this.d = 1;
+      }
+      Zip2.prototype.add = function(file) {
+        var _this = this;
+        if (!this.ondata)
+          err(5);
+        if (this.d & 2)
+          this.ondata(err(4 + (this.d & 1) * 8, 0, 1), null, false);
+        else {
+          var f = strToU8(file.filename), fl_1 = f.length;
+          var com = file.comment, o = com && strToU8(com);
+          var u = fl_1 != file.filename.length || o && com.length != o.length;
+          var hl_1 = fl_1 + exfl(file.extra) + 30;
+          if (fl_1 > 65535)
+            this.ondata(err(11, 0, 1), null, false);
+          var header = new u8(hl_1);
+          wzh(header, 0, file, f, u, -1);
+          var chks_1 = [header];
+          var pAll_1 = function() {
+            for (var _i = 0, chks_2 = chks_1; _i < chks_2.length; _i++) {
+              var chk = chks_2[_i];
+              _this.ondata(null, chk, false);
+            }
+            chks_1 = [];
+          };
+          var tr_1 = this.d;
+          this.d = 0;
+          var ind_1 = this.u.length;
+          var uf_1 = mrg(file, {
+            f,
+            u,
+            o,
+            t: function() {
+              if (file.terminate)
+                file.terminate();
+            },
+            r: function() {
+              pAll_1();
+              if (tr_1) {
+                var nxt = _this.u[ind_1 + 1];
+                if (nxt)
+                  nxt.r();
+                else
+                  _this.d = 1;
+              }
+              tr_1 = 1;
+            }
+          });
+          var cl_1 = 0;
+          file.ondata = function(err2, dat, final) {
+            if (err2) {
+              _this.ondata(err2, dat, final);
+              _this.terminate();
+            } else {
+              cl_1 += dat.length;
+              chks_1.push(dat);
+              if (final) {
+                var dd = new u8(16);
+                wbytes(dd, 0, 134695760);
+                wbytes(dd, 4, file.crc);
+                wbytes(dd, 8, cl_1);
+                wbytes(dd, 12, file.size);
+                chks_1.push(dd);
+                uf_1.c = cl_1, uf_1.b = hl_1 + cl_1 + 16, uf_1.crc = file.crc, uf_1.size = file.size;
+                if (tr_1)
+                  uf_1.r();
+                tr_1 = 1;
+              } else if (tr_1)
+                pAll_1();
+            }
+          };
+          this.u.push(uf_1);
+        }
+      };
+      Zip2.prototype.end = function() {
+        var _this = this;
+        if (this.d & 2) {
+          this.ondata(err(4 + (this.d & 1) * 8, 0, 1), null, true);
+          return;
+        }
+        if (this.d)
+          this.e();
+        else
+          this.u.push({
+            r: function() {
+              if (!(_this.d & 1))
+                return;
+              _this.u.splice(-1, 1);
+              _this.e();
+            },
+            t: function() {
+            }
+          });
+        this.d = 3;
+      };
+      Zip2.prototype.e = function() {
+        var bt = 0, l = 0, tl = 0;
+        for (var _i = 0, _a2 = this.u; _i < _a2.length; _i++) {
+          var f = _a2[_i];
+          tl += 46 + f.f.length + exfl(f.extra) + (f.o ? f.o.length : 0);
+        }
+        var out = new u8(tl + 22);
+        for (var _b2 = 0, _c = this.u; _b2 < _c.length; _b2++) {
+          var f = _c[_b2];
+          wzh(out, bt, f, f.f, f.u, -f.c - 2, l, f.o);
+          bt += 46 + f.f.length + exfl(f.extra) + (f.o ? f.o.length : 0), l += f.b;
+        }
+        wzf(out, bt, this.u.length, tl, l);
+        this.ondata(null, out, true);
+        this.d = 2;
+      };
+      Zip2.prototype.terminate = function() {
+        for (var _i = 0, _a2 = this.u; _i < _a2.length; _i++) {
+          var f = _a2[_i];
+          f.t();
+        }
+        this.d = 2;
+      };
+      return Zip2;
+    })();
+    exports2.Zip = Zip;
+    function zip(data, opts, cb) {
+      if (!cb)
+        cb = opts, opts = {};
+      if (typeof cb != "function")
+        err(7);
+      var r = {};
+      fltn(data, "", r, opts);
+      var k = Object.keys(r);
+      var lft = k.length, o = 0, tot = 0;
+      var slft = lft, files = new Array(lft);
+      var term = [];
+      var tAll = function() {
+        for (var i3 = 0; i3 < term.length; ++i3)
+          term[i3]();
+      };
+      var cbd = function(a, b) {
+        mt(function() {
+          cb(a, b);
+        });
+      };
+      mt(function() {
+        cbd = cb;
+      });
+      var cbf = function() {
+        var out = new u8(tot + 22), oe = o, cdl = tot - o;
+        tot = 0;
+        for (var i3 = 0; i3 < slft; ++i3) {
+          var f = files[i3];
+          try {
+            var l = f.c.length;
+            wzh(out, tot, f, f.f, f.u, l);
+            var badd = 30 + f.f.length + exfl(f.extra);
+            var loc = tot + badd;
+            out.set(f.c, loc);
+            wzh(out, o, f, f.f, f.u, l, tot, f.m), o += 16 + badd + (f.m ? f.m.length : 0), tot = loc + l;
+          } catch (e) {
+            return cbd(e, null);
+          }
+        }
+        wzf(out, o, files.length, cdl, oe);
+        cbd(null, out);
+      };
+      if (!lft)
+        cbf();
+      var _loop_1 = function(i3) {
+        var fn = k[i3];
+        var _a2 = r[fn], file = _a2[0], p = _a2[1];
+        var c = crc(), size = file.length;
+        c.p(file);
+        var f = strToU8(fn), s = f.length;
+        var com = p.comment, m = com && strToU8(com), ms = m && m.length;
+        var exl = exfl(p.extra);
+        var compression = p.level == 0 ? 0 : 8;
+        var cbl = function(e, d) {
+          if (e) {
+            tAll();
+            cbd(e, null);
+          } else {
+            var l = d.length;
+            files[i3] = mrg(p, {
+              size,
+              crc: c.d(),
+              c: d,
+              f,
+              m,
+              u: s != fn.length || m && com.length != ms,
+              compression
+            });
+            o += 30 + s + exl + l;
+            tot += 76 + 2 * (s + exl) + (ms || 0) + l;
+            if (!--lft)
+              cbf();
+          }
+        };
+        if (s > 65535)
+          cbl(err(11, 0, 1), null);
+        if (!compression)
+          cbl(null, file);
+        else if (size < 16e4) {
+          try {
+            cbl(null, deflateSync(file, p));
+          } catch (e) {
+            cbl(e, null);
+          }
+        } else
+          term.push(deflate(file, p, cbl));
+      };
+      for (var i2 = 0; i2 < slft; ++i2) {
+        _loop_1(i2);
+      }
+      return tAll;
+    }
+    function zipSync(data, opts) {
+      if (!opts)
+        opts = {};
+      var r = {};
+      var files = [];
+      fltn(data, "", r, opts);
+      var o = 0;
+      var tot = 0;
+      for (var fn in r) {
+        var _a2 = r[fn], file = _a2[0], p = _a2[1];
+        var compression = p.level == 0 ? 0 : 8;
+        var f = strToU8(fn), s = f.length;
+        var com = p.comment, m = com && strToU8(com), ms = m && m.length;
+        var exl = exfl(p.extra);
+        if (s > 65535)
+          err(11);
+        var d = compression ? deflateSync(file, p) : file, l = d.length;
+        var c = crc();
+        c.p(file);
+        files.push(mrg(p, {
+          size: file.length,
+          crc: c.d(),
+          c: d,
+          f,
+          m,
+          u: s != fn.length || m && com.length != ms,
+          o,
+          compression
+        }));
+        o += 30 + s + exl + l;
+        tot += 76 + 2 * (s + exl) + (ms || 0) + l;
+      }
+      var out = new u8(tot + 22), oe = o, cdl = tot - o;
+      for (var i2 = 0; i2 < files.length; ++i2) {
+        var f = files[i2];
+        wzh(out, f.o, f, f.f, f.u, f.c.length);
+        var badd = 30 + f.f.length + exfl(f.extra);
+        out.set(f.c, f.o + badd);
+        wzh(out, o, f, f.f, f.u, f.c.length, f.o, f.m), o += 16 + badd + (f.m ? f.m.length : 0);
+      }
+      wzf(out, o, files.length, cdl, oe);
+      return out;
+    }
+    var UnzipPassThrough = /* @__PURE__ */ (function() {
+      function UnzipPassThrough2() {
+      }
+      UnzipPassThrough2.prototype.push = function(chunk, final) {
+        this.ondata(null, chunk, final);
+      };
+      UnzipPassThrough2.compression = 0;
+      return UnzipPassThrough2;
+    })();
+    exports2.UnzipPassThrough = UnzipPassThrough;
+    var UnzipInflate = /* @__PURE__ */ (function() {
+      function UnzipInflate2() {
+        var _this = this;
+        this.i = new Inflate(function(dat, final) {
+          _this.ondata(null, dat, final);
+        });
+      }
+      UnzipInflate2.prototype.push = function(chunk, final) {
+        try {
+          this.i.push(chunk, final);
+        } catch (e) {
+          this.ondata(e, null, final);
+        }
+      };
+      UnzipInflate2.compression = 8;
+      return UnzipInflate2;
+    })();
+    exports2.UnzipInflate = UnzipInflate;
+    var AsyncUnzipInflate = /* @__PURE__ */ (function() {
+      function AsyncUnzipInflate2(_, sz) {
+        var _this = this;
+        if (sz < 32e4) {
+          this.i = new Inflate(function(dat, final) {
+            _this.ondata(null, dat, final);
+          });
+        } else {
+          this.i = new AsyncInflate(function(err2, dat, final) {
+            _this.ondata(err2, dat, final);
+          });
+          this.terminate = this.i.terminate;
+        }
+      }
+      AsyncUnzipInflate2.prototype.push = function(chunk, final) {
+        if (this.i.terminate)
+          chunk = slc(chunk, 0);
+        this.i.push(chunk, final);
+      };
+      AsyncUnzipInflate2.compression = 8;
+      return AsyncUnzipInflate2;
+    })();
+    exports2.AsyncUnzipInflate = AsyncUnzipInflate;
+    var Unzip = /* @__PURE__ */ (function() {
+      function Unzip2(cb) {
+        this.onfile = cb;
+        this.k = [];
+        this.o = {
+          0: UnzipPassThrough
+        };
+        this.p = et;
+      }
+      Unzip2.prototype.push = function(chunk, final) {
+        var _this = this;
+        if (!this.onfile)
+          err(5);
+        if (!this.p)
+          err(4);
+        if (this.c > 0) {
+          var len = Math.min(this.c, chunk.length);
+          var toAdd = chunk.subarray(0, len);
+          this.c -= len;
+          if (this.d)
+            this.d.push(toAdd, !this.c);
+          else
+            this.k[0].push(toAdd);
+          chunk = chunk.subarray(len);
+          if (chunk.length)
+            return this.push(chunk, final);
+        } else {
+          var f = 0, i2 = 0, is = void 0, buf = void 0;
+          if (!this.p.length)
+            buf = chunk;
+          else if (!chunk.length)
+            buf = this.p;
+          else {
+            buf = new u8(this.p.length + chunk.length);
+            buf.set(this.p), buf.set(chunk, this.p.length);
+          }
+          var l = buf.length, oc = this.c, add = oc && this.d;
+          var _loop_2 = function() {
+            var sig = b4(buf, i2);
+            if (sig == 67324752) {
+              f = 1, is = i2;
+              this_1.d = null;
+              this_1.c = 0;
+              var bf = b2(buf, i2 + 6), cmp_1 = b2(buf, i2 + 8), u = bf & 2048, dd = bf & 8, fnl = b2(buf, i2 + 26), es = b2(buf, i2 + 28);
+              if (l > i2 + 30 + fnl + es) {
+                var chks_3 = [];
+                this_1.k.unshift(chks_3);
+                f = 2;
+                var lsc = b4(buf, i2 + 18), lsu = b4(buf, i2 + 22);
+                var fn_1 = strFromU8(buf.subarray(i2 + 30, i2 += 30 + fnl), !u);
+                var _a2 = z64hs(buf, i2, es, 2, lsc, lsu, 0), sc_1 = _a2[0], su_1 = _a2[1], z64 = _a2[3];
+                if (dd)
+                  sc_1 = -1 - z64;
+                i2 += es;
+                this_1.c = sc_1;
+                var d_1;
+                var file_1 = {
+                  name: fn_1,
+                  compression: cmp_1,
+                  start: function() {
+                    if (!file_1.ondata)
+                      err(5);
+                    if (!sc_1)
+                      file_1.ondata(null, et, true);
+                    else {
+                      var ctr = _this.o[cmp_1];
+                      if (!ctr)
+                        file_1.ondata(err(14, "unknown compression type " + cmp_1, 1), null, false);
+                      d_1 = sc_1 < 0 ? new ctr(fn_1) : new ctr(fn_1, sc_1, su_1);
+                      d_1.ondata = function(err2, dat3, final2) {
+                        file_1.ondata(err2, dat3, final2);
+                      };
+                      for (var _i = 0, chks_4 = chks_3; _i < chks_4.length; _i++) {
+                        var dat2 = chks_4[_i];
+                        d_1.push(dat2, false);
+                      }
+                      if (_this.k[0] == chks_3 && _this.c)
+                        _this.d = d_1;
+                      else
+                        d_1.push(et, true);
+                    }
+                  },
+                  terminate: function() {
+                    if (d_1 && d_1.terminate)
+                      d_1.terminate();
+                  }
+                };
+                if (sc_1 >= 0)
+                  file_1.size = sc_1, file_1.originalSize = su_1;
+                this_1.onfile(file_1);
+              }
+              return "break";
+            } else if (oc) {
+              if (sig == 134695760) {
+                is = i2 += 12 + (oc == -2 && 8), f = 3, this_1.c = 0;
+                return "break";
+              } else if (sig == 33639248) {
+                is = i2 -= 4, f = 3, this_1.c = 0;
+                return "break";
+              }
+            }
+          };
+          var this_1 = this;
+          for (; i2 < l - 4; ++i2) {
+            var state_1 = _loop_2();
+            if (state_1 === "break")
+              break;
+          }
+          this.p = et;
+          if (oc < 0) {
+            var dat = f ? buf.subarray(0, is - 12 - (oc == -2 && 8) - (b4(buf, is - 16) == 134695760 && 4)) : buf.subarray(0, i2);
+            if (add)
+              add.push(dat, !!f);
+            else
+              this.k[+(f == 2)].push(dat);
+          }
+          if (f & 2)
+            return this.push(buf.subarray(i2), final);
+          this.p = buf.subarray(i2);
+        }
+        if (final) {
+          if (this.c)
+            err(13);
+          this.p = null;
+        }
+      };
+      Unzip2.prototype.register = function(decoder) {
+        this.o[decoder.compression] = decoder;
+      };
+      return Unzip2;
+    })();
+    exports2.Unzip = Unzip;
+    var mt = typeof queueMicrotask == "function" ? queueMicrotask : typeof setTimeout == "function" ? setTimeout : function(fn) {
+      fn();
+    };
+    function unzip(data, opts, cb) {
+      if (!cb)
+        cb = opts, opts = {};
+      if (typeof cb != "function")
+        err(7);
+      var term = [];
+      var tAll = function() {
+        for (var i3 = 0; i3 < term.length; ++i3)
+          term[i3]();
+      };
+      var files = {};
+      var cbd = function(a, b) {
+        mt(function() {
+          cb(a, b);
+        });
+      };
+      mt(function() {
+        cbd = cb;
+      });
+      var e = data.length - 22;
+      for (; b4(data, e) != 101010256; --e) {
+        if (!e || data.length - e > 65558) {
+          cbd(err(13, 0, 1), null);
+          return tAll;
+        }
+      }
+      ;
+      var lft = b2(data, e + 8);
+      if (lft) {
+        var c = lft;
+        var o = b4(data, e + 16);
+        var z = b4(data, e - 20) == 117853008;
+        if (z) {
+          var ze = b4(data, e - 12);
+          z = b4(data, ze) == 101075792;
+          if (z) {
+            c = lft = b4(data, ze + 32);
+            o = b4(data, ze + 48);
+          }
+        }
+        var fltr = opts && opts.filter;
+        var _loop_3 = function(i3) {
+          var _a2 = zh(data, o, z), c_1 = _a2[0], sc = _a2[1], su = _a2[2], fn = _a2[3], no = _a2[4], off = _a2[5], b = slzh(data, off);
+          o = no;
+          var cbl = function(e2, d) {
+            if (e2) {
+              tAll();
+              cbd(e2, null);
+            } else {
+              if (d)
+                files[fn] = d;
+              if (!--lft)
+                cbd(null, files);
+            }
+          };
+          if (!fltr || fltr({
+            name: fn,
+            size: sc,
+            originalSize: su,
+            compression: c_1
+          })) {
+            if (!c_1)
+              cbl(null, slc(data, b, b + sc));
+            else if (c_1 == 8) {
+              var infl = data.subarray(b, b + sc);
+              if (su < 524288 || sc > 0.8 * su) {
+                try {
+                  cbl(null, inflateSync(infl, { out: new u8(su) }));
+                } catch (e2) {
+                  cbl(e2, null);
+                }
+              } else
+                term.push(inflate(infl, { size: su }, cbl));
+            } else
+              cbl(err(14, "unknown compression type " + c_1, 1), null);
+          } else
+            cbl(null, null);
+        };
+        for (var i2 = 0; i2 < c; ++i2) {
+          _loop_3(i2);
+        }
+      } else
+        cbd(null, {});
+      return tAll;
+    }
+    function unzipSync(data, opts) {
+      var files = {};
+      var e = data.length - 22;
+      for (; b4(data, e) != 101010256; --e) {
+        if (!e || data.length - e > 65558)
+          err(13);
+      }
+      ;
+      var c = b2(data, e + 8);
+      if (!c)
+        return {};
+      var o = b4(data, e + 16);
+      var z = b4(data, e - 20) == 117853008;
+      if (z) {
+        var ze = b4(data, e - 12);
+        z = b4(data, ze) == 101075792;
+        if (z) {
+          c = b4(data, ze + 32);
+          o = b4(data, ze + 48);
+        }
+      }
+      var fltr = opts && opts.filter;
+      for (var i2 = 0; i2 < c; ++i2) {
+        var _a2 = zh(data, o, z), c_2 = _a2[0], sc = _a2[1], su = _a2[2], fn = _a2[3], no = _a2[4], off = _a2[5], b = slzh(data, off);
+        o = no;
+        if (!fltr || fltr({
+          name: fn,
+          size: sc,
+          originalSize: su,
+          compression: c_2
+        })) {
+          if (!c_2)
+            files[fn] = slc(data, b, b + sc);
+          else if (c_2 == 8)
+            files[fn] = inflateSync(data.subarray(b, b + sc), { out: new u8(su) });
+          else
+            err(14, "unknown compression type " + c_2);
+        }
+      }
+      return files;
+    }
+  }
+});
+
+// src/project-sync/downloads.js
+var require_downloads = __commonJS({
+  "src/project-sync/downloads.js"(exports2, module2) {
+    var { Unzip, UnzipInflate } = require_node();
+    var { asBytes, sha256, validateContentPath, MAX_ARCHIVE_BYTES } = require_validation();
+    var checkCancelled = (signal) => {
+      if (signal?.aborted) {
+        const error = new Error("文库同步已取消。");
+        error.name = "AbortError";
+        throw error;
+      }
+    };
+    var fetchBytes = async (transport, url, { signal, maxBytes }) => {
+      checkCancelled(signal);
+      const result = asBytes(await transport(url, { signal, maxBytes }));
+      checkCancelled(signal);
+      if (result.byteLength > maxBytes) throw new Error("文库下载超出大小限制。");
+      return result;
+    };
+    var verifyFile = (bytes, file) => {
+      if (bytes.byteLength !== file.size || sha256(bytes) !== file.sha256) throw new Error(`文件校验失败：${file.path}`);
+      return bytes;
+    };
+    var unpackArchive = async (bytes, files, signal) => {
+      checkCancelled(signal);
+      bytes = asBytes(bytes);
+      if (bytes.byteLength > MAX_ARCHIVE_BYTES) throw new Error("完整文库下载包超出大小限制。");
+      const expected = new Map(files.map((file) => [file.path, file]));
+      const totalExpected = files.reduce((total, file) => {
+        validateContentPath(file.path);
+        if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > 64 * 1024 * 1024) throw new Error("下载包的文件大小超出限制。");
+        return total + file.size;
+      }, 0);
+      if (expected.size !== files.length || totalExpected > 512 * 1024 * 1024) throw new Error("完整文库解压大小超出限制。");
+      const seen = /* @__PURE__ */ new Set();
+      const completed = /* @__PURE__ */ new Set();
+      const active = /* @__PURE__ */ new Set();
+      const result = /* @__PURE__ */ Object.create(null);
+      let totalOutput = 0;
+      const stream = new Unzip((entry) => {
+        checkCancelled(signal);
+        validateContentPath(entry.name);
+        const file = expected.get(entry.name);
+        if (!file || seen.has(entry.name) || entry.originalSize !== void 0 && entry.originalSize !== file.size || entry.size !== void 0 && entry.size > bytes.byteLength) throw new Error(`下载包中的文件不符合清单：${entry.name}`);
+        seen.add(entry.name);
+        active.add(entry);
+        const output = new Uint8Array(file.size);
+        let written = 0;
+        entry.ondata = (error, chunk, final) => {
+          checkCancelled(signal);
+          if (error) throw error;
+          if (written + chunk.byteLength > file.size || totalOutput + chunk.byteLength > totalExpected) throw new Error(`下载包解压大小超出清单：${file.path}`);
+          output.set(chunk, written);
+          written += chunk.byteLength;
+          totalOutput += chunk.byteLength;
+          if (final) {
+            if (written !== file.size) throw new Error(`下载包文件长度错误：${file.path}`);
+            result[file.path] = verifyFile(output, file);
+            completed.add(file.path);
+            active.delete(entry);
+          }
+        };
+        entry.start();
+      });
+      stream.register(UnzipInflate);
+      try {
+        const chunkSize = 64 * 1024;
+        for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
+          checkCancelled(signal);
+          const end = Math.min(offset + chunkSize, bytes.byteLength);
+          stream.push(bytes.subarray(offset, end), end === bytes.byteLength);
+          if (end < bytes.byteLength) await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        checkCancelled(signal);
+        if (seen.size !== expected.size || completed.size !== expected.size || totalOutput !== totalExpected) throw new Error("完整下载包缺少清单中的文件。");
+        return result;
+      } finally {
+        for (const entry of active) entry.terminate();
+      }
+    };
+    var downloadArchive = async (transport, latest, files, signal) => {
+      const archive = await fetchBytes(transport, latest.archive_url, { signal, maxBytes: Math.min(MAX_ARCHIVE_BYTES, latest.archive_size) });
+      if (archive.byteLength !== latest.archive_size || sha256(archive) !== latest.archive_sha256) throw new Error("完整文库下载包校验失败。");
+      return unpackArchive(archive, files, signal);
+    };
+    module2.exports = { checkCancelled, fetchBytes, verifyFile, unpackArchive, downloadArchive };
+  }
+});
+
+// src/project-sync/transactions.js
+var require_transactions = __commonJS({
+  "src/project-sync/transactions.js"(exports2, module2) {
+    var { randomBytes } = require("crypto");
+    var { asBytes, sha256, encodeJson, parseJson, validateContentPath, validateVersion, HASH_RE } = require_validation();
+    var { checkCancelled } = require_downloads();
+    var readBytes = async (storage, path) => {
+      const value = await storage.read(path);
+      return value == null ? null : asBytes(value);
+    };
+    var digest = (bytes) => bytes == null ? null : sha256(bytes);
+    var readHash = async (storage, path) => digest(await readBytes(storage, path));
+    var localChangesError = (path, reason = "changed_during_sync") => Object.assign(new Error("文件已发生变化，识别到用户修改，已跳过同步。"), {
+      code: "LOCAL_CHANGES_DETECTED",
+      path,
+      reason
+    });
+    var assertUnchanged = async (storage, path, expectedHash) => {
+      if (await storage.hasUnsavedChanges?.(path, expectedHash)) throw localChangesError(path, "unsaved_changes");
+      if (await readHash(storage, path) !== expectedHash) throw localChangesError(path);
+    };
+    var backupPathFor = (stateDir, id, path) => `${stateDir}/transactions/${id}/backup/${sha256(Buffer.from(path))}.bin`;
+    var compareAndWrite = async (storage, path, expectedHash, data) => {
+      if (storage.compareAndWrite) return storage.compareAndWrite(path, expectedHash, data);
+      if (await readHash(storage, path) !== expectedHash) return false;
+      if (data == null) await storage.remove(path);
+      else await storage.write(path, data);
+      return true;
+    };
+    var removeIfPresent = async (storage, path) => {
+      if (await storage.read(path) != null) await storage.remove(path);
+    };
+    var emptyState = () => ({ schema_version: 2, version: null, manifest_sha256: null, files: {}, conflicts: [], local_deletions: {} });
+    var validateState = (state) => {
+      if (!state || ![1, 2].includes(state.schema_version) || !state.files || Array.isArray(state.files)) throw new Error("同步基线损坏；为保护本地文件，已停止同步。");
+      if (state.version != null) validateVersion(state.version);
+      for (const [path, hash] of Object.entries(state.files)) {
+        validateContentPath(path);
+        if (!HASH_RE.test(hash)) throw new Error("同步基线包含无效校验值，已停止同步。");
+      }
+      if (state.local_deletions && (typeof state.local_deletions !== "object" || Array.isArray(state.local_deletions))) throw new Error("本地删除记录损坏。");
+      for (const [path, hash] of Object.entries(state.local_deletions || {})) {
+        validateContentPath(path);
+        if (!HASH_RE.test(hash) || hash !== state.files[path]) throw new Error("本地删除基线记录损坏。");
+      }
+      if (state.conflicts !== void 0 && !Array.isArray(state.conflicts)) throw new Error("冲突记录损坏。");
+      return state;
+    };
+    var readState = async (storage, path) => {
+      const data = await readBytes(storage, path);
+      return data == null ? emptyState() : validateState(parseJson(data, "本地同步基线"));
+    };
+    var validateJournal = (journal, stateDir) => {
+      if (journal?.schema_version !== 1 || !Array.isArray(journal.entries) || !/^[a-zA-Z0-9-]+$/.test(journal.id || "")) throw new Error("同步恢复记录损坏，已停止同步。");
+      validateState(journal.previous_state);
+      for (const entry of journal.entries) {
+        validateContentPath(entry.path);
+        for (const value of [entry.beforeHash, entry.afterHash]) {
+          if (value !== null && !HASH_RE.test(value || "")) throw new Error("同步恢复校验记录损坏。");
+        }
+        if (entry.backupPath !== backupPathFor(stateDir, journal.id, entry.path)) throw new Error("同步恢复备份路径无效。");
+      }
+      return journal;
+    };
+    var rollback = async (storage, journal, entries = journal.entries) => {
+      const preserved = [];
+      for (const entry of [...entries].reverse()) {
+        if (entry.skipped) continue;
+        const before = entry.beforeHash === null ? null : await readBytes(storage, entry.backupPath);
+        if (digest(before) !== entry.beforeHash) throw new Error(`同步恢复备份损坏：${entry.path}`);
+        if (await readHash(storage, entry.path) === entry.beforeHash) continue;
+        if (!await compareAndWrite(storage, entry.path, entry.afterHash, before)) preserved.push(entry.path);
+      }
+      return preserved;
+    };
+    var cleanupTransaction = async (storage, stateDir, journal, retainedPaths = []) => {
+      const retained = new Set(retainedPaths);
+      for (const entry of journal.entries) {
+        if (!retained.has(entry.path)) await removeIfPresent(storage, entry.backupPath);
+      }
+      await removeIfPresent(storage, `${stateDir}/journal.json`);
+    };
+    var restorePreviousState = async (storage, stateDir, state) => {
+      await storage.write(`${stateDir}/state.json`, encodeJson(state));
+      await storage.write(`${stateDir}/conflicts.json`, encodeJson({
+        version: state.version,
+        generated_at: state.synced_at || null,
+        conflicts: state.conflicts || []
+      }));
+    };
+    var recoverTransaction = async (storage, stateDir, onProgress) => {
+      const journalPath = `${stateDir}/journal.json`;
+      const data = await readBytes(storage, journalPath);
+      if (!data) return;
+      const journal = validateJournal(parseJson(data, "同步恢复记录"), stateDir);
+      onProgress?.({ phase: "recovering", completed: 0, total: journal.entries.length });
+      let current = null;
+      try {
+        current = await readState(storage, `${stateDir}/state.json`);
+      } catch {
+      }
+      if (current?.last_transaction !== journal.id) {
+        const preserved = await rollback(storage, journal);
+        await restorePreviousState(storage, stateDir, journal.previous_state);
+        if (preserved.length) {
+          await storage.write(`${stateDir}/recovery-conflicts.json`, encodeJson({
+            paths: preserved,
+            transaction_id: journal.id,
+            backups: journal.entries.filter((entry) => preserved.includes(entry.path)),
+            recovered_at: (/* @__PURE__ */ new Date()).toISOString()
+          }));
+          await cleanupTransaction(storage, stateDir, journal, preserved);
+          return;
+        }
+      }
+      await cleanupTransaction(storage, stateDir, journal);
+    };
+    var prepareTransaction = async (storage, stateDir, plans, state, latest, signal, { rejectChanged = false } = {}) => {
+      const id = `${Date.now()}-${randomBytes(6).toString("hex")}`;
+      const entries = [];
+      for (const plan of plans.filter((entry) => entry.action !== "skip")) {
+        checkCancelled(signal);
+        if (rejectChanged) await assertUnchanged(storage, plan.path, plan.beforeHash);
+      }
+      for (const plan of plans.filter((entry) => ["add", "update", "merge", "resolve", "delete"].includes(entry.action))) {
+        checkCancelled(signal);
+        const before = await readBytes(storage, plan.path);
+        if (digest(before) !== plan.beforeHash) {
+          if (rejectChanged) throw localChangesError(plan.path);
+          plan.action = "conflict";
+          plan.kind = "changed_during_sync";
+          continue;
+        }
+        const backupPath = backupPathFor(stateDir, id, plan.path);
+        if (before !== null) await storage.write(backupPath, before);
+        entries.push({ path: plan.path, beforeHash: plan.beforeHash, afterHash: Object.hasOwn(plan, "afterHash") ? plan.afterHash : plan.file?.sha256 || null, backupPath });
+      }
+      const journal = { schema_version: 1, id, version: latest.version, previous_state: state, entries };
+      checkCancelled(signal);
+      await storage.write(`${stateDir}/journal.json`, encodeJson(journal));
+      return journal;
+    };
+    module2.exports = { readBytes, digest, readHash, localChangesError, assertUnchanged, backupPathFor, compareAndWrite, removeIfPresent, emptyState, validateState, readState, rollback, cleanupTransaction, restorePreviousState, recoverTransaction, prepareTransaction };
+  }
+});
+
+// src/project-sync/base-cache.js
+var require_base_cache = __commonJS({
+  "src/project-sync/base-cache.js"(exports2, module2) {
+    var { sha256, HASH_RE } = require_validation();
+    var { readBytes, digest } = require_transactions();
+    var basePathFor = (stateDir, hash) => {
+      if (!HASH_RE.test(hash || "")) throw new Error("无效的文库基线校验值。");
+      return `${stateDir}/bases/${hash}.bin`;
+    };
+    var readBase = async (storage, stateDir, hash) => {
+      if (!hash) return null;
+      const bytes = await readBytes(storage, basePathFor(stateDir, hash));
+      return digest(bytes) === hash ? bytes : null;
+    };
+    var cacheBase = async (storage, stateDir, hash, bytes) => {
+      if (bytes === null || sha256(bytes) !== hash) throw new Error("文库基线原文校验失败。");
+      if (await readBase(storage, stateDir, hash) === null) await storage.write(basePathFor(stateDir, hash), bytes);
+    };
+    var isTextPath = (path) => /\.(?:md|txt|csv)$/i.test(path) || path === "LICENSE";
+    module2.exports = { basePathFor, readBase, cacheBase, isTextPath };
+  }
+});
+
+// src/project-sync-obsidian.js
+var require_project_sync_obsidian = __commonJS({
+  "src/project-sync-obsidian.js"(exports2, module2) {
+    var { createHash, randomBytes } = require("crypto");
+    var fs = require("fs");
+    var nodePath = require("path");
+    var { isTextPath } = require_base_cache();
+    var digest = (bytes) => bytes === null ? null : createHash("sha256").update(bytes).digest("hex");
+    var arrayBuffer = (bytes) => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    var abortError = () => Object.assign(new Error("文库同步已取消。"), { name: "AbortError" });
+    var createProjectTransport2 = (requestUrl) => async (url, { signal, maxBytes = 256 * 1024 * 1024 } = {}) => {
+      if (signal?.aborted) throw abortError();
+      const timeoutMs = maxBytes > 10 * 1024 * 1024 ? 3e5 : 45e3;
+      let timer;
+      let onAbort;
+      try {
+        const stopped = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("下载文库超时，请检查网络后重试。")), timeoutMs);
+          onAbort = () => reject(abortError());
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+        const response = await Promise.race([
+          requestUrl({ url, method: "GET", headers: { "Cache-Control": "no-cache" }, throw: false }),
+          stopped
+        ]);
+        if (signal?.aborted) throw abortError();
+        if (response.status !== 200) throw new Error(`文库服务返回 HTTP ${response.status}。`);
+        const declared = Object.entries(response.headers || {}).find(([key]) => key.toLowerCase() === "content-length")?.[1];
+        if (Number(declared) > maxBytes) throw new Error("文库下载超出允许的大小。");
+        const bytes = new Uint8Array(response.arrayBuffer);
+        if (bytes.byteLength > maxBytes) throw new Error("文库下载超出允许的大小。");
+        return bytes;
+      } finally {
+        clearTimeout(timer);
+        if (onAbort) signal?.removeEventListener("abort", onAbort);
+      }
+    };
+    var createVaultSyncStorage2 = (vault, { getEditorTexts = () => [], isWriteBlocked = () => false } = {}) => {
+      const adapter = vault.adapter;
+      const basePath = adapter.getBasePath?.();
+      const configDir = vault.configDir || ".obsidian";
+      const stateRoot = `${configDir}/plugins/lacan-translation-helper/project-sync/`;
+      const internal = (path) => path.startsWith(stateRoot);
+      const validate = (path) => {
+        if (typeof path !== "string" || !path || /[\\:\x00-\x1f]/.test(path) || path.startsWith("/") || path.split("/").some((part) => !part || part === "." || part === "..")) {
+          throw new Error("不安全的文库文件路径。");
+        }
+        if (path.startsWith(`${configDir}/`) && !internal(path)) throw new Error("同步不能修改 Obsidian 配置。");
+        if (basePath) {
+          let current = internal(path) ? nodePath.join(basePath, stateRoot) : basePath;
+          const parts = internal(path) ? ["", ...path.slice(stateRoot.length).split("/")] : path.split("/");
+          for (const part of parts) {
+            current = nodePath.join(current, part);
+            try {
+              if (fs.lstatSync(current).isSymbolicLink()) throw new Error("同步路径包含符号链接，已停止以保护本地文件。");
+            } catch (error) {
+              if (error.code === "ENOENT") break;
+              throw error;
+            }
+          }
+        }
+        return path;
+      };
+      const ensureParents = async (path) => {
+        const parts = path.split("/");
+        parts.pop();
+        let parent = "";
+        for (const part of parts) {
+          parent = parent ? `${parent}/${part}` : part;
+          if (!await adapter.exists(parent)) await adapter.mkdir(parent);
+        }
+      };
+      const storage = {
+        hasUnsavedChanges(path, expectedHash) {
+          validate(path);
+          return !internal(path) && (isWriteBlocked(path) || getEditorTexts(path).some((text) => digest(Buffer.from(text, "utf8")) !== expectedHash));
+        },
+        async read(path) {
+          validate(path);
+          if (!await adapter.exists(path)) return null;
+          try {
+            return new Uint8Array(await adapter.readBinary(path));
+          } catch (error) {
+            if (["ENOENT", "ENOTDIR"].includes(error.code) && !await adapter.exists(path)) return null;
+            throw error;
+          }
+        },
+        async write(path, bytes) {
+          validate(path);
+          await ensureParents(path);
+          if (internal(path) && path.endsWith(".json")) {
+            if (!basePath && typeof adapter.rename !== "function") throw new Error("当前文库不支持安全保存同步状态。");
+            const temporary = `${path}.tmp-${randomBytes(6).toString("hex")}`;
+            try {
+              await adapter.writeBinary(temporary, arrayBuffer(bytes));
+              validate(path);
+              if (basePath) await fs.promises.rename(nodePath.join(basePath, temporary), nodePath.join(basePath, path));
+              else await adapter.rename(temporary, path);
+            } finally {
+              try {
+                if (await adapter.exists(temporary)) await adapter.remove(temporary);
+              } catch {
+              }
+            }
+            return;
+          }
+          const file = vault.getAbstractFileByPath?.(path);
+          if (!internal(path) && file && vault.modifyBinary) {
+            await vault.modifyBinary(file, arrayBuffer(bytes));
+          } else if (!internal(path) && !await adapter.exists(path) && vault.createBinary) {
+            await vault.createBinary(path, arrayBuffer(bytes));
+          } else {
+            await adapter.writeBinary(path, arrayBuffer(bytes));
+          }
+        },
+        async remove(path, guard = () => true) {
+          validate(path);
+          if (!await adapter.exists(path)) return;
+          const file = vault.getAbstractFileByPath?.(path);
+          if (!guard()) return false;
+          if (!internal(path) && file && vault.trash) await vault.trash(file, true);
+          else await adapter.remove(path);
+          return true;
+        },
+        async compareAndWrite(path, expectedHash, bytes) {
+          validate(path);
+          const editorsUnchanged = () => !isWriteBlocked(path) && getEditorTexts(path).every((text) => digest(Buffer.from(text, "utf8")) === expectedHash);
+          if (!internal(path) && !editorsUnchanged()) return false;
+          const file = vault.getAbstractFileByPath?.(path);
+          if (!internal(path) && file && isTextPath(path) && bytes !== null && expectedHash !== null && vault.process) {
+            let accepted = false;
+            const replacement = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+            await vault.process(file, (text) => {
+              if (!editorsUnchanged() || digest(Buffer.from(text, "utf8")) !== expectedHash) return text;
+              accepted = true;
+              return replacement;
+            });
+            return accepted;
+          }
+          if (digest(await storage.read(path)) !== expectedHash) return false;
+          if (!internal(path) && !editorsUnchanged()) return false;
+          if (bytes === null && expectedHash === null) return true;
+          if (bytes === null) {
+            const canRemove = () => internal(path) || editorsUnchanged() && getEditorTexts(path).length === 0;
+            if (!await storage.remove(path, canRemove)) return false;
+          } else if (expectedHash === null && !internal(path) && vault.createBinary) {
+            await ensureParents(path);
+            try {
+              await vault.createBinary(path, arrayBuffer(bytes));
+            } catch (error) {
+              const alreadyExists = error.code === "EEXIST" || !error.code && /^(?:File|Folder|Destination) already exists(?:[.!]|:.*)?$/i.test(error.message || "");
+              if (alreadyExists && await adapter.exists(path)) return false;
+              throw error;
+            }
+          } else await storage.write(path, bytes);
+          return true;
+        }
+      };
+      return storage;
+    };
+    module2.exports = { createProjectTransport: createProjectTransport2, createVaultSyncStorage: createVaultSyncStorage2 };
+  }
+});
+
+// src/plugin-http-request.js
+var require_plugin_http_request = __commonJS({
+  "src/plugin-http-request.js"(exports2, module2) {
+    var { randomBytes } = require("crypto");
+    var normalizeProxyUrl = (value) => {
+      const input = String(value || "").trim();
+      let url;
+      try {
+        url = new URL(input);
+      } catch {
+        throw new Error("请填写有效的 HTTP 代理地址，例如 http://127.0.0.1:7890。");
+      }
+      if (!/^https?:\/\/[^\s/?#\\]+\/?$/i.test(input) || !["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
+        throw new Error("代理地址仅支持 HTTP 或 HTTPS 主机和端口，不能包含账号、密码、路径或查询参数。");
+      }
+      return `${url.protocol}//${url.hostname}:${url.port || (url.protocol === "https:" ? "443" : "80")}`;
+    };
+    var makeResponse = (status, rawHeaders, bytes) => {
+      const headers = {};
+      for (const [key, value] of Object.entries(rawHeaders || {})) {
+        headers[key.toLowerCase()] = Array.isArray(value) ? value.join(", ") : String(value);
+      }
+      const response = {
+        status,
+        headers,
+        arrayBuffer: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+      };
+      let text;
+      let json;
+      let parsed = false;
+      Object.defineProperties(response, {
+        text: { enumerable: true, get: () => text ??= bytes.toString("utf8") },
+        json: { enumerable: true, get: () => {
+          if (!parsed) {
+            json = JSON.parse(response.text);
+            parsed = true;
+          }
+          return json;
+        } }
+      });
+      return response;
+    };
+    var requestBody = (body) => {
+      if (body === void 0 || body === null || typeof body === "string") return body;
+      if (body instanceof ArrayBuffer) return Buffer.from(body);
+      if (ArrayBuffer.isView(body)) return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+      throw new Error("网络请求正文必须为文本或二进制数据。");
+    };
+    var createPluginRequest2 = ({ requestUrl, getSettings, getElectron = () => require("electron").remote, requestTimeoutMs = 3e5 }) => {
+      const sessions = /* @__PURE__ */ new Map();
+      const active = /* @__PURE__ */ new Set();
+      const partitionPrefix = `lacan-translation-helper-http-${randomBytes(12).toString("hex")}`;
+      const timeoutMs = Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? requestTimeoutMs : 3e5;
+      let nextPartition = 0;
+      let disposed = false;
+      const getSession = (proxyRules) => {
+        if (sessions.has(proxyRules)) return sessions.get(proxyRules).ready;
+        const entry = {};
+        entry.ready = Promise.resolve().then(async () => {
+          if (disposed) throw new Error("插件网络请求已关闭。");
+          const electron = getElectron();
+          if (!electron?.session?.fromPartition || !electron?.net?.request) {
+            throw new Error("当前 Obsidian 不支持插件 HTTP 代理，请使用桌面端。");
+          }
+          entry.session = electron.session.fromPartition(`${partitionPrefix}-${++nextPartition}`, { cache: false });
+          await entry.session.setProxy({ mode: "fixed_servers", proxyRules, proxyBypassRules: "<-loopback>" });
+          if (disposed) throw new Error("插件网络请求已关闭。");
+          return { electron, session: entry.session };
+        }).catch((error) => {
+          if (sessions.get(proxyRules) === entry) sessions.delete(proxyRules);
+          Promise.resolve().then(() => entry.session?.closeAllConnections?.()).catch(() => {
+          });
+          throw error;
+        });
+        sessions.set(proxyRules, entry);
+        return entry.ready;
+      };
+      const pluginRequest = async (input) => {
+        if (disposed) throw new Error("插件网络请求已关闭。");
+        const settings = getSettings() || {};
+        if (!settings.pluginHttpProxyEnabled) return requestUrl(input);
+        const proxyRules = normalizeProxyUrl(settings.pluginHttpProxyUrl);
+        const options = typeof input === "string" ? { url: input } : input;
+        if (!options || typeof options.url !== "string" || !/^https?:\/\//i.test(options.url)) {
+          throw new Error("插件代理仅支持 HTTP 或 HTTPS 请求。");
+        }
+        const headers = { ...options.headers };
+        if (options.contentType && !Object.keys(headers).some((key) => key.toLowerCase() === "content-type")) {
+          headers["Content-Type"] = options.contentType;
+        }
+        const body = requestBody(options.body);
+        return new Promise((resolve, reject) => {
+          let request;
+          let response;
+          let chunks = [];
+          let settled = false;
+          let timer;
+          const finish = (error, result) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            active.delete(cancel);
+            response?.removeListener?.("data", onData);
+            response?.removeListener?.("end", onEnd);
+            chunks = [];
+            if (error) {
+              try {
+                request?.abort();
+              } catch {
+              }
+              reject(error);
+            } else resolve(result);
+          };
+          const cancel = () => finish(new Error("插件网络请求已取消。"));
+          const onData = (chunk) => {
+            if (settled) return;
+            try {
+              chunks.push(Buffer.from(chunk));
+            } catch (error) {
+              finish(error);
+            }
+          };
+          const onEnd = () => {
+            if (settled) return;
+            try {
+              const result = makeResponse(response.statusCode, response.headers, Buffer.concat(chunks));
+              if (options.throw !== false && result.status >= 400) {
+                const error = new Error(`Request failed, status ${result.status}`);
+                error.status = result.status;
+                finish(error);
+              } else finish(null, result);
+            } catch (error) {
+              finish(error);
+            }
+          };
+          active.add(cancel);
+          timer = setTimeout(() => finish(new Error("插件代理请求超时，请检查代理连接后重试。")), timeoutMs);
+          Promise.resolve().then(() => getSession(proxyRules)).then(({ electron, session }) => {
+            if (settled) return;
+            request = electron.net.request({
+              url: options.url,
+              method: options.method || "GET",
+              headers,
+              session,
+              redirect: "follow",
+              useSessionCookies: false
+            });
+            request.on("error", (error) => finish(error));
+            request.on("abort", () => finish(new Error("插件代理请求已中止。")));
+            request.on("login", (_authInfo, callback) => {
+              callback();
+              finish(new Error("代理要求身份认证，请使用无需认证的 HTTP 代理。"));
+            });
+            request.on("response", (incoming) => {
+              if (settled) return;
+              response = incoming;
+              response.on("error", (error) => finish(error));
+              response.on("aborted", () => finish(new Error("插件代理响应已中止。")));
+              response.on("end", onEnd);
+              response.on("data", onData);
+            });
+            if (body !== void 0 && body !== null) request.write(body);
+            if (!settled) request.end();
+          }).catch((error) => finish(error));
+        });
+      };
+      pluginRequest.dispose = async () => {
+        disposed = true;
+        for (const cancel of [...active]) cancel();
+        await Promise.allSettled([...sessions.values()].map((entry) => Promise.resolve().then(() => entry.session?.closeAllConnections?.())));
+        sessions.clear();
+      };
+      return pluginRequest;
+    };
+    module2.exports = { createPluginRequest: createPluginRequest2 };
+  }
+});
+
+// src/project-library-base.js
+var require_project_library_base = __commonJS({
+  "src/project-library-base.js"(exports2, module2) {
+    var PROJECT_BASE_PATH2 = "Lacan-Chinese-Translation-Project.base";
+    var PROJECT_BASE_CONTENT2 = `filters:
+  and:
+    - file.ext == "md"
+    - file.inFolder("texts")
+    - file.folder.contains("/original")
+    - file.name.startsWith("Leçon-") || file.name.startsWith("Lecon-") || file.name.startsWith("lesson-")
+formulas:
+  seminarSlug: file.path.split("/")[1]
+  seminarCode: formula.seminarSlug.split("-")[0].lower()
+  seminarOrder: number(formula.seminarCode.replace("s19b", "19.5").replace("s", ""))
+  seminarGroup: if(formula.seminarOrder < 10, "0" + formula.seminarOrder, "" + formula.seminarOrder) + " · " + formula.seminarSlug
+  lessonPadded: file.basename.replace("Leçon-", "").replace("Lecon-", "").replace("lesson-", "")
+  lessonNumber: number(formula.lessonPadded)
+  lessonId: formula.seminarCode + "-" + formula.lessonNumber
+  lessonTitle: formula.lessonId + " · Leçon " + formula.lessonPadded
+  originalPath: file.path
+  translationPath: file.path.replace("/original/", "/translation/")
+  notesIndexPath: '"texts/" + formula.seminarSlug + "/notes/README.md"'
+  translationFile: link(formula.translationPath).asFile()
+  translationStatus: if(formula.translationFile, "已有译文", "译文不存在")
+  translationProgress: if(formula.translationFile, formula.translationFile.properties.translation_progress, 0)
+  translationProgressLabel: if(formula.translationFile, formula.translationFile.properties.translation_progress_label, "0.00%")
+  untranslatedCount: if(formula.translationFile, formula.translationFile.properties.untranslated_count, "")
+  maxSegmentId: if(formula.translationFile, formula.translationFile.properties.max_segment_id, "")
+  original: link(formula.originalPath, "打开原文")
+  translation: link(formula.translationPath, if(formula.translationFile, "打开译文", "新建翻译"))
+  notes: link(formula.notesIndexPath, "阅读笔记")
+properties:
+  formula.lessonTitle:
+    displayName: Leçon
+  formula.lessonId:
+    displayName: 编号
+  formula.seminarSlug:
+    displayName: 研讨班
+  formula.seminarGroup:
+    displayName: 研讨班
+  formula.original:
+    displayName: 原文
+  formula.translation:
+    displayName: 译文
+  formula.notes:
+    displayName: 笔记
+  formula.originalPath:
+    displayName: 原文路径
+  formula.translationPath:
+    displayName: 译文路径
+  formula.notesIndexPath:
+    displayName: 笔记路径
+  formula.translationStatus:
+    displayName: 译文状态
+  formula.translationProgressLabel:
+    displayName: 翻译进度
+  formula.untranslatedCount:
+    displayName: 未译段落
+  formula.maxSegmentId:
+    displayName: 最大分段
+  file.mtime:
+    displayName: 原文最近修改
+views:
+  - type: lacan-lesson-list
+    name: 文本清单
+    groupBy:
+      property: formula.seminarGroup
+      direction: ASC
+    order: []
+    sort:
+      - property: formula.seminarOrder
+        direction: ASC
+      - property: formula.lessonNumber
+        direction: ASC
+`;
+    module2.exports = { PROJECT_BASE_PATH: PROJECT_BASE_PATH2, PROJECT_BASE_CONTENT: PROJECT_BASE_CONTENT2 };
+  }
+});
+
+// src/project-sync-status.js
+var require_project_sync_status = __commonJS({
+  "src/project-sync-status.js"(exports2, module2) {
+    var skipReasonText = ({ reason } = {}) => {
+      if (reason === "existing_local_file") return "本地文件与发布版本不同，且没有可信同步基线，已跳过。";
+      if (reason === "unsaved_changes") return "检测到未保存的编辑，已跳过同步。";
+      if (reason === "changed_during_sync") return "文件在同步过程中发生变化，已撤回本课更新并跳过。";
+      if (reason === "paired_file_modified") return "同课文件已有本地修改，本课原文和译文均已跳过。";
+      return "识别到当前文本已有用户修改，已跳过同步。";
+    };
+    var formatSkipNotice2 = (skippedFiles = []) => {
+      const triggers = skippedFiles.filter((entry) => entry.reason !== "paired_file_modified");
+      const paths = [...new Set((triggers.length ? triggers : skippedFiles).map((entry) => entry.triggerPath || entry.path))];
+      const message = skippedFiles.some((entry) => entry.reason === "unsaved_changes") ? "检测到未保存的编辑，已跳过本课同步。" : skippedFiles.some((entry) => entry.reason === "existing_local_file") ? "本地文本与发布版本存在差异，已跳过本课同步。" : "识别到当前文本已有用户修改，已跳过本课同步。";
+      const next = skippedFiles.some((entry) => entry.reason === "unsaved_changes") ? "请先保存或关闭未保存的编辑。需要重新同步时，请先保留修改副本，再删除上述本地文件后同步。" : "如需重新同步，请先保留修改副本，再删除上述本地文件后点击同步。";
+      return `${message}
+${paths.join("\n")}
+${next}`;
+    };
+    module2.exports = { skipReasonText, formatSkipNotice: formatSkipNotice2 };
+  }
+});
+
+// src/project-sync-report.js
+var require_project_sync_report = __commonJS({
+  "src/project-sync-report.js"(exports2, module2) {
+    var Obsidian2 = require("obsidian");
+    var Modal = Obsidian2.Modal || class {
+    };
+    var { skipReasonText } = require_project_sync_status();
+    var ProjectSyncReportModal2 = class extends Modal {
+      constructor(app, storage, report, { engine, onResolved, readOnly = false, skippedFiles = [], checkedVersion } = {}) {
+        super(app);
+        this.storage = storage;
+        this.report = report;
+        this.engine = engine;
+        this.onResolved = onResolved;
+        this.readOnly = readOnly;
+        this.skippedFiles = skippedFiles;
+        this.checkedVersion = checkedVersion;
+        this.sessions = /* @__PURE__ */ new Map();
+        this.requestId = 0;
+      }
+      onOpen() {
+        this.isClosed = false;
+        this.modalEl?.classList.add("lacan-sync-report-modal");
+        this.renderReport();
+      }
+      onClose() {
+        this.isClosed = true;
+        this.requestId += 1;
+      }
+      renderReport() {
+        if (this.readOnly) return this.renderReadOnlyReport();
+        this.titleEl.setText("文库同步与冲突比较");
+        const root = this.contentEl;
+        root.empty();
+        root.createEl("p", { text: `版本：${this.report.version || "未知"}`, cls: "lacan-sync-muted" });
+        root.createEl("p", { text: "冲突默认保留本地修改。可逐段比较并调整选择，确认保存后写入合并结果。", cls: "lacan-sync-help" });
+        const conflicts = this.report.conflicts || [];
+        if (!conflicts.length) root.createEl("p", { text: "本次没有冲突。" });
+        const list = root.createDiv("lacan-sync-conflict-list");
+        for (const conflict of conflicts) {
+          const row = list.createDiv("lacan-sync-conflict");
+          row.createEl("code", { text: conflict.path });
+          const actions = row.createDiv("lacan-sync-actions");
+          if (this.engine?.getConflictComparison) {
+            const compare = actions.createEl("button", { text: "比较与解决冲突" });
+            compare.addEventListener("click", () => {
+              void this.selectConflict(conflict);
+            });
+          }
+          this.addLocalButton(actions, conflict.path);
+          if (conflict.incomingPath) {
+            const incoming = actions.createEl("button", { text: "查看上游版本" });
+            incoming.addEventListener("click", () => {
+              void this.showIncoming(conflict).catch((error) => new Obsidian2.Notice(error.message));
+            });
+          }
+        }
+        this.detailEl = root.createDiv("lacan-sync-comparison");
+      }
+      renderReadOnlyReport() {
+        this.titleEl.setText("文库同步记录");
+        const root = this.contentEl;
+        root.empty();
+        root.createEl("p", { text: `最近检查版本：${this.checkedVersion || this.report.version || "未知"}`, cls: "lacan-sync-muted" });
+        root.createEl("p", { text: "检测到本地修改时整课跳过，不自动合并或覆盖。删除本地文件后再次同步，会重新下载。", cls: "lacan-sync-help" });
+        if (this.skippedFiles.length) {
+          root.createEl("h3", { text: "本次跳过的文件" });
+          const list = root.createDiv("lacan-sync-conflict-list");
+          for (const entry of this.skippedFiles) {
+            const row = list.createDiv("lacan-sync-conflict");
+            row.createEl("code", { text: entry.path });
+            row.createEl("p", { text: skipReasonText(entry) });
+            if (entry.triggerPath && entry.triggerPath !== entry.path) row.createEl("p", { text: `触发跳过的文件：${entry.triggerPath}`, cls: "lacan-sync-muted" });
+            this.addLocalButton(row.createDiv("lacan-sync-actions"), entry.path);
+          }
+          root.createEl("p", { text: "如需重新同步，请先保留修改副本，再删除有改动的本地文件后同步。" });
+        } else root.createEl("p", { text: "本次没有跳过文件。" });
+        const conflicts = this.report.conflicts || [];
+        if (conflicts.length) {
+          const history = root.createEl("details");
+          history.createEl("summary", { text: `旧版冲突记录（${conflicts.length}）` });
+          history.createEl("p", { text: "以下记录来自旧同步策略，继续保留供核对。本页只读，不执行合并、删除或覆盖。" });
+          for (const conflict of conflicts) {
+            const row = history.createDiv("lacan-sync-conflict");
+            row.createEl("code", { text: conflict.path });
+            row.createEl("p", { text: `原记录类型：${conflict.kind}`, cls: "lacan-sync-muted" });
+            this.addLocalButton(row.createDiv("lacan-sync-actions"), conflict.path);
+          }
+        }
+      }
+      addLocalButton(root, path) {
+        if (!this.app.vault.getAbstractFileByPath(path)) return;
+        const local = root.createEl("button", { text: "打开本地文件" });
+        local.addEventListener("click", () => {
+          void this.app.workspace.openLinkText(path, "", true).catch((error) => new Obsidian2.Notice(error.message));
+        });
+      }
+      async selectConflict(conflict, reload = false) {
+        const requestId = ++this.requestId;
+        this.detailEl.empty();
+        this.detailEl.createEl("p", { text: "正在读取比较内容…" });
+        try {
+          let session = this.sessions.get(conflict.path);
+          if (!session || reload) {
+            const comparison = await this.engine.getConflictComparison(conflict.path);
+            session = { conflict, comparison, choices: {}, manualValues: {}, activeHunk: 0, resultEdited: false, saving: false, error: "" };
+            this.sessions.set(conflict.path, session);
+          }
+          if (requestId === this.requestId) {
+            this.renderComparison(session);
+            this.detailEl.scrollIntoView?.({ block: "start" });
+          }
+        } catch (error) {
+          if (requestId !== this.requestId) return;
+          this.detailEl.empty();
+          this.detailEl.createEl("p", { text: error.message, cls: "lacan-sync-error" });
+        }
+      }
+      textPane(root, title, content, label, cls = "") {
+        const pane = root.createDiv(`lacan-sync-text-pane ${cls}`);
+        pane.createEl("h5", { text: title });
+        if (content === null) pane.createEl("p", { text: label.includes("基线") ? "没有可用的可信基线。" : "此版本没有该文件。", cls: "lacan-sync-muted" });
+        const area = pane.createEl("textarea", { cls: "lacan-sync-compare-text" });
+        area.readOnly = true;
+        area.value = content ?? "";
+        area.setAttribute("aria-label", label);
+        area.spellcheck = false;
+        area.rows = Math.max(5, Math.min(16, String(content ?? "").split("\n").length + 1));
+        area.wrap = "soft";
+        return area;
+      }
+      renderComparison(session) {
+        const root = this.detailEl;
+        root.empty();
+        const comparison = session.comparison;
+        root.createEl("h3", { text: comparison.path.split("/").at(-1) });
+        root.createEl("code", { text: comparison.path, cls: "lacan-sync-file-path" });
+        if (comparison.missingBase) root.createEl("p", { text: "缺少可信基线，无法判断哪一方改过。以下按段比较差异，默认保留本地内容。", cls: "lacan-sync-warning" });
+        const toolbar = root.createDiv("lacan-sync-actions");
+        const reload = toolbar.createEl("button", { text: "重新比较（放弃当前草稿）" });
+        session.reloadButton = reload;
+        reload.disabled = session.saving;
+        reload.addEventListener("click", () => {
+          void this.selectConflict(session.conflict, true);
+        });
+        this.addLocalButton(toolbar, comparison.path);
+        if (!comparison.canResolveText) {
+          root.createEl("p", { text: "此文件无法进行文本合并（附件或非 UTF-8 文本）。本地文件已保留，请另行比较附件；上游副本仍在同步缓存中。" });
+          if (session.conflict.incomingPath) root.createEl("code", { text: session.conflict.incomingPath });
+          return;
+        }
+        const full = root.createEl("details", { cls: "lacan-sync-full-comparison" });
+        full.createEl("summary", { text: "完整文件比较（基线／本地／上游）" });
+        const panes = full.createDiv("lacan-sync-compare-grid lacan-sync-full-grid");
+        this.textPane(panes, "基线：上次收到的上游原文", comparison.baseText, "基线完整内容（只读）");
+        this.textPane(panes, "本地：你的当前修改", comparison.localText, "本地完整内容（只读）");
+        this.textPane(panes, "上游：这次收到的新版", comparison.upstreamText, "上游完整内容（只读）");
+        session.fileDeletion = comparison.localText === null || comparison.upstreamText === null;
+        session.blocks = comparison.blocks || [];
+        const conflictEntries = session.blocks.map((block, index) => ({ block, index })).filter(({ block }) => block.conflict);
+        for (const { index } of conflictEntries) session.choices[index] ??= "local";
+        if (session.fileDeletion) session.fileChoice ??= "local";
+        session.choiceControls = [];
+        const conflicts = root.createDiv("lacan-sync-hunks");
+        session.activeHunk = Math.max(0, Math.min(session.activeHunk || 0, conflictEntries.length - 1));
+        if (conflictEntries.length) {
+          const navigation = conflicts.createDiv("lacan-sync-hunk-navigation");
+          navigation.createEl("span", { text: `冲突 ${session.activeHunk + 1} / ${conflictEntries.length}`, cls: "lacan-sync-hunk-count", attr: { "aria-live": "polite" } });
+          const pageActions = navigation.createDiv("lacan-sync-actions");
+          for (const [step, label] of [[-1, "上一处冲突"], [1, "下一处冲突"]]) {
+            const page = pageActions.createEl("button", { text: label });
+            page.disabled = session.saving || session.activeHunk + step < 0 || session.activeHunk + step >= conflictEntries.length;
+            page.addEventListener("click", () => {
+              session.activeHunk += step;
+              this.renderComparison(session);
+            });
+          }
+          const { block, index } = conflictEntries[session.activeHunk];
+          const number = session.activeHunk + 1;
+          const hunk = conflicts.createDiv("lacan-sync-hunk");
+          const ids = block.conflict.segmentIds || [];
+          const position = ids.length ? ids.join("、") : block.conflict.label || (Number.isInteger(block.conflict.oIndex) ? `基线第 ${block.conflict.oIndex + 1} 行附近` : `冲突 ${number}`);
+          hunk.createEl("h4", { text: position });
+          const grid = hunk.createDiv("lacan-sync-compare-grid");
+          this.textPane(grid, "本地 · 默认保留", block.conflict.a.join(""), `冲突 ${number} 本地（只读）`, "is-local");
+          this.textPane(grid, "上游", block.conflict.b.join(""), `冲突 ${number} 上游（只读）`);
+          const base = hunk.createEl("details", { cls: "lacan-sync-base-comparison" });
+          base.createEl("summary", { text: "查看此段基线" });
+          this.textPane(base, "基线", comparison.missingBase ? null : block.conflict.o.join(""), `冲突 ${number} 基线（只读）`);
+          if (session.fileDeletion) hunk.createEl("p", { text: "一方已删除文件。以下选择应用于整个文件，可翻页检查各段。", cls: "lacan-sync-warning" });
+          const actions2 = hunk.createDiv("lacan-sync-actions");
+          const labels = session.fileDeletion ? [["local", comparison.localText === null ? "保留本地删除" : "保留本地文件"], ["upstream", comparison.upstreamText === null ? "采用上游删除" : "采用上游文件"], ["manual", "手动填写完整文件"]] : [["local", "保留本地这一处"], ["upstream", "采用上游这一处"], ["manual", "手动填写这一处"]];
+          for (const [choice, label] of labels) {
+            const button = actions2.createEl("button", { text: label });
+            button.disabled = session.saving || session.resultEdited;
+            button.setAttribute("aria-pressed", (session.fileDeletion ? session.fileChoice : session.choices[index]) === choice ? "true" : "false");
+            session.choiceControls.push(button);
+            button.addEventListener("click", () => {
+              if (session.fileDeletion) session.fileChoice = choice;
+              else session.choices[index] = choice;
+              session.error = "";
+              const key = session.fileDeletion ? "file" : index;
+              if (choice === "manual" && !Object.hasOwn(session.manualValues, key)) session.manualValues[key] = session.fileDeletion ? comparison.localText ?? "" : block.conflict.a.join("");
+              this.renderComparison(session);
+            });
+          }
+          if ((session.fileDeletion ? session.fileChoice : session.choices[index]) === "manual") {
+            const key = session.fileDeletion ? "file" : index;
+            const manual = hunk.createEl("textarea", { cls: "lacan-sync-manual-text" });
+            manual.value = session.manualValues[key] || "";
+            manual.setAttribute("aria-label", session.fileDeletion ? "完整文件手工结果" : `冲突 ${number} 手工结果`);
+            manual.spellcheck = false;
+            manual.disabled = session.saving || session.resultEdited;
+            session.choiceControls.push(manual);
+            manual.addEventListener("input", () => {
+              session.manualValues[key] = manual.value;
+              this.updateResult(session);
+            });
+          }
+        }
+        const result = root.createEl("details", { cls: "lacan-sync-result" });
+        result.open = session.resultEdited;
+        result.createEl("summary", { text: "完整合并结果（检查或编辑）" });
+        result.createEl("p", { text: "无冲突的改动已自动纳入。直接修改完整结果后，逐处选择会锁定；重新比较可恢复默认选择。", cls: "lacan-sync-muted" });
+        session.resultEl = result.createEl("textarea", { cls: "lacan-sync-result-text" });
+        session.resultEl.setAttribute("aria-label", "合并结果");
+        session.resultEl.spellcheck = false;
+        session.resultEl.addEventListener("input", () => {
+          session.result = session.resultEl.value;
+          session.resultEdited = true;
+          for (const control of session.choiceControls) control.disabled = true;
+          session.statusEl.setText("完整结果已有手工修改。确认保存会采用下方内容；逐处选择已锁定，避免覆盖你的修改。");
+        });
+        const footer = root.createDiv("lacan-sync-resolution-footer");
+        session.statusEl = footer.createEl("p", { cls: "lacan-sync-selection-status", attr: { "aria-live": "polite" } });
+        const actions = footer.createDiv("lacan-sync-actions");
+        session.saveButton = actions.createEl("button", { text: "确认保存合并结果", cls: "mod-cta" });
+        session.saveButton.addEventListener("click", () => {
+          void this.saveResolution(session);
+        });
+        session.errorEl = footer.createEl("p", { cls: "lacan-sync-error", attr: { role: "alert" } });
+        session.errorEl.setText(session.error);
+        this.updateResult(session);
+      }
+      updateResult(session) {
+        const comparison = session.comparison;
+        let unresolved = 0;
+        const parts = [];
+        for (let index = 0; index < session.blocks.length; index += 1) {
+          const block = session.blocks[index];
+          if (block.ok) {
+            parts.push(block.ok.join(""));
+            continue;
+          }
+          const choice = session.choices[index];
+          if (!choice) unresolved += 1;
+          parts.push(choice === "manual" ? session.manualValues[index] ?? "" : (choice === "upstream" ? block.conflict.b : block.conflict.a).join(""));
+        }
+        let content = parts.join("");
+        if (session.fileDeletion) content = session.fileChoice === "manual" ? session.manualValues.file ?? "" : session.fileChoice === "upstream" ? comparison.upstreamText : comparison.localText;
+        if (!session.resultEdited) session.result = content;
+        session.unresolved = unresolved;
+        session.resultEl.value = session.result === null ? "（确认后保留该文件的删除状态）" : session.result.replace(/\r\n/g, "\n");
+        session.resultEl.readOnly = session.saving || unresolved > 0 || session.result === null;
+        session.saveButton.disabled = session.saving || unresolved > 0;
+        session.reloadButton.disabled = session.saving;
+        session.saveButton.setText(session.saving ? "正在安全保存…" : session.result === null ? "确认保留删除" : "确认保存合并结果");
+        session.statusEl.setText(unresolved ? `还有 ${unresolved} 处冲突待选择；预览暂用这些位置的本地内容。` : session.resultEdited ? "完整结果已有手工修改，确认保存会采用编辑后的内容。" : session.result === null ? "当前选择保留文件删除状态，确认后生效。" : session.fileDeletion ? "已选择保留完整文件，确认保存后生效。" : `保留本地 ${Object.values(session.choices).filter((choice) => choice === "local").length} 处，采用上游 ${Object.values(session.choices).filter((choice) => choice === "upstream").length} 处，手工填写 ${Object.values(session.choices).filter((choice) => choice === "manual").length} 处。无冲突改动已纳入，确认保存后生效。`);
+      }
+      async saveResolution(session) {
+        if (session.saving || session.unresolved) return;
+        session.saving = true;
+        session.error = "";
+        session.errorEl.setText("");
+        for (const control of session.choiceControls) control.disabled = true;
+        this.updateResult(session);
+        let result;
+        try {
+          result = await this.engine.resolveConflict(session.comparison.path, {
+            expectedLocalHash: session.comparison.localHash,
+            expectedUpstreamHash: session.comparison.upstreamHash,
+            content: session.result
+          });
+        } catch (error) {
+          session.saving = false;
+          session.error = `${error.message} 当前合并草稿已保留；可复制结果后重新比较。`;
+          if (!this.isClosed) this.renderComparison(session);
+          return;
+        }
+        this.report.version = result.version || this.report.version;
+        this.report.conflicts = result.conflicts;
+        this.sessions.delete(session.comparison.path);
+        this.requestId += 1;
+        if (!this.isClosed) this.renderReport();
+        new Obsidian2.Notice("合并结果已保存，本地修改已纳入后续增量同步。");
+        try {
+          await this.onResolved?.(result);
+        } catch (error) {
+          new Obsidian2.Notice(`合并已保存，刷新视图失败：${error.message}`);
+        }
+      }
+      async showIncoming(conflict) {
+        const bytes = await this.storage.read(conflict.incomingPath);
+        if (!bytes) throw new Error("找不到上游副本，请重新同步。 ");
+        const modal = new Modal(this.app);
+        modal.onOpen = () => {
+          modal.modalEl?.classList.add("lacan-sync-report-modal");
+          modal.titleEl.setText(`上游版本：${conflict.path}`);
+          if (/\.(md|txt|csv|json)$/i.test(conflict.path)) {
+            const area = modal.contentEl.createEl("textarea", { cls: "lacan-sync-upstream-text" });
+            area.readOnly = true;
+            area.value = new TextDecoder().decode(bytes);
+            area.setAttribute("aria-label", "上游原始内容，只读，可选择复制");
+          } else {
+            modal.contentEl.createEl("p", { text: `上游附件已保存在本地同步缓存中，大小 ${bytes.byteLength} 字节。` });
+            modal.contentEl.createEl("code", { text: conflict.incomingPath });
+          }
+        };
+        modal.open();
+      }
+    };
+    module2.exports = { ProjectSyncReportModal: ProjectSyncReportModal2 };
   }
 });
 
@@ -9102,6 +12662,1399 @@ var require_obsidian_integration = __commonJS({
   }
 });
 
+// node_modules/node-diff3/dist/diff3.cjs
+var require_diff3 = __commonJS({
+  "node_modules/node-diff3/dist/diff3.cjs"(exports2, module2) {
+    var __defProp = Object.defineProperty;
+    var __getOwnPropNames2 = Object.getOwnPropertyNames;
+    var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+    var __hasOwnProp = Object.prototype.hasOwnProperty;
+    function __accessProp(key) {
+      return this[key];
+    }
+    var __toCommonJS = (from) => {
+      var entry = (__moduleCache ??= /* @__PURE__ */ new WeakMap()).get(from), desc;
+      if (entry)
+        return entry;
+      entry = __defProp({}, "__esModule", { value: true });
+      if (from && typeof from === "object" || typeof from === "function") {
+        for (var key of __getOwnPropNames2(from))
+          if (!__hasOwnProp.call(entry, key))
+            __defProp(entry, key, {
+              get: __accessProp.bind(from, key),
+              enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable
+            });
+      }
+      __moduleCache.set(from, entry);
+      return entry;
+    };
+    var __moduleCache;
+    var __returnValue = (v) => v;
+    function __exportSetter(name, newValue) {
+      this[name] = __returnValue.bind(null, newValue);
+    }
+    var __export = (target, all) => {
+      for (var name in all)
+        __defProp(target, name, {
+          get: all[name],
+          enumerable: true,
+          configurable: true,
+          set: __exportSetter.bind(all, name)
+        });
+    };
+    var exports_diff3 = {};
+    __export(exports_diff3, {
+      stripPatch: () => stripPatch,
+      patch: () => patch,
+      mergeDigIn: () => mergeDigIn,
+      mergeDiff3: () => mergeDiff3,
+      merge: () => merge,
+      invertPatch: () => invertPatch,
+      diffPatch: () => diffPatch,
+      diffIndices: () => diffIndices,
+      diffComm: () => diffComm,
+      diff3MergeRegions: () => diff3MergeRegions,
+      diff3Merge: () => diff3Merge,
+      LCS: () => LCS
+    });
+    module2.exports = __toCommonJS(exports_diff3);
+    function LCS(buffer1, buffer2) {
+      let equivalenceClasses = /* @__PURE__ */ Object.create(null);
+      for (let j = 0; j < buffer2.length; j++) {
+        const item = buffer2[j];
+        if (equivalenceClasses[item]) {
+          equivalenceClasses[item].push(j);
+        } else {
+          equivalenceClasses[item] = [j];
+        }
+      }
+      const NULLRESULT = { buffer1index: -1, buffer2index: -1, chain: null };
+      let candidates = [NULLRESULT];
+      for (let i = 0; i < buffer1.length; i++) {
+        const item = buffer1[i];
+        const buffer2indices = equivalenceClasses[item] || [];
+        let r = 0;
+        let c = candidates[0];
+        for (const j of buffer2indices) {
+          let s;
+          for (s = r; s < candidates.length; s++) {
+            if (candidates[s].buffer2index < j && (s === candidates.length - 1 || candidates[s + 1].buffer2index > j)) {
+              break;
+            }
+          }
+          if (s < candidates.length) {
+            const newCandidate = { buffer1index: i, buffer2index: j, chain: candidates[s] };
+            if (r === candidates.length) {
+              candidates.push(c);
+            } else {
+              candidates[r] = c;
+            }
+            r = s + 1;
+            c = newCandidate;
+            if (r === candidates.length) {
+              break;
+            }
+          }
+        }
+        candidates[r] = c;
+      }
+      return candidates[candidates.length - 1];
+    }
+    function diffComm(buffer1, buffer2) {
+      const lcs = LCS(buffer1, buffer2);
+      let result = [];
+      let tail1 = buffer1.length;
+      let tail2 = buffer2.length;
+      let common = { common: [] };
+      function processCommon() {
+        if (common.common.length) {
+          common.common.reverse();
+          result.push(common);
+          common = { common: [] };
+        }
+      }
+      for (let candidate = lcs; candidate !== null; candidate = candidate.chain) {
+        let different = { buffer1: [], buffer2: [] };
+        while (--tail1 > candidate.buffer1index) {
+          different.buffer1.push(buffer1[tail1]);
+        }
+        while (--tail2 > candidate.buffer2index) {
+          different.buffer2.push(buffer2[tail2]);
+        }
+        if (different.buffer1.length || different.buffer2.length) {
+          processCommon();
+          different.buffer1.reverse();
+          different.buffer2.reverse();
+          result.push(different);
+        }
+        if (tail1 >= 0) {
+          common.common.push(buffer1[tail1]);
+        }
+      }
+      processCommon();
+      result.reverse();
+      return result;
+    }
+    function diffIndices(buffer1, buffer2) {
+      const lcs = LCS(buffer1, buffer2);
+      let result = [];
+      let tail1 = buffer1.length;
+      let tail2 = buffer2.length;
+      for (let candidate = lcs; candidate !== null; candidate = candidate.chain) {
+        const mismatchLength1 = tail1 - candidate.buffer1index - 1;
+        const mismatchLength2 = tail2 - candidate.buffer2index - 1;
+        tail1 = candidate.buffer1index;
+        tail2 = candidate.buffer2index;
+        if (mismatchLength1 || mismatchLength2) {
+          result.push({
+            buffer1: [tail1 + 1, mismatchLength1],
+            buffer1Content: buffer1.slice(tail1 + 1, tail1 + 1 + mismatchLength1),
+            buffer2: [tail2 + 1, mismatchLength2],
+            buffer2Content: buffer2.slice(tail2 + 1, tail2 + 1 + mismatchLength2)
+          });
+        }
+      }
+      result.reverse();
+      return result;
+    }
+    function diffPatch(buffer1, buffer2) {
+      const lcs = LCS(buffer1, buffer2);
+      let result = [];
+      let tail1 = buffer1.length;
+      let tail2 = buffer2.length;
+      function chunkDescription(buffer, offset, length) {
+        let chunk = [];
+        for (let i = 0; i < length; i++) {
+          chunk.push(buffer[offset + i]);
+        }
+        return {
+          offset,
+          length,
+          chunk
+        };
+      }
+      for (let candidate = lcs; candidate !== null; candidate = candidate.chain) {
+        const mismatchLength1 = tail1 - candidate.buffer1index - 1;
+        const mismatchLength2 = tail2 - candidate.buffer2index - 1;
+        tail1 = candidate.buffer1index;
+        tail2 = candidate.buffer2index;
+        if (mismatchLength1 || mismatchLength2) {
+          result.push({
+            buffer1: chunkDescription(buffer1, candidate.buffer1index + 1, mismatchLength1),
+            buffer2: chunkDescription(buffer2, candidate.buffer2index + 1, mismatchLength2)
+          });
+        }
+      }
+      result.reverse();
+      return result;
+    }
+    function diff3MergeRegions(a, o, b) {
+      let hunks = [];
+      function addHunk(h, ab) {
+        hunks.push({
+          ab,
+          oStart: h.buffer1[0],
+          oLength: h.buffer1[1],
+          abStart: h.buffer2[0],
+          abLength: h.buffer2[1]
+        });
+      }
+      diffIndices(o, a).forEach((item) => addHunk(item, "a"));
+      diffIndices(o, b).forEach((item) => addHunk(item, "b"));
+      hunks.sort((x, y) => x.oStart - y.oStart);
+      let results = [];
+      let currOffset = 0;
+      function advanceTo(endOffset) {
+        if (endOffset > currOffset) {
+          results.push({
+            stable: true,
+            buffer: "o",
+            bufferStart: currOffset,
+            bufferLength: endOffset - currOffset,
+            bufferContent: o.slice(currOffset, endOffset)
+          });
+          currOffset = endOffset;
+        }
+      }
+      while (hunks.length) {
+        let hunk = hunks.shift();
+        let regionStart = hunk.oStart;
+        let regionEnd = hunk.oStart + hunk.oLength;
+        let regionHunks = [hunk];
+        advanceTo(regionStart);
+        while (hunks.length) {
+          const nextHunk = hunks[0];
+          const nextHunkStart = nextHunk.oStart;
+          if (nextHunkStart > regionEnd)
+            break;
+          regionEnd = Math.max(regionEnd, nextHunkStart + nextHunk.oLength);
+          regionHunks.push(hunks.shift());
+        }
+        if (regionHunks.length === 1) {
+          if (hunk.abLength > 0) {
+            const buffer = hunk.ab === "a" ? a : b;
+            results.push({
+              stable: true,
+              buffer: hunk.ab,
+              bufferStart: hunk.abStart,
+              bufferLength: hunk.abLength,
+              bufferContent: buffer.slice(hunk.abStart, hunk.abStart + hunk.abLength)
+            });
+          }
+        } else {
+          let bounds = {
+            a: [a.length, -1, o.length, -1],
+            b: [b.length, -1, o.length, -1]
+          };
+          while (regionHunks.length) {
+            hunk = regionHunks.shift();
+            const oStart = hunk.oStart;
+            const oEnd = oStart + hunk.oLength;
+            const abStart = hunk.abStart;
+            const abEnd = abStart + hunk.abLength;
+            let b2 = bounds[hunk.ab];
+            b2[0] = Math.min(abStart, b2[0]);
+            b2[1] = Math.max(abEnd, b2[1]);
+            b2[2] = Math.min(oStart, b2[2]);
+            b2[3] = Math.max(oEnd, b2[3]);
+          }
+          const aStart = bounds.a[0] + (regionStart - bounds.a[2]);
+          const aEnd = bounds.a[1] + (regionEnd - bounds.a[3]);
+          const bStart = bounds.b[0] + (regionStart - bounds.b[2]);
+          const bEnd = bounds.b[1] + (regionEnd - bounds.b[3]);
+          let result = {
+            stable: false,
+            aStart,
+            aLength: aEnd - aStart,
+            aContent: a.slice(aStart, aEnd),
+            oStart: regionStart,
+            oLength: regionEnd - regionStart,
+            oContent: o.slice(regionStart, regionEnd),
+            bStart,
+            bLength: bEnd - bStart,
+            bContent: b.slice(bStart, bEnd)
+          };
+          results.push(result);
+        }
+        currOffset = regionEnd;
+      }
+      advanceTo(o.length);
+      return results;
+    }
+    function diff3Merge(a, o, b, options) {
+      let defaults = {
+        excludeFalseConflicts: true,
+        stringSeparator: /\s+/
+      };
+      options = Object.assign(defaults, options);
+      if (typeof a === "string")
+        a = a.split(options.stringSeparator);
+      if (typeof o === "string")
+        o = o.split(options.stringSeparator);
+      if (typeof b === "string")
+        b = b.split(options.stringSeparator);
+      let results = [];
+      const regions = diff3MergeRegions(a, o, b);
+      let okBuffer = [];
+      function flushOk() {
+        if (okBuffer.length) {
+          results.push({ ok: okBuffer });
+        }
+        okBuffer = [];
+      }
+      function isFalseConflict(a2, b2) {
+        if (a2.length !== b2.length)
+          return false;
+        for (let i = 0; i < a2.length; i++) {
+          if (a2[i] !== b2[i])
+            return false;
+        }
+        return true;
+      }
+      regions.forEach((region) => {
+        if (region.stable) {
+          okBuffer.push(...region.bufferContent);
+        } else {
+          if (options.excludeFalseConflicts && isFalseConflict(region.aContent, region.bContent)) {
+            okBuffer.push(...region.aContent);
+          } else {
+            flushOk();
+            results.push({
+              conflict: {
+                a: region.aContent,
+                aIndex: region.aStart,
+                o: region.oContent,
+                oIndex: region.oStart,
+                b: region.bContent,
+                bIndex: region.bStart
+              }
+            });
+          }
+        }
+      });
+      flushOk();
+      return results;
+    }
+    function mergeDiff3(a, o, b, options) {
+      const defaults = {
+        excludeFalseConflicts: true,
+        stringSeparator: /\s+/,
+        label: {}
+      };
+      options = Object.assign(defaults, options);
+      const aSection = "<<<<<<<" + (options.label.a ? ` ${options.label.a}` : "");
+      const oSection = "|||||||" + (options.label.o ? ` ${options.label.o}` : "");
+      const xSection = "=======";
+      const bSection = ">>>>>>>" + (options.label.b ? ` ${options.label.b}` : "");
+      const regions = diff3Merge(a, o, b, options);
+      let conflict = false;
+      let result = [];
+      regions.forEach((region) => {
+        if (region.ok) {
+          result = result.concat(region.ok);
+        } else if (region.conflict) {
+          conflict = true;
+          result = result.concat([aSection], region.conflict.a, [oSection], region.conflict.o, [xSection], region.conflict.b, [bSection]);
+        }
+      });
+      return {
+        conflict,
+        result
+      };
+    }
+    function merge(a, o, b, options) {
+      const defaults = {
+        excludeFalseConflicts: true,
+        stringSeparator: /\s+/,
+        label: {}
+      };
+      options = Object.assign(defaults, options);
+      const aSection = "<<<<<<<" + (options.label.a ? ` ${options.label.a}` : "");
+      const xSection = "=======";
+      const bSection = ">>>>>>>" + (options.label.b ? ` ${options.label.b}` : "");
+      const regions = diff3Merge(a, o, b, options);
+      let conflict = false;
+      let result = [];
+      regions.forEach((region) => {
+        if (region.ok) {
+          result = result.concat(region.ok);
+        } else if (region.conflict) {
+          conflict = true;
+          result = result.concat([aSection], region.conflict.a, [xSection], region.conflict.b, [bSection]);
+        }
+      });
+      return {
+        conflict,
+        result
+      };
+    }
+    function mergeDigIn(a, o, b, options) {
+      const defaults = {
+        excludeFalseConflicts: true,
+        stringSeparator: /\s+/,
+        label: {}
+      };
+      options = Object.assign(defaults, options);
+      const aSection = "<<<<<<<" + (options.label.a ? ` ${options.label.a}` : "");
+      const xSection = "=======";
+      const bSection = ">>>>>>>" + (options.label.b ? ` ${options.label.b}` : "");
+      const regions = diff3Merge(a, o, b, options);
+      let conflict = false;
+      let result = [];
+      regions.forEach((region) => {
+        if (region.ok) {
+          result = result.concat(region.ok);
+        } else {
+          const c = diffComm(region.conflict.a, region.conflict.b);
+          for (const inner of c) {
+            if (inner.common) {
+              result = result.concat(inner.common);
+            } else {
+              conflict = true;
+              result = result.concat([aSection], inner.buffer1, [xSection], inner.buffer2, [bSection]);
+            }
+          }
+        }
+      });
+      return {
+        conflict,
+        result
+      };
+    }
+    function patch(buffer, patch2) {
+      let result = [];
+      let currOffset = 0;
+      function advanceTo(targetOffset) {
+        while (currOffset < targetOffset) {
+          result.push(buffer[currOffset]);
+          currOffset++;
+        }
+      }
+      for (const chunk of patch2) {
+        advanceTo(chunk.buffer1.offset);
+        for (const item of chunk.buffer2.chunk) {
+          result.push(item);
+        }
+        currOffset += chunk.buffer1.length;
+      }
+      advanceTo(buffer.length);
+      return result;
+    }
+    function stripPatch(patch2) {
+      return patch2.map((chunk) => ({
+        buffer1: { offset: chunk.buffer1.offset, length: chunk.buffer1.length },
+        buffer2: { chunk: chunk.buffer2.chunk }
+      }));
+    }
+    function invertPatch(patch2) {
+      return patch2.map((chunk) => ({
+        buffer1: chunk.buffer2,
+        buffer2: chunk.buffer1
+      }));
+    }
+  }
+});
+
+// src/project-sync/semantic-merge.js
+var require_semantic_merge = __commonJS({
+  "src/project-sync/semantic-merge.js"(exports2, module2) {
+    var { diffComm } = require_diff3();
+    var { SegmentParser: SegmentParser2 } = require_segment_parser();
+    var parser = new SegmentParser2();
+    var lines = (text) => {
+      if (text.length > 2 * 1024 * 1024) return [text];
+      let count = 0;
+      for (let index = 0; index < text.length; index += 1) if (text[index] === "\n" && ++count > 15e3) return [text];
+      return text.match(/[^\n]*\n|[^\n]+$/g) || [];
+    };
+    var markerText = (text) => (text.match(/<!--\s*ids?\b[\s\S]*?-->/gi) || []).join("\0");
+    var paragraphs = (text) => text.match(/[\s\S]+?(?:\n[ \t]*\n+|$)/g) || [];
+    function splitSegments(text) {
+      const comments = parser.parseComments(text);
+      const markers = [];
+      for (let index = 0; index < comments.length; index += 1) {
+        const current = comments[index];
+        const next = comments[index + 1];
+        const attached = current.label === "id" && next && /^\s*$/.test(text.slice(current.end, next.start)) && (next.label === "ids" || next.label === "id" && next.ids.length > 1 && next.ids[0] === current.ids[0]);
+        markers.push({ ids: parser.mergeIds(current.ids, attached ? next.ids : []), start: current.start });
+        if (attached) index += 1;
+      }
+      let line = 0;
+      let cursor = 0;
+      const units = markers.map((marker, index) => {
+        for (; cursor < marker.start; cursor += 1) if (text[cursor] === "\n") line += 1;
+        return { ids: marker.ids, line, text: text.slice(marker.start, markers[index + 1]?.start ?? text.length) };
+      });
+      return { header: text.slice(0, markers[0]?.start ?? text.length), units };
+    }
+    function conflict(base, local, upstream, metadata = {}) {
+      return { conflict: { a: lines(local), o: lines(base), b: lines(upstream), aIndex: 0, oIndex: 0, bIndex: 0, ...metadata } };
+    }
+    function twoWayParagraphs(local, upstream, label = "段落", limited = false) {
+      const result = [];
+      let number = 0;
+      const left = paragraphs(local);
+      const right = paragraphs(upstream);
+      const counts = /* @__PURE__ */ new Map();
+      for (const value of left) counts.set(value, (counts.get(value) || 0) + 1);
+      let pairs = 0;
+      for (const value of right) pairs += counts.get(value) || 0;
+      const parts = limited || pairs > 2e6 ? [{ buffer1: left, buffer2: right }] : diffComm(left, right);
+      for (const part of parts) {
+        if (part.common) {
+          result.push({ ok: lines(part.common.join("")) });
+          continue;
+        }
+        const a = part.buffer1 || [];
+        const b = part.buffer2 || [];
+        for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+          number += 1;
+          result.push(conflict("", a[index] || "", b[index] || "", { label: `${label} ${number}` }));
+        }
+      }
+      return result;
+    }
+    function boundedParagraphs(base, local, upstream, label = "段落") {
+      const versions = [base, local, upstream].map((text) => paragraphs(text || ""));
+      return Array.from({ length: Math.max(1, ...versions.map((version) => version.length)) }, (_, index) => conflict(versions[0][index] || "", versions[1][index] || "", versions[2][index] || "", { label: `${label} ${index + 1}` }));
+    }
+    function insertMissing(primary, secondary) {
+      const seen = new Set(primary);
+      const buckets = /* @__PURE__ */ new Map();
+      let anchor = null;
+      for (let index = secondary.length - 1; index >= 0; index -= 1) {
+        const key = secondary[index];
+        if (seen.has(key)) {
+          anchor = key;
+          continue;
+        }
+        const values = buckets.get(anchor) || [];
+        values.push(key);
+        buckets.set(anchor, values);
+      }
+      const result = [];
+      for (const key of primary) result.push(...(buckets.get(key) || []).reverse(), key);
+      result.push(...(buckets.get(null) || []).reverse());
+      return result;
+    }
+    function semanticBlocks(baseText, localText, upstreamText, mergeLines, { limited = false } = {}) {
+      const hasBase = baseText !== null;
+      const parsed = [baseText, localText, upstreamText].map((text) => splitSegments(text || ""));
+      if (!parsed.some((document2) => document2.units.length)) {
+        if (hasBase && localText !== null && upstreamText !== null && !limited) return null;
+        if (limited) return boundedParagraphs(baseText, localText, upstreamText);
+        const blocks2 = twoWayParagraphs(localText || "", upstreamText || "");
+        return blocks2.length ? blocks2 : [conflict(baseText || "", localText || "", upstreamText || "", { label: "文件状态" })];
+      }
+      const parents = /* @__PURE__ */ new Map();
+      const find = (id) => {
+        if (!parents.has(id)) parents.set(id, id);
+        let root = id;
+        while (parents.get(root) !== root) root = parents.get(root);
+        while (parents.get(id) !== id) {
+          const next = parents.get(id);
+          parents.set(id, root);
+          id = next;
+        }
+        return root;
+      };
+      for (const document2 of parsed) for (const unit of document2.units) {
+        for (const id of unit.ids) parents.set(find(id), find(unit.ids[0]));
+      }
+      const ids = /* @__PURE__ */ new Map();
+      for (const id of parents.keys()) {
+        const key = find(id);
+        const group = ids.get(key) || [];
+        group.push(id);
+        ids.set(key, group);
+      }
+      const documents = parsed.map((document2) => {
+        const groups = /* @__PURE__ */ new Map();
+        const order2 = [];
+        const seenIds = /* @__PURE__ */ new Set();
+        let previousKey = null;
+        for (const unit of document2.units) {
+          for (const id of unit.ids) {
+            if (seenIds.has(id)) throw new Error(`分段 ID ${id} 重复，无法安全比较。请先检查分段标记。`);
+            seenIds.add(id);
+          }
+          const key = find(unit.ids[0]);
+          if (groups.has(key) && previousKey !== key) throw new Error(`ids 对齐组 ${ids.get(key).join(" ")} 在文件中不连续，无法安全比较。请先检查 ids 和分段顺序。`);
+          if (!groups.has(key)) {
+            groups.set(key, { text: "", line: unit.line });
+            order2.push(key);
+          }
+          groups.get(key).text += unit.text;
+          previousKey = key;
+        }
+        return { groups, order: order2 };
+      });
+      const [base, local, upstream] = documents;
+      const preferred = hasBase && local.order.join("\0") === base.order.join("\0") ? upstream.order : local.order;
+      const order = insertMissing(insertMissing(preferred, preferred === local.order ? upstream.order : local.order), base.order);
+      const blocks = [];
+      const headerBase = parsed[0].header;
+      const headerLocal = parsed[1].header;
+      const headerUpstream = parsed[2].header;
+      if (limited && (headerBase || headerLocal || headerUpstream)) blocks.push(...boundedParagraphs(headerBase, headerLocal, headerUpstream, "文件头部"));
+      else if (limited) {
+      } else if (!hasBase || localText === null || upstreamText === null) blocks.push(...twoWayParagraphs(headerLocal, headerUpstream, "文件头部"));
+      else blocks.push(...mergeLines(headerBase, headerLocal, headerUpstream).map((block) => block.conflict ? { conflict: { ...block.conflict, label: "文件头部" } } : block));
+      for (const key of order) {
+        const o = base.groups.get(key);
+        const a = local.groups.get(key);
+        const b = upstream.groups.get(key);
+        const original = o?.text || "";
+        const left = a?.text || "";
+        const right = b?.text || "";
+        if (left === right) {
+          if (left) blocks.push({ ok: lines(left) });
+          continue;
+        }
+        if (hasBase && localText !== null && upstreamText !== null) {
+          if (right === original) {
+            if (left) blocks.push({ ok: lines(left) });
+            continue;
+          }
+          if (left === original) {
+            if (right) blocks.push({ ok: lines(right) });
+            continue;
+          }
+          if (!limited && markerText(left) === markerText(original) && markerText(right) === markerText(original)) {
+            const merged = mergeLines(original, left, right);
+            if (merged.every((block) => block.ok)) {
+              blocks.push({ ok: merged.flatMap((block) => block.ok) });
+              continue;
+            }
+          }
+        }
+        blocks.push(conflict(original, left, right, {
+          segmentIds: ids.get(key),
+          aIndex: a?.line ?? 0,
+          oIndex: o?.line ?? 0,
+          bIndex: b?.line ?? 0
+        }));
+      }
+      return blocks.length ? blocks : [conflict(baseText || "", localText || "", upstreamText || "", { label: "文件状态" })];
+    }
+    module2.exports = { semanticBlocks };
+  }
+});
+
+// src/project-sync/text-merge.js
+var require_text_merge = __commonJS({
+  "src/project-sync/text-merge.js"(exports2, module2) {
+    var { diff3Merge } = require_diff3();
+    var { asBytes } = require_validation();
+    var { semanticBlocks } = require_semantic_merge();
+    var MAX_MERGE_BYTES = 2 * 1024 * 1024;
+    var MAX_MERGE_LINES = 15e3;
+    var MAX_MATCH_PAIRS = 2e6;
+    var decodeText = (bytes) => {
+      if (bytes === null || bytes === void 0) return null;
+      try {
+        const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(asBytes(bytes));
+        return text.includes("\0") ? null : text;
+      } catch {
+        return null;
+      }
+    };
+    var normalizeLines = (text) => text.replace(/\r\n/g, "\n");
+    var splitLines = (text) => normalizeLines(text).match(/[^\n]*\n|[^\n]+$/g) || [];
+    var tooManyLines = (text) => {
+      let lines = text && !text.endsWith("\n") ? 1 : 0;
+      for (let i = 0; i < text.length; i += 1) {
+        if (text[i] === "\n") lines += 1;
+        if (lines > MAX_MERGE_LINES) return true;
+      }
+      return false;
+    };
+    var conflictLines = (text) => text.length > MAX_MERGE_BYTES || tooManyLines(text) ? [normalizeLines(text)] : splitLines(text);
+    var detectEol = (text) => /\r\n/.test(text || "") ? "\r\n" : "\n";
+    var preserveEol = (text, eol) => eol === "\r\n" ? normalizeLines(text).replace(/\n/g, "\r\n") : normalizeLines(text);
+    var fileConflict = (baseText, localText, upstreamText) => [{ conflict: {
+      a: conflictLines(localText || ""),
+      o: conflictLines(baseText || ""),
+      b: conflictLines(upstreamText || ""),
+      aIndex: 0,
+      oIndex: 0,
+      bIndex: 0
+    } }];
+    var excessiveMatches = (base, local, upstream) => {
+      const counts = /* @__PURE__ */ new Map();
+      for (const line of base) counts.set(line, (counts.get(line) || 0) + 1);
+      let pairs = 0;
+      for (const line of [...local, ...upstream]) {
+        pairs += counts.get(line) || 0;
+        if (pairs > MAX_MATCH_PAIRS) return true;
+      }
+      return false;
+    };
+    var segmentMarkers = (text) => (text.match(/<!--\s*ids?\b[\s\S]*?-->/gi) || []).join("\0");
+    var refineAlignedBlock = (block) => {
+      const conflict = block.conflict;
+      if (!conflict || conflict.a.length !== conflict.o.length || conflict.b.length !== conflict.o.length) return block;
+      const lines = [];
+      for (let i = 0; i < conflict.o.length; i += 1) {
+        const a = conflict.a[i];
+        const o = conflict.o[i];
+        const b = conflict.b[i];
+        if (a === b || b === o) lines.push(a);
+        else if (a === o) lines.push(b);
+        else return block;
+      }
+      return { ok: lines };
+    };
+    var mergeLines = (baseText, localText, upstreamText) => {
+      const arrays = [localText, baseText, upstreamText].map(splitLines);
+      if (excessiveMatches(arrays[1], arrays[0], arrays[2])) return fileConflict(baseText, localText, upstreamText);
+      return diff3Merge(arrays[0], arrays[1], arrays[2], { excludeFalseConflicts: true }).map(refineAlignedBlock);
+    };
+    var comparisonBlocks = (baseText, localText, upstreamText, { limited = false } = {}) => {
+      const [base, local, upstream] = [baseText, localText, upstreamText].map((text) => text === null ? null : normalizeLines(text));
+      limited ||= [base, local, upstream].some((text) => text !== null && (text.length > MAX_MERGE_BYTES || tooManyLines(text)));
+      return semanticBlocks(base, local, upstream, mergeLines, { limited }) || mergeLines(base || "", local || "", upstream || "");
+    };
+    var mergeText = (baseBytes, localBytes, upstreamBytes) => {
+      const baseText = decodeText(baseBytes);
+      const localText = decodeText(localBytes);
+      const upstreamText = decodeText(upstreamBytes);
+      const eol = detectEol(localText ?? upstreamText);
+      const result = { mergeable: false, clean: false, content: null, baseText, localText, upstreamText, blocks: [], eol };
+      if ([baseText, localText, upstreamText].some((text) => text === null)) return { ...result, reason: "non_text_or_missing" };
+      if ([baseBytes, localBytes, upstreamBytes].some((bytes) => asBytes(bytes).byteLength > MAX_MERGE_BYTES) || [baseText, localText, upstreamText].some(tooManyLines)) {
+        return { ...result, blocks: comparisonBlocks(baseText, localText, upstreamText, { limited: true }), reason: "text_too_complex" };
+      }
+      const blocks = comparisonBlocks(baseText, localText, upstreamText);
+      const clean = blocks.every((block) => Array.isArray(block.ok));
+      const structureChanged = segmentMarkers(localText) !== segmentMarkers(baseText) || segmentMarkers(upstreamText) !== segmentMarkers(baseText);
+      return {
+        ...result,
+        mergeable: true,
+        clean,
+        blocks,
+        ...structureChanged ? { reason: "segment_structure_changed" } : {},
+        content: clean ? Buffer.from(preserveEol(blocks.flatMap((block) => block.ok).join(""), eol), "utf8") : null
+      };
+    };
+    module2.exports = { decodeText, mergeText, splitLines, detectEol, preserveEol, fileConflict, comparisonBlocks };
+  }
+});
+
+// src/project-sync/conflict-comparison.js
+var require_conflict_comparison = __commonJS({
+  "src/project-sync/conflict-comparison.js"(exports2, module2) {
+    var { digest, readBytes } = require_transactions();
+    var { readBase, isTextPath } = require_base_cache();
+    var { decodeText, mergeText, detectEol, comparisonBlocks } = require_text_merge();
+    var { validateContentPath, HASH_RE } = require_validation();
+    var buildComparison = ({ path, kind, baseHash, baseBytes, localBytes, upstreamBytes }) => {
+      const baseText = decodeText(baseBytes);
+      const localText = decodeText(localBytes);
+      const upstreamText = decodeText(upstreamBytes);
+      const canResolveText = isTextPath(path) && (localBytes === null || localText !== null) && (upstreamBytes === null || upstreamText !== null);
+      const missingBase = baseBytes === null;
+      const merge = canResolveText && !missingBase && localBytes !== null && upstreamBytes !== null ? mergeText(baseBytes, localBytes, upstreamBytes) : null;
+      const eol = detectEol(localText ?? upstreamText ?? baseText);
+      return {
+        path,
+        kind,
+        baseHash: baseHash || null,
+        localHash: digest(localBytes),
+        upstreamHash: digest(upstreamBytes),
+        baseText,
+        localText,
+        upstreamText,
+        canResolveText,
+        missingBase,
+        eol,
+        mergeable: Boolean(merge?.mergeable),
+        clean: Boolean(merge?.clean),
+        mergedText: merge?.clean ? decodeText(merge.content) : null,
+        reason: merge?.reason || (missingBase ? "missing_base" : !canResolveText ? "non_text" : "file_deleted"),
+        blocks: canResolveText ? merge?.blocks || comparisonBlocks(baseText, localText, upstreamText) : []
+      };
+    };
+    var readComparison = async (engine, state, path) => {
+      validateContentPath(path);
+      const conflict = state.conflicts?.find((entry) => entry.path === path);
+      if (!conflict) throw new Error("这个文件已没有待处理冲突，请刷新同步报告。");
+      const baseHash = conflict.baseHash || state.files[path] || null;
+      const baseBytes = await readBase(engine.storage, engine.stateDir, baseHash);
+      const localBytes = await readBytes(engine.storage, path);
+      let upstreamBytes = null;
+      if (conflict.upstreamHash !== null) {
+        if (!HASH_RE.test(conflict.upstreamHash || "")) throw new Error("冲突的上游校验记录无效，请重新同步。");
+        const expectedPath = engine.incomingPath(conflict.upstreamVersion || state.version, { path, sha256: conflict.upstreamHash });
+        if (conflict.incomingPath !== expectedPath) throw new Error("冲突的上游副本路径无效，请重新同步。");
+        upstreamBytes = await readBytes(engine.storage, expectedPath);
+        if (digest(upstreamBytes) !== conflict.upstreamHash) upstreamBytes = await readBase(engine.storage, engine.stateDir, conflict.upstreamHash);
+        if (digest(upstreamBytes) !== conflict.upstreamHash) throw new Error("上游冲突副本缺失或已修改，请重新同步。");
+      }
+      return {
+        comparison: buildComparison({ path, kind: conflict.kind, baseHash, baseBytes, localBytes, upstreamBytes }),
+        conflict,
+        localBytes,
+        upstreamBytes,
+        baseBytes
+      };
+    };
+    module2.exports = { buildComparison, readComparison };
+  }
+});
+
+// src/project-sync/resolve-conflict.js
+var require_resolve_conflict = __commonJS({
+  "src/project-sync/resolve-conflict.js"(exports2, module2) {
+    var { HASH_RE, validateContentPath } = require_validation();
+    var { readState, recoverTransaction, digest } = require_transactions();
+    var { cacheBase } = require_base_cache();
+    var { readComparison } = require_conflict_comparison();
+    var { decodeText, preserveEol } = require_text_merge();
+    var resolveConflict = async (engine, path, { expectedLocalHash, expectedUpstreamHash, content } = {}) => {
+      validateContentPath(path);
+      if (![expectedLocalHash, expectedUpstreamHash].every((value) => value === null || HASH_RE.test(value || ""))) throw new Error("保存冲突结果必须提供当前比较的校验值。");
+      if (content !== null && typeof content !== "string") throw new Error("合并结果必须是完整文本或删除选择。");
+      await recoverTransaction(engine.storage, engine.stateDir, (event) => engine.onProgress?.(event));
+      const state = await readState(engine.storage, `${engine.stateDir}/state.json`);
+      const { comparison, conflict, upstreamBytes } = await readComparison(engine, state, path);
+      if (comparison.localHash !== expectedLocalHash || comparison.upstreamHash !== expectedUpstreamHash) throw new Error("文件或上游版本已变化，请重新打开比较后再保存。");
+      if (!comparison.canResolveText) throw new Error("二进制附件不能作为文本保存，请保留本地文件并手动处理附件。");
+      const afterBytes = content === null ? null : Buffer.from(preserveEol(content, comparison.eol), "utf8");
+      if (afterBytes !== null && (afterBytes.length > 64 * 1024 * 1024 || decodeText(afterBytes) !== preserveEol(content, comparison.eol))) throw new Error("合并结果不是有效 UTF-8 文本或超出大小限制。");
+      if (upstreamBytes !== null) await cacheBase(engine.storage, engine.stateDir, comparison.upstreamHash, upstreamBytes);
+      const plan = {
+        path,
+        action: "resolve",
+        kind: conflict.kind,
+        beforeHash: expectedLocalHash,
+        afterHash: digest(afterBytes),
+        afterBytes,
+        baseline: comparison.baseHash,
+        incomingPath: conflict.incomingPath,
+        upstreamVersion: conflict.upstreamVersion || state.version,
+        file: upstreamBytes === null ? null : { path, sha256: comparison.upstreamHash, size: upstreamBytes.length }
+      };
+      const result = await engine.applyPlans(
+        [plan],
+        state,
+        { version: state.version, source_revision: state.source_revision, manifest_sha256: state.manifest_sha256 },
+        void 0,
+        { preservedConflicts: (state.conflicts || []).filter((entry) => entry.path !== path), strict: true }
+      );
+      return { ...result, downloadedFiles: 0, usedArchive: false, resolvedPath: path };
+    };
+    module2.exports = { resolveConflict };
+  }
+});
+
+// src/project-sync/catalog.js
+var require_catalog = __commonJS({
+  "src/project-sync/catalog.js"(exports2, module2) {
+    var nodePath = require("path");
+    var { validateContentPath, validateVersion } = require_validation();
+    var LESSON_PATH = /^texts\/([^/]+)\/(original|translation)\/((?:Leçon|Lecon|lesson)-(\d+)\.md)$/i;
+    var ASSET_EXTENSION = /\.(?:jpe?g|png|gif|svg|webp|avif|bmp|tiff?|emf|wmf|pdf)$/i;
+    var seminarIdentity = (slug) => {
+      const code = slug.match(/^(s\d+[a-z]?)(?:-|$)/i)?.[1]?.toLowerCase() || slug;
+      const number = Number(code.match(/^s(\d+)/)?.[1]);
+      return { code, order: Number.isFinite(number) ? number + (code === "s19b" ? 0.5 : 0) : Number.MAX_SAFE_INTEGER };
+    };
+    var buildCatalog = (manifest, latest) => {
+      const sourceRevision = latest.source_revision ?? null;
+      if (sourceRevision !== null && (typeof sourceRevision !== "string" || sourceRevision.length > 128)) throw new Error("文库来源版本记录无效。");
+      const paths = new Set(manifest.files.map((file) => validateContentPath(file.path)));
+      const translations = /* @__PURE__ */ new Map();
+      for (const path of paths) {
+        const match = path.match(LESSON_PATH);
+        if (match?.[2].toLowerCase() === "translation") translations.set(`${match[1]}/${Number(match[4])}`, path);
+      }
+      const seminars = /* @__PURE__ */ new Map();
+      for (const path of paths) {
+        const match = path.match(LESSON_PATH);
+        if (!match || match[2].toLowerCase() !== "original") continue;
+        const [, slug, , fileName, lessonPadded] = match;
+        const lessonNumber = Number(lessonPadded);
+        if (!Number.isSafeInteger(lessonNumber)) throw new Error("文库课次编号无效。");
+        const { code, order } = seminarIdentity(slug);
+        if (!seminars.has(slug)) {
+          const glossaryPath = `texts/${slug}/glossary.md`;
+          seminars.set(slug, { slug, code, order, title: slug, glossaryPath: paths.has(glossaryPath) ? glossaryPath : null, lessons: [] });
+        }
+        const expectedTranslation = `texts/${slug}/translation/${fileName}`;
+        const translationPath = paths.has(expectedTranslation) ? expectedTranslation : translations.get(`${slug}/${lessonNumber}`) || expectedTranslation;
+        seminars.get(slug).lessons.push({
+          key: path,
+          seminarSlug: slug,
+          seminarCode: code,
+          lessonNumber,
+          lessonPadded,
+          title: `${code}-${lessonNumber} · Leçon ${lessonPadded}`,
+          originalPath: path,
+          translationPath
+        });
+      }
+      const values = [...seminars.values()].sort((a, b) => a.order - b.order || a.slug.localeCompare(b.slug));
+      for (const seminar of values) seminar.lessons.sort((a, b) => a.lessonNumber - b.lessonNumber || a.originalPath.localeCompare(b.originalPath));
+      return {
+        version: validateVersion(latest.version),
+        sourceRevision,
+        lessonCount: values.reduce((count, seminar) => count + seminar.lessons.length, 0),
+        seminars: values
+      };
+    };
+    var catalogCache = (manifest, latest, endpointUrl) => ({
+      schema_version: 1,
+      endpoint_url: endpointUrl,
+      version: latest.version,
+      source_revision: latest.source_revision || null,
+      files: manifest.files.map(({ path }) => ({ path }))
+    });
+    var readCatalogCache = (value, endpointUrl) => {
+      if (value?.schema_version !== 1 || value.endpoint_url !== endpointUrl) return null;
+      if (!Array.isArray(value.files) || value.files.length < 1 || value.files.length > 25e3 || value.source_revision !== null && (typeof value.source_revision !== "string" || value.source_revision.length > 128)) {
+        throw new Error("本地文库目录缓存损坏，请刷新文库目录。");
+      }
+      return buildCatalog(value, value);
+    };
+    var lessonFromCatalog = (catalog, originalPath) => {
+      validateContentPath(originalPath);
+      return catalog.seminars.flatMap((seminar) => seminar.lessons).find((lesson) => lesson.originalPath === originalPath) || null;
+    };
+    var referencedAssets = (text, sourcePath, files) => {
+      if (typeof text !== "string") return [];
+      const assets = /* @__PURE__ */ new Set();
+      const assetPaths = new Set(files.filter((file) => ASSET_EXTENSION.test(file.path)).map((file) => file.path));
+      const byName = /* @__PURE__ */ new Map();
+      for (const path of assetPaths) {
+        const name = nodePath.posix.basename(path);
+        byName.set(name, byName.has(name) ? null : path);
+      }
+      const add = (raw) => {
+        let reference = raw.trim().replace(/^<|>$/g, "");
+        if (!reference || /^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(reference)) return;
+        reference = reference.split(/[|#?]/, 1)[0];
+        try {
+          reference = decodeURIComponent(reference);
+        } catch {
+          return;
+        }
+        if (!ASSET_EXTENSION.test(reference) || reference.includes("\\")) return;
+        const relative = nodePath.posix.normalize(nodePath.posix.join(nodePath.posix.dirname(sourcePath), reference));
+        const candidates = reference.startsWith("/") ? [reference.slice(1)] : [relative, reference];
+        if (!reference.includes("/")) candidates.push(byName.get(reference));
+        for (const candidate of candidates) {
+          if (candidate && assetPaths.has(candidate)) {
+            assets.add(candidate);
+            break;
+          }
+        }
+      };
+      for (const match of text.matchAll(/!?\[\[([^\]\n]+)\]\]/g)) add(match[1]);
+      for (const match of text.matchAll(/!?\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^\s)]+)(?:\s+["'][^\n]*?["'])?\s*\)/g)) add(match[1]);
+      for (const match of text.matchAll(/<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi)) add(match[1]);
+      return [...assets];
+    };
+    module2.exports = { buildCatalog, catalogCache, readCatalogCache, lessonFromCatalog, referencedAssets };
+  }
+});
+
+// src/project-sync/index.js
+var require_project_sync = __commonJS({
+  "src/project-sync/index.js"(exports2, module2) {
+    var { DEFAULT_PROJECT_ENDPOINT: DEFAULT_PROJECT_ENDPOINT2, sha256, encodeJson, parseJson, validateContentPath, validateUrl, validateLatest, validateManifest } = require_validation();
+    var { checkCancelled, fetchBytes, verifyFile, downloadArchive } = require_downloads();
+    var { readBytes, digest, readHash, localChangesError, assertUnchanged, compareAndWrite, removeIfPresent, readState, rollback, cleanupTransaction, restorePreviousState, recoverTransaction, prepareTransaction } = require_transactions();
+    var { readBase, cacheBase, isTextPath } = require_base_cache();
+    var { decodeText } = require_text_merge();
+    var { readComparison } = require_conflict_comparison();
+    var { resolveConflict } = require_resolve_conflict();
+    var { buildCatalog, catalogCache, readCatalogCache, lessonFromCatalog, referencedAssets } = require_catalog();
+    var ProjectSyncEngine = class {
+      constructor({ storage, transport, endpointUrl = DEFAULT_PROJECT_ENDPOINT2, stateDir = ".obsidian/plugins/lacan-translation-helper/project-sync", onProgress } = {}) {
+        if (!storage?.read || !storage?.write || !storage?.remove || typeof transport !== "function") throw new Error("文库同步缺少存储或网络适配器。");
+        if (typeof stateDir !== "string" || !stateDir || stateDir.startsWith("/") || stateDir.includes("\\") || stateDir.split("/").some((part) => !part || part === "." || part === "..")) throw new Error("无效的同步状态目录。");
+        this.endpointUrl = validateUrl(endpointUrl, endpointUrl);
+        this.storage = storage;
+        this.transport = transport;
+        this.stateDir = stateDir;
+        this.onProgress = onProgress;
+        this.running = false;
+      }
+      async sync({ signal } = {}) {
+        return this.withSyncLock(() => this.runSync(signal));
+      }
+      async getCatalog({ signal } = {}) {
+        return this.withSyncLock(async () => {
+          const { latest, manifest } = await this.loadRelease(signal);
+          const catalog = buildCatalog(manifest, latest);
+          checkCancelled(signal);
+          await this.storage.write(`${this.stateDir}/catalog.json`, encodeJson(catalogCache(manifest, latest, this.endpointUrl)));
+          return catalog;
+        });
+      }
+      async readCachedCatalog() {
+        const bytes = await readBytes(this.storage, `${this.stateDir}/catalog.json`);
+        return bytes === null ? null : readCatalogCache(parseJson(bytes, "本地文库目录"), this.endpointUrl);
+      }
+      async syncFiles(paths, { signal } = {}) {
+        const selected = this.validateScope(paths);
+        return this.withSyncLock(() => this.runScopedSync(selected, signal));
+      }
+      async syncLesson(originalPath, { signal } = {}) {
+        validateContentPath(originalPath);
+        return this.withSyncLock(async () => {
+          await recoverTransaction(this.storage, this.stateDir, (event) => this.onProgress?.(event));
+          const release = await this.loadRelease(signal);
+          const lesson = lessonFromCatalog(buildCatalog(release.manifest, release.latest), originalPath);
+          if (!lesson) throw new Error("这个课次不在已发布的文库目录中，请先刷新目录。");
+          const paths = new Set(release.manifest.files.map((file) => file.path));
+          if (!paths.has(lesson.translationPath)) throw new Error("这个课次的原文或译文尚未成对发布，已停止同步。");
+          return this.runScopedSync([lesson.originalPath, lesson.translationPath], signal, { release, assetSources: [lesson.originalPath, lesson.translationPath], strict: true });
+        });
+      }
+      async initializeSeminar(slug, { signal } = {}) {
+        if (typeof slug !== "string" || !slug || slug.includes("/")) throw new Error("无效的研讨班目录。");
+        return this.withSyncLock(async () => {
+          await recoverTransaction(this.storage, this.stateDir, (event) => this.onProgress?.(event));
+          const release = await this.loadRelease(signal);
+          const seminar = buildCatalog(release.manifest, release.latest).seminars.find((entry) => entry.slug === slug);
+          if (!seminar?.glossaryPath) throw new Error("这个研讨班尚未发布术语表，已停止初始化。");
+          return this.runScopedSync([seminar.glossaryPath], signal, { release });
+        });
+      }
+      validateScope(paths) {
+        if (!Array.isArray(paths) || !paths.length || paths.length > 25e3) throw new Error("请指定需要同步的文件。");
+        return [...new Set(paths.map((path) => validateContentPath(path)))];
+      }
+      async withSyncLock(action) {
+        if (this.running) throw new Error("文库同步正在进行，请等待完成。");
+        this.running = true;
+        try {
+          return await action();
+        } finally {
+          this.running = false;
+        }
+      }
+      async getConflictComparison(path) {
+        return this.withSyncLock(async () => {
+          await recoverTransaction(this.storage, this.stateDir, (event) => this.onProgress?.(event));
+          const state = await readState(this.storage, `${this.stateDir}/state.json`);
+          return (await readComparison(this, state, path)).comparison;
+        });
+      }
+      async resolveConflict(path, options) {
+        return this.withSyncLock(() => resolveConflict(this, path, options));
+      }
+      progress(phase, completed = 0, total = 0, path) {
+        this.onProgress?.({ phase, completed, total, ...path ? { path } : {} });
+      }
+      async loadRelease(signal) {
+        this.progress("checking");
+        const latestBytes = await fetchBytes(this.transport, this.endpointUrl, { signal, maxBytes: 256 * 1024 });
+        const latest = validateLatest(parseJson(latestBytes, "文库版本接口"), this.endpointUrl);
+        const manifestBytes = await fetchBytes(this.transport, latest.manifest_url, { signal, maxBytes: 16 * 1024 * 1024 });
+        if (sha256(manifestBytes) !== latest.manifest_sha256) throw new Error("文库文件清单校验失败。");
+        const manifest = validateManifest(parseJson(manifestBytes, "文库文件清单"), latest, this.endpointUrl);
+        return { latest, manifest };
+      }
+      async planFiles(manifest, state, signal) {
+        const plans = [];
+        const remotePaths = /* @__PURE__ */ new Set();
+        for (const file of manifest.files) {
+          checkCancelled(signal);
+          remotePaths.add(file.path);
+          const localBytes = await readBytes(this.storage, file.path);
+          const localHash = digest(localBytes);
+          const baseline = state.files[file.path];
+          let action;
+          let kind = null;
+          if (await this.storage.hasUnsavedChanges?.(file.path, localHash)) {
+            action = "skip";
+            kind = "unsaved_changes";
+          } else if (localHash === null) action = "add";
+          else if (baseline && localHash !== baseline) {
+            action = "skip";
+            kind = "local_modified";
+          } else if (!baseline && localHash !== file.sha256) {
+            action = "skip";
+            kind = "existing_local_file";
+          } else action = localHash === file.sha256 ? "adopt" : "update";
+          if (action !== "skip" && isTextPath(file.path) && decodeText(localBytes) !== null && localHash) {
+            await cacheBase(this.storage, this.stateDir, localHash, localBytes);
+          }
+          plans.push({ path: file.path, file, action, kind, beforeHash: localHash, baseline });
+        }
+        for (const [path, baseline] of Object.entries(state.files)) {
+          if (remotePaths.has(path)) continue;
+          checkCancelled(signal);
+          const localHash = await readHash(this.storage, path);
+          const dirty = await this.storage.hasUnsavedChanges?.(path, localHash);
+          const action = dirty || localHash !== null && localHash !== baseline ? "skip" : localHash === null ? "forget" : "delete";
+          plans.push({ path, action, kind: dirty ? "unsaved_changes" : "upstream_deleted", beforeHash: localHash, baseline });
+        }
+        return plans;
+      }
+      incomingPath(version, file) {
+        const versionKey = sha256(Buffer.from(version)).slice(0, 16);
+        const pathKey = sha256(Buffer.from(file.path));
+        const extension = file.path.match(/\.[a-z0-9]+$/i)?.[0] || ".bin";
+        return `${this.stateDir}/incoming/${versionKey}/${pathKey}${extension}`;
+      }
+      async downloadFiles(plans, latest, manifest, state, signal, { allowArchive = true } = {}) {
+        const needed = plans.filter((plan) => plan.file && ["add", "update"].includes(plan.action));
+        const missing = [];
+        for (const plan of needed) {
+          checkCancelled(signal);
+          plan.incomingPath = this.incomingPath(latest.version, plan.file);
+          if (await readHash(this.storage, plan.incomingPath) === plan.file.sha256) continue;
+          const previousConflict = state.conflicts?.find((entry) => entry.path === plan.path && entry.upstreamHash === plan.file.sha256);
+          if (state.version && previousConflict) {
+            const previousPath = this.incomingPath(previousConflict.upstreamVersion || state.version, plan.file);
+            const previousData = previousConflict.incomingPath === previousPath ? await readBytes(this.storage, previousPath) : null;
+            if (digest(previousData) === plan.file.sha256) {
+              checkCancelled(signal);
+              await this.storage.write(plan.incomingPath, previousData);
+              continue;
+            }
+          }
+          missing.push(plan);
+        }
+        const archiveEligible = allowArchive && !state.version && latest.archive_url && needed.length === manifest.files.length && needed.every((plan) => plan.action === "add") && missing.length === needed.length;
+        let contents = null;
+        if (archiveEligible) {
+          this.progress("downloading", 0, needed.length);
+          contents = await downloadArchive(this.transport, latest, manifest.files, signal);
+        }
+        let completed = needed.length - missing.length;
+        if (!archiveEligible) this.progress("downloading", completed, needed.length);
+        for (const plan of missing) {
+          checkCancelled(signal);
+          const data = contents ? contents[plan.path] : verifyFile(await fetchBytes(this.transport, plan.file.url, { signal, maxBytes: plan.file.size }), plan.file);
+          checkCancelled(signal);
+          await this.storage.write(plan.incomingPath, data);
+          if (contents) delete contents[plan.path];
+          completed += 1;
+          this.progress("downloading", completed, needed.length, plan.path);
+        }
+        return { downloadedFiles: archiveEligible ? manifest.files.length : missing.length, usedArchive: Boolean(archiveEligible) };
+      }
+      conflict(plan) {
+        return {
+          path: plan.path,
+          kind: plan.kind,
+          incomingPath: plan.incomingPath || null,
+          localHash: plan.beforeHash,
+          upstreamHash: plan.file?.sha256 || null,
+          baseHash: plan.baseline || null,
+          upstreamVersion: plan.upstreamVersion,
+          blocks: plan.comparison?.blocks || [],
+          mergeable: Boolean(plan.comparison?.mergeable),
+          missingBase: Boolean(plan.comparison?.missingBase)
+        };
+      }
+      async prepareIncoming(plans, signal) {
+        for (const plan of plans) {
+          checkCancelled(signal);
+          if (!plan.incomingPath || !isTextPath(plan.path)) continue;
+          const upstream = await readBytes(this.storage, plan.incomingPath);
+          if (decodeText(upstream) !== null) await cacheBase(this.storage, this.stateDir, plan.file.sha256, upstream);
+        }
+      }
+      skippedFiles(plans, triggers = plans.filter((plan) => plan.action === "skip")) {
+        const reasons = new Map(triggers.map((plan) => [plan.path, plan.kind || plan.reason || "changed_during_sync"]));
+        const triggerPath = triggers[0]?.path;
+        return plans.map((plan) => ({
+          path: plan.path,
+          reason: reasons.get(plan.path) || "paired_file_modified",
+          ...!reasons.has(plan.path) && triggerPath ? { triggerPath } : {}
+        }));
+      }
+      skippedResult(plans, state, latest, downloads = { downloadedFiles: 0, usedArchive: false }, triggers) {
+        this.progress("skipped", plans.length, plans.length);
+        return {
+          version: latest.version,
+          added: 0,
+          updated: 0,
+          merged: 0,
+          deleted: 0,
+          unchanged: 0,
+          localModified: plans.length,
+          conflicts: [...state.conflicts || []],
+          skippedFiles: this.skippedFiles(plans, triggers),
+          statePath: `${this.stateDir}/state.json`,
+          conflictReportPath: `${this.stateDir}/conflicts.json`,
+          ...downloads,
+          scopePaths: plans.map((plan) => plan.path)
+        };
+      }
+      async guardPlans(plans) {
+        for (const plan of plans) {
+          if (plan.action === "skip") continue;
+          try {
+            await assertUnchanged(this.storage, plan.path, plan.beforeHash);
+          } catch (error) {
+            if (error.code !== "LOCAL_CHANGES_DETECTED") throw error;
+            plan.action = "skip";
+            plan.kind = error.reason;
+          }
+        }
+      }
+      async applySyncPlans(plans, state, latest, signal, downloads, { paired = false } = {}) {
+        await this.guardPlans(plans);
+        if (paired && plans.some((plan) => plan.action === "skip") || plans.every((plan) => plan.action === "skip")) return this.skippedResult(plans, state, latest, downloads);
+        const changedPaths = new Set(plans.filter((plan) => plan.action !== "skip").map((plan) => plan.path));
+        const preservedConflicts = (state.conflicts || []).filter((entry) => !changedPaths.has(entry.path));
+        try {
+          const result = await this.applyPlans(plans, state, latest, signal, { preservedConflicts, strict: true });
+          this.progress("complete", plans.length, plans.length);
+          return { ...result, ...downloads, scopePaths: plans.map((plan) => plan.path) };
+        } catch (error) {
+          if (error.code !== "LOCAL_CHANGES_DETECTED") throw error;
+          const trigger = { path: error.path, kind: error.reason };
+          return this.skippedResult(plans, state, latest, downloads, [trigger]);
+        }
+      }
+      async applyPlans(plans, state, latest, signal, { preservedConflicts = [], strict = false } = {}) {
+        const journal = await prepareTransaction(this.storage, this.stateDir, plans, state, latest, signal, { rejectChanged: strict });
+        const nextState = {
+          schema_version: 2,
+          version: latest.version,
+          source_revision: latest.source_revision || null,
+          manifest_sha256: latest.manifest_sha256,
+          files: { ...state.files },
+          local_deletions: { ...state.local_deletions || {} },
+          conflicts: [],
+          last_transaction: journal.id,
+          synced_at: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        const result = {
+          version: latest.version,
+          added: 0,
+          updated: 0,
+          merged: 0,
+          deleted: 0,
+          unchanged: 0,
+          localModified: 0,
+          conflicts: [...preservedConflicts],
+          skippedFiles: [],
+          statePath: `${this.stateDir}/state.json`,
+          conflictReportPath: `${this.stateDir}/conflicts.json`
+        };
+        const entries = new Map(journal.entries.map((entry) => [entry.path, entry]));
+        try {
+          let completed = 0;
+          for (const plan of plans) {
+            checkCancelled(signal);
+            if (entries.has(plan.path)) {
+              const entry = entries.get(plan.path);
+              const data = Object.hasOwn(plan, "afterBytes") ? plan.afterBytes : plan.file ? await readBytes(this.storage, plan.incomingPath) : null;
+              if (digest(data) !== entry.afterHash) throw new Error(`暂存文件校验失败：${plan.path}`);
+              checkCancelled(signal);
+              if (!await compareAndWrite(this.storage, plan.path, entry.beforeHash, data)) {
+                entry.skipped = true;
+                plan.action = "skip";
+                plan.kind = "changed_during_sync";
+                await this.storage.write(`${this.stateDir}/journal.json`, encodeJson(journal));
+                if (strict) throw localChangesError(
+                  plan.path,
+                  await this.storage.hasUnsavedChanges?.(plan.path, entry.beforeHash) ? "unsaved_changes" : "changed_during_sync"
+                );
+              }
+            }
+            if (plan.action === "skip") {
+              result.skippedFiles.push({ path: plan.path, reason: plan.kind });
+              result.localModified += 1;
+              completed += 1;
+              this.progress("applying", completed, plans.length, plan.path);
+              continue;
+            }
+            if (plan.action !== "keep_deleted") delete nextState.local_deletions[plan.path];
+            if (plan.action === "conflict") result.conflicts.push(this.conflict(plan));
+            else if (plan.action === "resolve") {
+              if (plan.file) {
+                nextState.files[plan.path] = plan.file.sha256;
+                if (plan.afterBytes === null) nextState.local_deletions[plan.path] = plan.file.sha256;
+              } else {
+                delete nextState.files[plan.path];
+                delete nextState.local_deletions[plan.path];
+              }
+              if (plan.afterBytes === null) result.deleted += 1;
+              else result.updated += 1;
+            } else if (plan.action === "delete" || plan.action === "forget") {
+              delete nextState.files[plan.path];
+              delete nextState.local_deletions[plan.path];
+              if (plan.action === "delete") result.deleted += 1;
+            } else if (plan.action === "keep" || plan.action === "keep_deleted") {
+              result.unchanged += 1;
+              result.localModified += 1;
+            } else {
+              nextState.files[plan.path] = plan.file.sha256;
+              if (plan.action === "add") result.added += 1;
+              else if (plan.action === "update") result.updated += 1;
+              else if (plan.action === "merge") {
+                result.merged += 1;
+                result.updated += 1;
+              } else result.unchanged += 1;
+            }
+            completed += 1;
+            this.progress("applying", completed, plans.length, plan.path);
+          }
+          if (strict) {
+            for (const plan of plans.filter((entry) => entry.action !== "skip")) {
+              const entry = entries.get(plan.path);
+              await assertUnchanged(this.storage, plan.path, entry ? entry.afterHash : plan.beforeHash);
+            }
+          }
+          nextState.conflicts = result.conflicts;
+          checkCancelled(signal);
+          await this.storage.write(result.conflictReportPath, encodeJson({ version: latest.version, generated_at: nextState.synced_at, conflicts: result.conflicts }));
+          checkCancelled(signal);
+          await this.storage.write(result.statePath, encodeJson(nextState));
+        } catch (error) {
+          const preserved = await rollback(this.storage, journal);
+          await restorePreviousState(this.storage, this.stateDir, state);
+          if (preserved.length) await this.storage.write(`${this.stateDir}/recovery-conflicts.json`, encodeJson({
+            paths: preserved,
+            transaction_id: journal.id,
+            backups: journal.entries.filter((entry) => preserved.includes(entry.path))
+          }));
+          await cleanupTransaction(this.storage, this.stateDir, journal, preserved);
+          throw error;
+        }
+        try {
+          await cleanupTransaction(this.storage, this.stateDir, journal);
+          for (const plan of plans) {
+            if (plan.file && !["conflict", "skip"].includes(plan.action)) await removeIfPresent(this.storage, this.incomingPath(latest.version, plan.file));
+          }
+          if (state.version && state.version !== latest.version) {
+            for (const conflict of state.conflicts || []) {
+              const plan = plans.find((entry) => entry.path === conflict.path);
+              if (plan?.file && !["skip", "conflict"].includes(plan.action) && conflict.upstreamHash === plan.file.sha256) {
+                const oldPath = this.incomingPath(state.version, plan.file);
+                if (await readHash(this.storage, oldPath) === conflict.upstreamHash) await removeIfPresent(this.storage, oldPath);
+              }
+            }
+          }
+        } catch {
+          result.cleanupPending = true;
+        }
+        return result;
+      }
+      async runSync(signal) {
+        checkCancelled(signal);
+        await recoverTransaction(this.storage, this.stateDir, (event) => this.onProgress?.(event));
+        checkCancelled(signal);
+        const state = await readState(this.storage, `${this.stateDir}/state.json`);
+        const { latest, manifest } = await this.loadRelease(signal);
+        if (state.version === latest.version && state.manifest_sha256 && state.manifest_sha256 !== latest.manifest_sha256) throw new Error("同一文库版本的内容发生变化，已停止同步。");
+        const plans = await this.planFiles(manifest, state, signal);
+        const downloads = await this.downloadFiles(plans, latest, manifest, state, signal);
+        await this.prepareIncoming(plans, signal);
+        return this.applySyncPlans(plans, state, latest, signal, downloads);
+      }
+      async runScopedSync(paths, signal, { release, assetSources = [], strict = false } = {}) {
+        checkCancelled(signal);
+        await recoverTransaction(this.storage, this.stateDir, (event) => this.onProgress?.(event));
+        const state = await readState(this.storage, `${this.stateDir}/state.json`);
+        const { latest, manifest } = release || await this.loadRelease(signal);
+        if (state.version === latest.version && state.manifest_sha256 && state.manifest_sha256 !== latest.manifest_sha256) throw new Error("同一文库版本的内容发生变化，已停止同步。");
+        const selected = new Set(this.validateScope(paths));
+        const remote = new Map(manifest.files.map((file) => [file.path, file]));
+        for (const path of selected) {
+          if (!remote.has(path) && !state.files[path]) throw new Error(`这个文件不在已发布的文库中：${path}`);
+        }
+        const scopeState = () => ({ ...state, files: Object.fromEntries(Object.entries(state.files).filter(([path]) => selected.has(path))) });
+        const scopeManifest = () => ({ ...manifest, files: manifest.files.filter((file) => selected.has(file.path)) });
+        const plans = await this.planFiles(scopeManifest(), scopeState(), signal);
+        if (strict && plans.some((plan) => plan.action === "skip")) return this.skippedResult(plans, state, latest);
+        const downloads = await this.downloadFiles(plans, latest, manifest, state, signal, { allowArchive: false });
+        const assets = /* @__PURE__ */ new Set();
+        for (const path of assetSources) {
+          const plan = plans.find((entry) => entry.path === path);
+          if (!plan || plan.action === "skip") continue;
+          const upstream = plan.incomingPath ? await readBytes(this.storage, plan.incomingPath) : await readBase(this.storage, this.stateDir, plan.file.sha256);
+          const text = decodeText(upstream || await readBytes(this.storage, path));
+          for (const asset of referencedAssets(text, path, manifest.files)) if (!selected.has(asset)) assets.add(asset);
+        }
+        if (assets.size) {
+          for (const asset of assets) selected.add(asset);
+          const assetState = { ...state, files: Object.fromEntries(Object.entries(state.files).filter(([path]) => assets.has(path))) };
+          const assetManifest = { ...manifest, files: manifest.files.filter((file) => assets.has(file.path)) };
+          const assetPlans = await this.planFiles(assetManifest, assetState, signal);
+          if (strict && assetPlans.some((plan) => plan.action === "skip")) return this.skippedResult([...plans, ...assetPlans], state, latest, downloads);
+          const assetDownloads = await this.downloadFiles(assetPlans, latest, manifest, state, signal, { allowArchive: false });
+          downloads.downloadedFiles += assetDownloads.downloadedFiles;
+          plans.push(...assetPlans);
+        }
+        await this.prepareIncoming(plans, signal);
+        return this.applySyncPlans(plans, state, latest, signal, downloads, { paired: strict });
+      }
+    };
+    module2.exports = { ProjectSyncEngine, DEFAULT_PROJECT_ENDPOINT: DEFAULT_PROJECT_ENDPOINT2, sha256, validateContentPath };
+  }
+});
+
 // src/main.js
 var Obsidian = require("obsidian");
 var { SegmentParser } = require_segment_parser();
@@ -9119,6 +14072,11 @@ var { TranslationInlineEditor } = require_translation_inline_editor();
 var { readTranslationSegment, replaceTranslationSegment } = require_translation_inline_source();
 var { bindTranslationPreview } = require_translation_reading_preview();
 var { registerPdfReading, addPdfFileMenuItems } = require_pdf_reading();
+var { createProjectTransport, createVaultSyncStorage } = require_project_sync_obsidian();
+var { createPluginRequest } = require_plugin_http_request();
+var { PROJECT_BASE_PATH, PROJECT_BASE_CONTENT } = require_project_library_base();
+var { formatSkipNotice } = require_project_sync_status();
+var { ProjectSyncReportModal } = require_project_sync_report();
 var {
   Component,
   Notice,
@@ -9202,13 +14160,10 @@ var LESSON_RE = /<!--\s*lesson:\s*([^>\s]+)\s*-->/i;
 var UNTRANSLATED_RE = /<!--\s*untranslated\s*-->/gi;
 var MARKDOWN_RENDER_COMPONENT_KEY = "__lacanMarkdownRenderComponent";
 var LACAN_LESSON_LIST_VIEW_TYPE = "lacan-lesson-list";
-var DEFAULT_REPOSITORY_URL = "https://github.com/Kotoba-Rin/Lacan-Chinese-Translation-Project.git";
-var DEFAULT_GITHUB_PROXY_URL = "http://127.0.0.1:6789";
+var DEFAULT_PROJECT_ENDPOINT = "https://kotoba-rin.com/wp-json/lctp/v1/project";
 var PROJECT_GRAPH_CARD_QUERY = String.raw`path:/^知识库\/[^\/]+\.md$/`;
 var PROJECT_GRAPH_TRANSLATION_QUERY = String.raw`path:/^texts\/[^\/]+\/translation\/[^\/]+\.md$/`;
 var PROJECT_GRAPH_QUERY = `(${PROJECT_GRAPH_CARD_QUERY} OR ${PROJECT_GRAPH_TRANSLATION_QUERY}) -file:/^(README|index|SUMMARY)(\\.md)?$/`;
-var GIT_TIMEOUT_MS = 12e4;
-var GIT_MAX_BUFFER = 50 * 1024 * 1024;
 var REASONING_EFFORT_LABELS = {
   low: "Low",
   medium: "Medium",
@@ -9218,14 +14173,13 @@ var REASONING_EFFORT_LABELS = {
   ultra: "Ultra"
 };
 var DEFAULT_SETTINGS = {
-  mode: "reader",
   projectGraphEnabled: true,
-  repositoryUrl: DEFAULT_REPOSITORY_URL,
-  repositoryBranch: "main",
-  upstreamLocalBranch: "lacan-upstream/main",
-  githubProxyEnabled: false,
-  githubProxyUrl: DEFAULT_GITHUB_PROXY_URL,
+  projectEndpointUrl: DEFAULT_PROJECT_ENDPOINT,
+  projectSyncLastResult: null,
+  projectLessonSync: {},
   autoSyncOnStartup: false,
+  pluginHttpProxyEnabled: false,
+  pluginHttpProxyUrl: "",
   segmentAiEnabled: false,
   segmentAiProvider: "codex",
   segmentAiCodexPath: "",
@@ -9317,7 +14271,14 @@ module.exports = class LacanTranslationHelper extends Plugin {
       legacyProfiles: legacySkillProfiles,
       defaultProfileId: loadedSettings.segmentAiDefaultSkillProfileId
     });
-    delete this.settings.forks;
+    this.settings.pluginHttpProxyEnabled = Object.hasOwn(loadedSettings, "pluginHttpProxyEnabled") ? loadedSettings.pluginHttpProxyEnabled === true : loadedSettings.githubProxyEnabled === true;
+    this.settings.pluginHttpProxyUrl = String(loadedSettings.pluginHttpProxyUrl ?? loadedSettings.githubProxyUrl ?? "").trim();
+    for (const key of ["forks", "mode", "repositoryUrl", "repositoryBranch", "upstreamLocalBranch", "githubProxyEnabled", "githubProxyUrl"]) delete this.settings[key];
+    this.settings.projectEndpointUrl = String(this.settings.projectEndpointUrl || DEFAULT_PROJECT_ENDPOINT).trim();
+    this.settings.projectLessonSync = this.settings.projectLessonSync && typeof this.settings.projectLessonSync === "object" && !Array.isArray(this.settings.projectLessonSync) ? this.settings.projectLessonSync : {};
+    this.projectCatalog = null;
+    this.projectCatalogViews = /* @__PURE__ */ new Set();
+    this.projectLessonSyncProgress = /* @__PURE__ */ new Map();
     this.settings.segmentAiSessions = Array.isArray(this.settings.segmentAiSessions) ? this.settings.segmentAiSessions : [];
     this.settings.segmentAiMaxOpenSessions = normalizeMaxOpenSessions(
       this.settings.segmentAiMaxOpenSessions
@@ -9361,7 +14322,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.progressTimers = /* @__PURE__ */ new Map();
     this.readingToolbarRenderTimer = null;
     this.syncInProgress = false;
-    this.gitProcesses = /* @__PURE__ */ new Set();
+    this.projectSyncController = null;
     this.startupSyncTimer = null;
     this.createdFileTimers = /* @__PURE__ */ new Set();
     this.projectGraphViews = /* @__PURE__ */ new WeakSet();
@@ -9551,29 +14512,27 @@ module.exports = class LacanTranslationHelper extends Plugin {
     });
     this.addCommand({
       id: "sync-configured-github-repositories",
-      name: "Sync configured GitHub repositories",
+      name: "更新文库文本清单（不下载课文）",
       callback: () => this.runWithNotice(
         () => this.syncConfiguredRepositories({ notify: true }),
-        "Git 同步失败"
+        "文库同步失败"
       )
+    });
+    this.addCommand({
+      id: "open-project-library",
+      name: "打开文库文本清单",
+      callback: () => this.runWithNotice(() => this.openProjectLibrary(), "打开文本清单失败")
+    });
+    this.addCommand({
+      id: "show-project-sync-conflicts",
+      name: "查看文库同步与跳过记录",
+      callback: () => this.runWithNotice(() => this.showProjectSyncReport(), "打开同步报告失败")
     });
     this.scheduleReadingToolbarRender();
     this.refreshSegmentAiEntrances();
-    if (this.settings.autoSyncOnStartup) {
-      this.startupSyncTimer = window.setTimeout(() => {
-        this.startupSyncTimer = null;
-        this.runWithNotice(
-          async () => {
-            if (this.settings.mode === "reader" && !this.confirmReaderAutoSyncRun()) {
-              new Notice("已跳过 Reader 自动同步。");
-              return;
-            }
-            await this.syncConfiguredRepositories({ notify: true });
-          },
-          "Git 自动同步失败"
-        );
-      }, 1500);
-    }
+    this.app.workspace.onLayoutReady(() => {
+      void this.runWithNotice(() => this.initializeProjectLibrary(), "文库清单初始化失败");
+    });
   }
   onunload() {
     this.translationInlineEditor?.destroy();
@@ -9624,14 +14583,11 @@ module.exports = class LacanTranslationHelper extends Plugin {
       this.segmentAiRuntime = null;
       this.segmentAiController = null;
     }
-    for (const child of this.gitProcesses) {
-      try {
-        child.kill();
-      } catch (error) {
-        console.warn("Lacan Translation Helper: failed to stop git process.", error);
-      }
-    }
-    this.gitProcesses.clear();
+    this.projectSyncController?.abort();
+    this.projectSyncController = null;
+    this.projectCatalogViews?.clear();
+    this.pluginRequest?.dispose();
+    this.pluginRequest = null;
   }
   getProjectGraphOptions(options = {}) {
     return {
@@ -9749,7 +14705,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.frenchLookupPopup?.destroy();
     this.frenchLookupTranslator?.destroy();
     this.frenchDictionaryService = new FrenchDictionaryService({
-      requestUrl: Obsidian.requestUrl,
+      requestUrl: this.getPluginRequest(),
       getToken: () => this.getEudicToken()
     });
     this.frenchLookupTranslator = new FrenchSelectionTranslator({
@@ -10416,6 +15372,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     menu.showAtPosition({ x: rect.left, y: rect.bottom });
   }
   async handleCreatedFile(file) {
+    if (this.syncInProgress) return;
     if (!(file instanceof TFile) || !this.isTranslationLessonPath(file.path)) {
       return;
     }
@@ -10438,6 +15395,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     if (!this.isTranslationLessonPath(file.path)) {
       return;
     }
+    if (this.syncInProgress) return;
     const normalized = normalizePath(file.path);
     if (this.progressWritePaths.has(normalized)) {
       this.progressDirtyPaths.add(normalized);
@@ -10915,202 +15873,259 @@ ${section}`
   async saveSettings() {
     await this.saveData(this.settings);
   }
-  async syncConfiguredRepositories({ notify = false } = {}) {
-    return this.withGitSyncLock(() => this.syncConfiguredRepositoriesUnlocked({ notify }));
+  getPluginRequest() {
+    if (!this.pluginRequest) {
+      this.pluginRequest = createPluginRequest({
+        requestUrl: Obsidian.requestUrl,
+        getSettings: () => this.settings
+      });
+    }
+    return this.pluginRequest;
   }
-  async syncConfiguredRepositoriesUnlocked({ notify = false } = {}) {
-    if (!this.settings.repositoryUrl?.trim()) {
-      throw new Error("尚未配置 Lacan-Chinese-Translation-Project 仓库地址。");
+  async syncConfiguredRepositories(options = {}) {
+    return this.syncProjectContent(options);
+  }
+  async ensureProjectBase() {
+    const existing = this.app.vault.getAbstractFileByPath(PROJECT_BASE_PATH);
+    if (existing) return { file: existing, created: false };
+    const file = await this.app.vault.create(PROJECT_BASE_PATH, PROJECT_BASE_CONTENT);
+    return { file, created: true };
+  }
+  async openProjectLibrary() {
+    const { file } = await this.ensureProjectBase();
+    await this.openFile(file);
+  }
+  async initializeProjectLibrary() {
+    const { file, created } = await this.ensureProjectBase();
+    const engine = this.createProjectSyncEngine();
+    this.projectCatalog = await engine.readCachedCatalog();
+    this.refreshProjectCatalogViews();
+    await this.reloadProjectBaseViews();
+    if (created) await this.openFile(file);
+    if (!this.projectCatalog || this.settings.autoSyncOnStartup) {
+      try {
+        await this.refreshProjectCatalog();
+      } catch (error) {
+        this.projectCatalogError = error.message || "无法读取文本清单，请检查网络后重试。";
+        this.refreshProjectCatalogViews();
+        throw error;
+      }
     }
-    await this.ensureGitRepositoryInitialized({ notify });
-    if (this.settings.mode === "reader") {
-      await this.syncReaderRepository({ ensureRepository: false });
-    } else {
-      await this.syncEditorRepository({ ensureRepository: false });
-    }
-    this.refreshReadingAfterRepositorySync();
-    if (notify) {
-      new Notice("Git 同步完成。");
+    return this.projectCatalog;
+  }
+  async reloadProjectBaseViews() {
+    if (this.projectBaseViewsReloaded) return;
+    this.projectBaseViewsReloaded = true;
+    for (const leaf of this.app.workspace?.getLeavesOfType?.("bases") || []) {
+      if (leaf.view.file?.path !== PROJECT_BASE_PATH) continue;
+      const state = leaf.getViewState();
+      await leaf.setViewState({ type: "empty" });
+      await leaf.setViewState(state);
     }
   }
-  async withGitSyncLock(action) {
-    if (this.syncInProgress) {
-      throw new Error("已有 Git 同步正在进行，请等待完成后再试。");
+  refreshProjectCatalogViews() {
+    for (const view of this.projectCatalogViews || []) view.onDataUpdated();
+  }
+  getLessonSyncPercent(originalPath) {
+    const active = this.projectLessonSyncProgress?.get(originalPath);
+    if (Number.isFinite(active)) return active;
+    const status = this.settings.projectLessonSync?.[originalPath];
+    return status?.status !== "skipped" && status?.version ? 100 : 0;
+  }
+  setLessonSyncPercent(originalPath, percent) {
+    this.projectLessonSyncProgress ||= /* @__PURE__ */ new Map();
+    this.projectLessonSyncProgress.set(originalPath, Math.max(0, Math.min(100, percent)));
+    for (const view of this.projectCatalogViews || []) view.updateSyncProgress(originalPath);
+  }
+  async refreshProjectCatalog({ notify = false } = {}) {
+    return this.runProjectLibraryTask(async (engine, signal) => {
+      await this.ensureProjectBase();
+      this.projectCatalog = await engine.getCatalog({ signal });
+      this.projectCatalogError = null;
+      this.refreshProjectCatalogViews();
+      if (notify) new Notice(`文本清单已更新：${this.projectCatalog.lessonCount} 个课次。课文请在 Base 中逐课同步。`);
+      return this.projectCatalog;
+    }, { label: "正在更新文本清单…" });
+  }
+  async initializeProjectSeminar(slug) {
+    return this.runProjectLibraryTask(async (engine, signal) => {
+      const catalog = this.projectCatalog || await engine.getCatalog({ signal });
+      this.projectCatalog = catalog;
+      const seminar = catalog.seminars.find((entry) => entry.slug === slug);
+      if (!seminar) throw new Error("文本清单中不存在这个研讨班，请先更新清单。");
+      const result = await engine.initializeSeminar(slug, { signal });
+      for (const folder of ["original", "translation", "notes", "assets"]) {
+        await this.ensureFolder(`texts/${slug}/${folder}`);
+      }
+      this.recordProjectSyncResult(result);
+      await this.saveSettings();
+      new Notice(result.skippedFiles?.length ? `目录已准备好。术语表已有本地修改，已跳过更新。
+${formatSkipNotice(result.skippedFiles)}` : `${seminar.code.toUpperCase()} 已初始化：术语表和目录已准备好，课文请逐课同步。`, 1e4);
+      return result;
+    }, { label: "正在初始化研讨班…" });
+  }
+  async syncProjectLesson(originalPath) {
+    this.setLessonSyncPercent(originalPath, 0);
+    try {
+      return await this.runProjectLibraryTask(async (engine, signal) => {
+        const result = await engine.syncLesson(originalPath, { signal });
+        const skippedFiles = result.skippedFiles || [];
+        this.settings.projectLessonSync ||= {};
+        this.settings.projectLessonSync[originalPath] = skippedFiles.length ? { status: "skipped", skippedFiles, checkedAt: Date.now() } : { status: "synced", version: result.version, syncedAt: Date.now() };
+        this.recordProjectSyncResult(result);
+        await this.saveSettings();
+        this.setLessonSyncPercent(originalPath, skippedFiles.length ? 0 : 100);
+        this.refreshReadingAfterRepositorySync();
+        new Notice(skippedFiles.length ? formatSkipNotice(skippedFiles) : "本课原文和译文已同步。", 12e3);
+        return result;
+      }, { label: "正在同步本课原文和译文…", originalPath });
+    } catch (error) {
+      this.setLessonSyncPercent(originalPath, 0);
+      throw error;
     }
+  }
+  recordProjectSyncResult(result) {
+    this.settings.projectSyncLastResult = {
+      version: result.version,
+      checkedAt: Date.now(),
+      added: result.added,
+      updated: result.updated,
+      deleted: result.deleted,
+      merged: result.merged || 0,
+      unchanged: result.unchanged,
+      skippedCount: result.skippedFiles?.length || 0,
+      skippedFiles: result.skippedFiles || [],
+      conflictCount: result.conflicts.length,
+      conflictReportPath: result.conflictReportPath
+    };
+  }
+  async runProjectLibraryTask(action, { label = "正在同步文库…", originalPath } = {}) {
+    if (this.syncInProgress) throw new Error("已有文库同步正在进行，请等待完成或取消后再试。");
+    this.syncInProgress = true;
+    this.activeLessonSync = originalPath || null;
+    const controller = new AbortController();
+    this.projectSyncController = controller;
+    const progress = new Notice(label, 0);
+    this.refreshProjectCatalogViews();
+    try {
+      const engine = this.createProjectSyncEngine((event) => {
+        const ratio = event.total > 0 ? event.completed / event.total : 0;
+        let percent = event.phase === "complete" ? 99 : event.phase === "applying" ? 65 + Math.floor(ratio * 34) : event.phase === "downloading" ? 5 + Math.floor(ratio * 60) : 0;
+        if (originalPath) {
+          percent = Math.max(this.projectLessonSyncProgress?.get(originalPath) || 0, percent);
+          this.setLessonSyncPercent(originalPath, percent);
+        }
+        progress.setMessage?.(`${label}${originalPath ? ` ${percent}%` : ""}`);
+      });
+      return await action(engine, controller.signal);
+    } finally {
+      progress.hide?.();
+      if (this.projectSyncController === controller) this.projectSyncController = null;
+      this.syncInProgress = false;
+      this.activeLessonSync = null;
+      this.refreshProjectCatalogViews();
+    }
+  }
+  createProjectSyncEngine(onProgress) {
+    const { ProjectSyncEngine } = require_project_sync();
+    const endpointUrl = this.settings.projectEndpointUrl || DEFAULT_PROJECT_ENDPOINT;
+    const stateDir = `${this.app.vault.configDir || ".obsidian"}/plugins/lacan-translation-helper/project-sync`;
+    const key = JSON.stringify([endpointUrl, stateDir]);
+    if (this.projectSyncEngineKey === key && this.projectSyncEngine) {
+      this.projectSyncEngine.onProgress = onProgress;
+      return this.projectSyncEngine;
+    }
+    this.projectSyncEngine = new ProjectSyncEngine({
+      endpointUrl,
+      stateDir,
+      storage: this.getProjectSyncStorage(),
+      transport: createProjectTransport(this.getPluginRequest()),
+      onProgress
+    });
+    this.projectSyncEngineKey = key;
+    return this.projectSyncEngine;
+  }
+  getProjectSyncStorage() {
+    return createVaultSyncStorage(this.app.vault, {
+      isWriteBlocked: (path) => {
+        const editor = this.translationInlineEditor?.active;
+        return Boolean(editor?.sourcePath === path && (editor.saving || editor.pasting || editor.input?.value !== editor.snapshot?.markdown));
+      },
+      getEditorTexts: (path) => {
+        const texts = [];
+        this.app.workspace.iterateAllLeaves?.((leaf) => {
+          const view = leaf.view;
+          if (view?.file?.path === path && view.editor?.getValue && view.getMode?.() !== "preview") {
+            texts.push(view.editor.getValue());
+          }
+        });
+        return texts;
+      }
+    });
+  }
+  async syncProjectContent(options = {}) {
+    return this.refreshProjectCatalog(options);
+  }
+  cancelProjectSync() {
+    this.projectSyncController?.abort();
+  }
+  async showProjectSyncReport() {
+    if (this.syncInProgress) throw new Error("请等待文库同步或冲突保存完成后查看报告。");
+    const storage = this.getProjectSyncStorage();
+    const summary = this.settings.projectSyncLastResult;
+    const reportPath = summary?.conflictReportPath || `${this.app.vault.configDir || ".obsidian"}/plugins/lacan-translation-helper/project-sync/conflicts.json`;
+    const bytes = await storage.read(reportPath);
+    if (!bytes && !summary) {
+      new Notice("尚无文库同步记录。");
+      return;
+    }
+    const report = bytes ? JSON.parse(new TextDecoder().decode(bytes)) : { version: summary?.version, conflicts: [] };
+    const engine = this.createProjectSyncEngine();
+    new ProjectSyncReportModal(this.app, storage, Array.isArray(report) ? { version: summary?.version, conflicts: report } : report, {
+      readOnly: true,
+      skippedFiles: summary?.skippedFiles || [],
+      checkedVersion: summary?.version,
+      engine: {
+        getConflictComparison: (path) => {
+          if (this.syncInProgress) throw new Error("文库正在更新，请稍后重新打开比较。");
+          return engine.getConflictComparison(path);
+        },
+        resolveConflict: (path, options) => this.resolveProjectSyncConflict(engine, path, options)
+      },
+      onResolved: async (result) => {
+        this.settings.projectSyncLastResult = {
+          ...this.settings.projectSyncLastResult || { added: 0, updated: 0, deleted: 0, unchanged: 0 },
+          version: result.version,
+          checkedAt: Date.now(),
+          conflictCount: result.conflicts.length,
+          conflictReportPath: result.conflictReportPath || reportPath
+        };
+        await this.saveSettings();
+        this.refreshReadingAfterRepositorySync();
+      }
+    }).open();
+  }
+  async resolveProjectSyncConflict(engine, path, options) {
+    if (this.syncInProgress) throw new Error("已有文库同步或冲突保存正在进行，请稍后再试。");
+    if (engine !== this.createProjectSyncEngine()) throw new Error("文库同步地址已改变，请重新打开冲突比较。");
     this.syncInProgress = true;
     try {
-      return await action();
+      return await engine.resolveConflict(path, options);
     } finally {
       this.syncInProgress = false;
     }
-  }
-  async syncReaderRepository({ ensureRepository = true } = {}) {
-    const url = this.settings.repositoryUrl?.trim();
-    const branch = this.settings.repositoryBranch?.trim() || "main";
-    if (!url) {
-      throw new Error("尚未配置 Lacan-Chinese-Translation-Project 仓库地址。");
-    }
-    if (ensureRepository) {
-      await this.ensureGitRepositoryInitialized();
-    }
-    await this.resetReaderRepositoryToRemote(url, branch);
-  }
-  async syncEditorRepository({ ensureRepository = true } = {}) {
-    const url = this.settings.repositoryUrl?.trim();
-    const branch = this.settings.repositoryBranch?.trim() || "main";
-    const localBranch = this.settings.upstreamLocalBranch?.trim() || "lacan-upstream/main";
-    if (!url) {
-      throw new Error("尚未配置 Lacan-Chinese-Translation-Project 仓库地址。");
-    }
-    if (ensureRepository) {
-      await this.ensureGitRepositoryInitialized();
-    }
-    await this.fetchRepositoryToLocalBranch(url, branch, localBranch);
-  }
-  async fetchRepositoryToLocalBranch(url, remoteBranch, localBranch) {
-    await this.execGit(["check-ref-format", "--branch", localBranch]);
-    const currentBranch = (await this.execGit(["branch", "--show-current"])).trim();
-    if (currentBranch && currentBranch === localBranch) {
-      throw new Error(`当前分支是 ${localBranch}，为避免覆盖当前分支，已取消同步。`);
-    }
-    await this.execGit(["fetch", "--no-tags", url, `+${remoteBranch}:refs/heads/${localBranch}`], {
-      useGithubProxy: true,
-      remoteUrl: url
-    });
-  }
-  async execGit(args, { useGithubProxy = false, remoteUrl = "" } = {}) {
-    const cwd = this.getVaultBasePath();
-    const childProcess = require("child_process");
-    const gitArgs = this.withGitHubProxy(args, useGithubProxy, remoteUrl);
-    return new Promise((resolve, reject) => {
-      const child = childProcess.execFile("git", gitArgs, {
-        cwd,
-        maxBuffer: GIT_MAX_BUFFER,
-        timeout: GIT_TIMEOUT_MS
-      }, (error, stdout, stderr) => {
-        this.gitProcesses.delete(child);
-        if (error) {
-          const timedOut = error.killed && error.signal === "SIGTERM";
-          const detail = String(stderr || stdout || error.message).trim();
-          if (timedOut) {
-            reject(new Error(detail || "Git 命令执行超时，已自动停止。"));
-            return;
-          }
-          reject(new Error(detail || error.message));
-          return;
-        }
-        resolve(String(stdout || ""));
-      });
-      this.gitProcesses.add(child);
-      child.once("exit", () => {
-        this.gitProcesses.delete(child);
-      });
-    });
-  }
-  async resetReaderRepositoryToRemote(url, branch) {
-    await this.execGit(["check-ref-format", "--branch", branch]);
-    await this.execGit(["fetch", "--no-tags", url, branch], {
-      useGithubProxy: true,
-      remoteUrl: url
-    });
-    const status = await this.gitStatusPorcelain();
-    if (!this.confirmReaderOverwrite(status)) {
-      throw new Error("已取消 Reader 同步，当前项目未被覆盖。");
-    }
-    await this.discardReaderWorkTree();
-    await this.execGit(["checkout", "-B", branch, "FETCH_HEAD"]);
-    await this.execGit(["reset", "--hard", "FETCH_HEAD"]);
-    await this.execGit(["clean", "-fd"]);
-  }
-  async discardReaderWorkTree() {
-    if (await this.gitHasHead()) {
-      await this.execGit(["reset", "--hard"]);
-    }
-    await this.execGit(["clean", "-fd"]);
-  }
-  async gitStatusPorcelain() {
-    return this.execGit(["status", "--porcelain=v1", "--untracked-files=all"]);
-  }
-  confirmReaderOverwrite(status) {
-    const changedCount = status.split(/\r?\n/).filter((line) => line.trim()).length;
-    return window.confirm(
-      [
-        `Reader 模式会用主仓库内容覆盖当前本地文件。`,
-        changedCount > 0 ? `检测到 ${changedCount} 个本地改动或未跟踪文件。` : `当前没有检测到本地改动，但同步仍会把项目直接对齐到远端。`,
-        `确认后会丢弃本地改动，并删除未被 Git 跟踪的非忽略文件。`,
-        `如需保留本地编辑内容，请取消同步并切换到 Editer 模式或先手动备份。`,
-        `是否继续？`
-      ].join("\n")
-    );
-  }
-  async gitHasHead() {
-    try {
-      await this.execGit(["rev-parse", "--verify", "HEAD"]);
-      return true;
-    } catch (_error) {
-      return false;
-    }
-  }
-  confirmReaderAutoSyncRun() {
-    return window.confirm(
-      [
-        `Reader 模式的启动自动同步会在打开 Obsidian 后更新当前项目。`,
-        `同步开始后仍会显示覆盖确认框；确认后本地项目会直接对齐到主仓库。`,
-        `如需保留本地编辑内容，请取消本次自动同步，并在设置中关闭自动同步或切换到 Editer 模式。`,
-        `是否继续本次自动同步？`
-      ].join("\n")
-    );
-  }
-  confirmReaderAutoSyncEnable() {
-    return window.confirm(
-      [
-        `Reader 模式下，启动时自动同步默认应保持关闭。`,
-        `开启后，Obsidian 启动时会尝试同步主仓库，并可能覆盖当前项目。`,
-        `如果你会在本地编辑译文，请使用 Editer 模式或保持自动同步关闭。`,
-        `是否仍要开启 Reader 自动同步？`
-      ].join("\n")
-    );
-  }
-  async ensureGitRepositoryInitialized({ notify = false } = {}) {
-    if (this.hasGitRepositoryMetadata()) {
-      return false;
-    }
-    await this.execGit(["init"]);
-    if (notify) {
-      new Notice("当前项目未初始化 Git，已自动执行 git init。");
-    }
-    return true;
-  }
-  hasGitRepositoryMetadata() {
-    const fs = require("fs");
-    const path = require("path");
-    return fs.existsSync(path.join(this.getVaultBasePath(), ".git"));
   }
   refreshReadingAfterRepositorySync() {
     this.segmentPreviewCache.clear();
     this.refreshBilingualReadingViews();
     this.renderReadingToolbar();
   }
-  withGitHubProxy(args, useGithubProxy, remoteUrl) {
-    const proxyUrl = this.settings.githubProxyUrl?.trim() || DEFAULT_GITHUB_PROXY_URL;
-    if (!useGithubProxy || !this.settings.githubProxyEnabled || !proxyUrl || !this.isGitHubRepositoryUrl(remoteUrl)) {
-      return args;
-    }
-    return ["-c", `http.proxy=${proxyUrl}`, "-c", `https.proxy=${proxyUrl}`, ...args];
-  }
-  isGitHubRepositoryUrl(url) {
-    const normalized = String(url || "").trim().toLowerCase();
-    if (!normalized) {
-      return false;
-    }
-    return /^(?:https?:\/\/|git:\/\/)github\.com[:/]/.test(normalized) || /^ssh:\/\/(?:[^@]+@)?github\.com[:/]/.test(normalized) || /^[^@\s]+@github\.com[:/]/.test(normalized) || /^github\.com[:/]/.test(normalized);
-  }
   getVaultBasePath() {
     const adapter = this.app.vault.adapter;
     if (typeof adapter.getBasePath === "function") {
       return adapter.getBasePath();
     }
-    throw new Error("Git 功能需要 Obsidian 桌面端本地 vault。");
+    throw new Error("本机 Agent 需要 Obsidian 桌面端本地文库。");
   }
   scheduleReadingToolbarRender(delay = 220) {
     if (this.readingToolbarRenderTimer) {
@@ -12111,6 +17126,7 @@ ${section}`
     }
     const timer = window.setTimeout(async () => {
       this.progressTimers.delete(normalized);
+      if (this.syncInProgress) return;
       await this.runWithNotice(
         () => this.updateTranslationProgressByPath(normalized),
         "翻译进度更新失败"
@@ -12404,82 +17420,50 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
         "项目关系图打开失败"
       ));
     });
-    new Setting(containerEl).setName("模式").setDesc("决定同步主项目时是否更新当前文件。").addDropdown((dropdown) => {
-      dropdown.addOption("reader", "Reader").addOption("editer", "Editer").setValue(this.plugin.settings.mode).onChange(async (value) => {
-        this.plugin.settings.mode = value;
-        if (value === "reader" && this.plugin.settings.autoSyncOnStartup && !this.plugin.confirmReaderAutoSyncEnable()) {
-          this.plugin.settings.autoSyncOnStartup = false;
-          new Notice("已关闭 Reader 模式启动时自动同步。");
-        }
+    let proxyAddressInput;
+    new Setting(containerEl).setName("启用插件 HTTP 代理").setDesc("用于文库同步、词典查询和生词本请求。关闭时沿用 Obsidian 的网络设置；AI CLI 使用自身的网络配置。").addToggle((toggle) => toggle.setValue(Boolean(this.plugin.settings.pluginHttpProxyEnabled)).onChange(async (value) => {
+      this.plugin.settings.pluginHttpProxyEnabled = value;
+      proxyAddressInput?.setDisabled(!value);
+      await this.plugin.saveSettings();
+    }));
+    new Setting(containerEl).setName("插件 HTTP 代理地址").setDesc("启用后生效。填写 HTTP 或 HTTPS 代理地址，例如 http://127.0.0.1:7890。").addText((text) => {
+      proxyAddressInput = text;
+      text.setPlaceholder("http://127.0.0.1:7890").setValue(this.plugin.settings.pluginHttpProxyUrl || "").setDisabled(!this.plugin.settings.pluginHttpProxyEnabled).onChange(async (value) => {
+        this.plugin.settings.pluginHttpProxyUrl = value.trim();
         await this.plugin.saveSettings();
-        this.plugin.scheduleReadingToolbarRender();
+      });
+    });
+    new Setting(containerEl).setName("文库同步地址").setDesc("从 WordPress 获取完整文本清单，课文在 Base 中逐课同步，不会整库下载。").addText((text) => text.setPlaceholder(DEFAULT_PROJECT_ENDPOINT).setValue(this.plugin.settings.projectEndpointUrl || DEFAULT_PROJECT_ENDPOINT).onChange(async (value) => {
+      this.plugin.settings.projectEndpointUrl = value.trim() || DEFAULT_PROJECT_ENDPOINT;
+      this.plugin.projectCatalog = null;
+      this.plugin.projectLessonSyncProgress?.clear();
+      this.plugin.settings.projectLessonSync = {};
+      await this.plugin.saveSettings();
+      this.plugin.refreshProjectCatalogViews();
+    }));
+    new Setting(containerEl).setName("本地笔记与修改保护").setDesc("识别到正文、备注、注释或建言有本地修改时，整课跳过，不合并、不覆盖。需要重新同步时，请先保留修改副本，再删除有改动的本地文件后同步。未保存的编辑同样受保护。");
+    new Setting(containerEl).setName("启动时更新文本清单").setDesc("仅刷新已发布课次目录，不下载课文。首次安装会自动获取清单。").addToggle((toggle) => toggle.setValue(Boolean(this.plugin.settings.autoSyncOnStartup)).onChange(async (value) => {
+      this.plugin.settings.autoSyncOnStartup = value;
+      await this.plugin.saveSettings();
+    }));
+    let cancelSyncButton;
+    new Setting(containerEl).setName("更新文本清单").setDesc("只更新目录。打开 Base 后，先初始化研讨班，再点击每课的同步按钮，同时下载原文和译文。").addButton((button) => button.setButtonText(this.plugin.syncInProgress ? "处理中…" : "更新清单").setCta().setDisabled(this.plugin.syncInProgress).onClick(async () => {
+      button.setDisabled(true);
+      button.setButtonText("同步中…");
+      cancelSyncButton?.setDisabled(false);
+      try {
+        await this.plugin.runWithNotice(() => this.plugin.syncConfiguredRepositories({ notify: true }), "文库同步失败");
+      } finally {
         this.display();
-      });
+      }
+    })).addButton((button) => {
+      cancelSyncButton = button;
+      button.setButtonText("取消同步").setDisabled(!this.plugin.syncInProgress).onClick(() => this.plugin.cancelProjectSync());
+    }).addButton((button) => {
+      button.setButtonText("打开 Base").onClick(() => this.plugin.runWithNotice(() => this.plugin.openProjectLibrary(), "打开文本清单失败"));
     });
-    const modeHelpEl = containerEl.createDiv("lacan-mode-help setting-item-description");
-    modeHelpEl.createEl("p", {
-      text: "Reader：同步 GitHub 主仓库的最新更新到本地当前项目，适合只阅读或查看译文的人。"
-    });
-    modeHelpEl.createEl("p", {
-      text: "Editer：同步主仓库时只下载为对照版本，不覆盖你正在编辑的当前文件，适合参与翻译的人。"
-    });
-    new Setting(containerEl).setName("Lacan-Chinese-Translation-Project 仓库地址").setDesc("填写主项目在 GitHub 上的地址。Reader 会更新当前本地项目；Editer 会下载为主项目对照版本。").addText((text) => {
-      text.setPlaceholder(DEFAULT_REPOSITORY_URL).setValue(this.plugin.settings.repositoryUrl || "").onChange(async (value) => {
-        this.plugin.settings.repositoryUrl = value.trim();
-        await this.plugin.saveSettings();
-      });
-    });
-    new Setting(containerEl).setName("启用 GitHub HTTP 代理").setDesc("仅用于插件同步 GitHub 仓库，不会改变 Obsidian 其它网络操作。如 Obsidian 或系统已有可用代理，可保持关闭。").addToggle((toggle) => {
-      toggle.setValue(Boolean(this.plugin.settings.githubProxyEnabled)).onChange(async (value) => {
-        this.plugin.settings.githubProxyEnabled = value;
-        await this.plugin.saveSettings();
-      });
-    });
-    new Setting(containerEl).setName("GitHub HTTP 代理地址").setDesc("启用上面的开关后生效。输入框中的地址只是配置样例，请按自己的代理地址填写。").addText((text) => {
-      text.setPlaceholder(DEFAULT_GITHUB_PROXY_URL).setValue(this.plugin.settings.githubProxyUrl || DEFAULT_GITHUB_PROXY_URL).onChange(async (value) => {
-        this.plugin.settings.githubProxyUrl = value.trim() || DEFAULT_GITHUB_PROXY_URL;
-        await this.plugin.saveSettings();
-      });
-    });
-    new Setting(containerEl).setName("上游分支").setDesc("通常保持 main。不熟悉 Git 的用户不用修改。").addText((text) => {
-      text.setPlaceholder("main").setValue(this.plugin.settings.repositoryBranch || "main").onChange(async (value) => {
-        this.plugin.settings.repositoryBranch = value.trim() || "main";
-        await this.plugin.saveSettings();
-      });
-    });
-    new Setting(containerEl).setName("Editer 模式主项目对照名称").setDesc("Editer 模式下，插件会把主项目下载为这个对照版本，用来和你正在编辑的内容比较。不了解的话保持默认。").addText((text) => {
-      text.setPlaceholder("lacan-upstream/main").setValue(this.plugin.settings.upstreamLocalBranch || "lacan-upstream/main").onChange(async (value) => {
-        this.plugin.settings.upstreamLocalBranch = value.trim() || "lacan-upstream/main";
-        await this.plugin.saveSettings();
-      });
-    });
-    new Setting(containerEl).setName("启动时自动同步").setDesc("打开 Obsidian 时自动同步主项目。Reader 默认建议关闭；Editer 只更新主项目对照版本。").addToggle((toggle) => {
-      toggle.setValue(Boolean(this.plugin.settings.autoSyncOnStartup)).onChange(async (value) => {
-        if (value && this.plugin.settings.mode === "reader" && !this.plugin.confirmReaderAutoSyncEnable()) {
-          this.plugin.settings.autoSyncOnStartup = false;
-          await this.plugin.saveSettings();
-          this.display();
-          return;
-        }
-        this.plugin.settings.autoSyncOnStartup = value;
-        await this.plugin.saveSettings();
-      });
-    });
-    new Setting(containerEl).setName("立即同步").setDesc("立即获取主项目的最新内容。当前目录未初始化 Git 时会先自动执行 git init。Reader 会更新当前文件；Editer 不覆盖当前文件。").addButton((button) => {
-      button.setButtonText("同步").setCta().setDisabled(this.plugin.syncInProgress).onClick(async () => {
-        button.setDisabled(true);
-        button.setButtonText("同步中...");
-        try {
-          await this.plugin.runWithNotice(
-            () => this.plugin.syncConfiguredRepositories({ notify: true }),
-            "Git 同步失败"
-          );
-        } finally {
-          button.setButtonText("同步");
-          button.setDisabled(false);
-        }
-      });
-    });
+    const summary = this.plugin.settings.projectSyncLastResult;
+    new Setting(containerEl).setName("最近同步与跳过记录").setDesc(summary ? `最近检查版本 ${summary.version}；新增 ${summary.added}，更新 ${summary.updated}，跳过 ${summary.skippedCount || 0}，保留的旧版冲突记录 ${summary.conflictCount || 0}。最近检查：${new Date(summary.checkedAt).toLocaleString()}` : "尚未同步。已有本地修改的文本会整课跳过；删除文件后可重新下载。").addButton((button) => button.setButtonText("查看同步报告").setDisabled(!summary).onClick(() => this.plugin.runWithNotice(() => this.plugin.showProjectSyncReport(), "打开同步报告失败")));
   }
   renderSettingsTabs(containerEl) {
     const tabsEl = containerEl.createDiv("lacan-settings-tabs");
@@ -12861,163 +17845,133 @@ var LacanLessonListBasesView = class extends ObsidianBasesView {
     super(controller);
     this.plugin = plugin;
     this.containerEl = parentEl.createDiv("lacan-bases-list");
+    this.catalogContainer = parentEl.closest?.(".view-content");
+    this.catalogContainer?.addClass("lacan-catalog-base");
+    this.openSeminars = /* @__PURE__ */ new Set();
+    this.progressElements = /* @__PURE__ */ new Map();
+    plugin.projectCatalogViews ||= /* @__PURE__ */ new Set();
+    plugin.projectCatalogViews.add(this);
+    this.onDataUpdated();
+  }
+  onunload() {
+    this.plugin.projectCatalogViews?.delete(this);
+    this.catalogContainer?.removeClass("lacan-catalog-base");
   }
   onDataUpdated() {
     this.containerEl.empty();
-    const groups = this.data?.groupedData?.length ? this.data.groupedData : [{ entries: this.data?.entries || [] }];
-    const mode = String(this.config?.get?.("mode") || "reader");
-    for (const group of groups) {
-      const entries = group.entries || [];
-      const details = this.containerEl.createEl("details", {
-        cls: "lacan-bases-group"
+    this.progressElements.clear();
+    const catalog = this.plugin.projectCatalog;
+    if (!catalog) {
+      this.containerEl.createEl("p", {
+        cls: "lacan-bases-catalog-status",
+        text: this.plugin.projectCatalogError || "正在获取完整文本清单，课文将在点击同步后下载。"
       });
-      const summary = details.createEl("summary", {
-        cls: "lacan-bases-group-summary"
-      });
-      const groupTitle = this.getGroupTitle(group);
+      this.createActionLink(this.containerEl, "更新文本清单", () => this.plugin.refreshProjectCatalog({ notify: true }));
+      return;
+    }
+    this.containerEl.createEl("p", {
+      cls: "lacan-bases-catalog-status",
+      text: `${catalog.lessonCount} 个课次 · ${catalog.seminars.length} 个研讨班 · 课文按需同步`
+    });
+    const search = this.containerEl.createEl("input", {
+      cls: "lacan-bases-catalog-search",
+      type: "search",
+      placeholder: "搜索研讨班或课次",
+      attr: { "aria-label": "搜索完整文本清单" }
+    });
+    search.value = this.searchText || "";
+    this.groupsEl = this.containerEl.createDiv("lacan-bases-catalog-groups");
+    search.addEventListener("input", () => {
+      this.searchText = search.value;
+      this.renderCatalogGroups(catalog);
+    });
+    this.renderCatalogGroups(catalog);
+  }
+  renderCatalogGroups(catalog) {
+    this.groupsEl.empty();
+    this.progressElements.clear();
+    const query = String(this.searchText || "").trim().toLocaleLowerCase();
+    for (const seminar of catalog.seminars) {
+      const lessons = query ? seminar.lessons.filter((lesson) => `${seminar.title} ${lesson.title} ${lesson.originalPath}`.toLocaleLowerCase().includes(query)) : seminar.lessons;
+      if (!lessons.length) continue;
+      const details = this.groupsEl.createEl("details", { cls: "lacan-bases-group" });
+      const summary = details.createEl("summary", { cls: "lacan-bases-group-summary" });
       summary.createSpan({
         cls: "lacan-bases-group-title",
-        text: groupTitle
+        text: `${String(seminar.order).padStart(2, "0")} · ${seminar.title}`
       });
-      this.createActionLink(
-        summary,
-        "批量新建译文",
-        () => this.createMissingTranslationsForEntries(entries, groupTitle),
-        "批量新建译文失败"
-      );
-      summary.createSpan({
-        cls: "lacan-bases-group-count",
-        text: `${entries.length}`
-      });
-      const listEl = details.createEl("ul", {
-        cls: "lacan-bases-group-list"
-      });
+      this.createActionLink(summary, "初始化研讨班", () => this.plugin.initializeProjectSeminar(seminar.slug), true);
+      summary.createSpan({ cls: "lacan-bases-group-count", text: `${lessons.length}` });
+      const listEl = details.createEl("ul", { cls: "lacan-bases-group-list" });
+      const renderEntries = () => {
+        if (details.dataset.entriesRendered === "true") return;
+        for (const lesson of lessons) this.renderLesson(listEl, lesson);
+        details.dataset.entriesRendered = "true";
+      };
       details.addEventListener("toggle", () => {
-        if (details.open && details.dataset.entriesRendered !== "true") {
-          this.renderGroupEntries(listEl, entries, mode);
-          details.dataset.entriesRendered = "true";
-        }
+        if (details.open) {
+          this.openSeminars.add(seminar.slug);
+          renderEntries();
+        } else this.openSeminars.delete(seminar.slug);
       });
+      if (query || this.openSeminars.has(seminar.slug)) {
+        details.open = true;
+        renderEntries();
+      }
     }
   }
-  renderGroupEntries(listEl, entries, mode) {
-    for (const entry of entries) {
-      this.renderEntry(listEl, entry, mode);
-    }
-  }
-  getGroupTitle(group) {
-    const value = this.valueToString(group?.value);
-    if (value && value !== "[object Object]") {
-      return value;
-    }
-    const firstEntry = group.entries?.[0];
-    return this.valueToString(firstEntry?.getValue?.("formula.seminarGroup")) || "未分组";
-  }
-  renderEntry(listEl, entry, mode) {
-    const lessonTitle = this.valueToString(entry.getValue("formula.lessonTitle"));
-    const originalPath = this.valueToString(entry.getValue("formula.originalPath"));
-    const translationPath = this.valueToString(entry.getValue("formula.translationPath"));
-    const notesIndexPath = this.valueToString(entry.getValue("formula.notesIndexPath"));
-    const progress = this.valueToString(entry.getValue("formula.translationProgressLabel")) || "0.00%";
-    const untranslatedCount = this.valueToString(entry.getValue("formula.untranslatedCount"));
-    const maxSegmentId = this.valueToString(entry.getValue("formula.maxSegmentId"));
-    const translationFile = this.plugin.app.vault.getAbstractFileByPath(translationPath);
-    const itemEl = listEl.createEl("li", {
-      cls: "lacan-bases-entry"
-    });
-    const mainEl = itemEl.createDiv("lacan-bases-entry-main");
-    mainEl.createSpan({
-      cls: "lacan-bases-entry-title",
-      text: lessonTitle
-    });
-    this.createActionLink(mainEl, "原文", () => this.openOriginal(entry.file, originalPath));
+  renderLesson(listEl, lesson) {
+    const item = listEl.createEl("li", { cls: "lacan-bases-entry" });
+    const main = item.createDiv("lacan-bases-entry-main");
+    main.createSpan({ cls: "lacan-bases-entry-title", text: lesson.title });
+    this.createActionLink(main, "原文", () => this.openDownloadedFile(lesson.originalPath));
+    this.createActionLink(main, "译文", () => this.openDownloadedFile(lesson.translationPath));
     this.createActionLink(
-      mainEl,
-      translationFile instanceof TFile ? "译文" : "新建翻译",
-      () => this.openOrCreateTranslation(entry.file, translationFile)
+      main,
+      this.plugin.activeLessonSync === lesson.originalPath ? "同步中…" : "同步",
+      () => this.plugin.syncProjectLesson(lesson.originalPath),
+      true
     );
-    this.createActionLink(mainEl, "笔记", () => this.openOrCreateNotesIndex(notesIndexPath));
-    mainEl.createSpan({
-      cls: "lacan-bases-progress",
-      text: progress
+    const progress = main.createSpan({ cls: "lacan-bases-progress" });
+    progress.setAttribute("role", "progressbar");
+    progress.setAttribute("aria-label", `${lesson.title} 原文和译文同步进度`);
+    progress.setAttribute("aria-valuemin", "0");
+    progress.setAttribute("aria-valuemax", "100");
+    this.progressElements.set(lesson.originalPath, progress);
+    this.updateSyncProgress(lesson.originalPath);
+    const syncStatus = this.plugin.settings.projectLessonSync?.[lesson.originalPath];
+    if (syncStatus?.status === "skipped" && this.plugin.activeLessonSync !== lesson.originalPath) main.createSpan({
+      cls: "lacan-bases-sync-status is-skipped",
+      text: "已跳过",
+      attr: { title: formatSkipNotice(syncStatus.skippedFiles || []) }
     });
-    if (mode === "editer") {
-      const metaEl = itemEl.createDiv("lacan-bases-entry-meta");
-      metaEl.createSpan({ text: `原文：${originalPath}` });
-      metaEl.createSpan({ text: `译文：${translationPath}` });
-      metaEl.createSpan({ text: `笔记：${notesIndexPath}` });
-      metaEl.createSpan({ text: `未译：${untranslatedCount || 0}` });
-      metaEl.createSpan({ text: `最大分段：${maxSegmentId || 0}` });
-    }
+    const meta = item.createDiv("lacan-bases-entry-meta");
+    meta.createSpan({ text: `原文：${lesson.originalPath}` });
+    meta.createSpan({ text: `译文：${lesson.translationPath}` });
   }
-  createActionLink(parentEl, text, action) {
-    return this.createActionLinkWithNotice(parentEl, text, action, "打开课文失败");
+  updateSyncProgress(originalPath) {
+    const element = this.progressElements.get(originalPath);
+    if (!element) return;
+    const percent = this.plugin.getLessonSyncPercent(originalPath);
+    element.textContent = `${percent}%`;
+    element.setAttribute("aria-valuenow", `${percent}`);
   }
-  createActionLinkWithNotice(parentEl, text, action, errorLabel = "打开课文失败") {
-    const linkEl = parentEl.createEl("a", {
-      cls: "lacan-bases-link",
-      href: "#",
-      text
-    });
-    linkEl.addEventListener("click", async (event) => {
+  createActionLink(parentEl, text, action, syncAction = false) {
+    const link = parentEl.createEl("a", { cls: "lacan-bases-link", href: "#", text });
+    const disabled = syncAction && Boolean(this.plugin.syncInProgress);
+    link.setAttribute("aria-disabled", String(disabled));
+    if (disabled) link.addClass("is-disabled");
+    link.addEventListener("click", async (event) => {
       event.preventDefault();
       event.stopPropagation();
-      await this.plugin.runWithNotice(action, errorLabel);
+      if (disabled) return;
+      await this.plugin.runWithNotice(action, "文库操作失败");
     });
-    return linkEl;
+    return link;
   }
-  async createMissingTranslationsForEntries(entries, scopeLabel = "当前研讨班") {
-    const originalFiles = (entries || []).map((entry) => entry.file).filter((file) => file instanceof TFile && this.plugin.isOriginalLessonPath(file.path));
-    await this.plugin.createMissingTranslationSkeletons({
-      originalFiles,
-      scopeLabel
-    });
-  }
-  async openOriginal(originalFile, originalPath) {
-    if (originalFile instanceof TFile) {
-      await this.plugin.openFile(originalFile);
-      return;
-    }
-    const file = this.plugin.app.vault.getAbstractFileByPath(originalPath);
-    if (file instanceof TFile) {
-      await this.plugin.openFile(file);
-    }
-  }
-  async openOrCreateTranslation(originalFile, translationFile) {
-    if (translationFile instanceof TFile) {
-      await this.plugin.openFile(translationFile);
-      return;
-    }
-    if (!(originalFile instanceof TFile)) {
-      throw new Error("找不到对应原文，无法创建译文。");
-    }
-    await this.plugin.createTranslationForOriginal(originalFile, {
-      openAfterCreate: true,
-      notify: true,
-      updateProgress: true
-    });
-  }
-  async openOrCreateNotesIndex(notesIndexPath) {
-    const normalized = normalizePath(notesIndexPath || "");
-    if (!normalized) {
-      throw new Error("找不到阅读笔记目录路径。");
-    }
-    const existing = this.plugin.app.vault.getAbstractFileByPath(normalized);
-    if (existing instanceof TFile) {
-      await this.plugin.openFile(existing);
-      return;
-    }
-    await this.plugin.ensureFolder(normalized.split("/").slice(0, -1).join("/"));
-    const created = await this.plugin.app.vault.create(
-      normalized,
-      "# 阅读笔记\n\n本目录用于保存本研讨班的阅读笔记和补充材料。\n"
-    );
-    await this.plugin.openFile(created);
-  }
-  valueToString(value) {
-    if (!value || value.isEmpty?.()) {
-      return "";
-    }
-    return String(value);
+  async openDownloadedFile(path) {
+    const file = this.plugin.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) throw new Error("本课尚未下载，请先点击同步，同时获取原文和译文。");
+    await this.plugin.openFile(file);
   }
 };

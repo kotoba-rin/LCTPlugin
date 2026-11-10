@@ -85,17 +85,54 @@ try {
     forks: [{ id: "legacy", url: "https://example.com/legacy.git", localBranch: "legacy", enabled: true }],
   };
   const repositorySyncCalls = [];
-  syncPlugin.ensureGitRepositoryInitialized = async () => { repositorySyncCalls.push("init"); };
-  syncPlugin.syncReaderRepository = async () => { repositorySyncCalls.push("reader"); };
-  syncPlugin.syncEditorRepository = async () => { repositorySyncCalls.push("editor"); };
+  syncPlugin.ensureGitRepositoryInitialized = async () => { assert.fail("content sync must work without Git"); };
+  syncPlugin.syncReaderRepository = async () => { assert.fail("retired Reader mode must not run"); };
+  syncPlugin.syncEditorRepository = async () => { assert.fail("retired Editer mode must not run"); };
+  syncPlugin.syncProjectContent = async () => { repositorySyncCalls.push("https"); };
   syncPlugin.syncForkRepository = async () => { assert.fail("legacy Fork settings must never trigger a fetch"); };
   syncPlugin.refreshReadingAfterRepositorySync = () => { repositorySyncCalls.push("refresh"); };
   await syncPlugin.syncConfiguredRepositories();
-  assert.deepStrictEqual(repositorySyncCalls, ["init", "reader", "refresh"]);
+  assert.deepStrictEqual(repositorySyncCalls, ["https"]);
   repositorySyncCalls.length = 0;
   syncPlugin.settings.mode = "editer";
   await syncPlugin.syncConfiguredRepositories();
-  assert.deepStrictEqual(repositorySyncCalls, ["init", "editor", "refresh"], "both repository modes must ignore legacy Fork settings");
+  assert.deepStrictEqual(repositorySyncCalls, ["https"], "legacy modes must use the same safe HTTP sync without Git");
+
+  const mergePlugin = Object.create(PluginClass.prototype);
+  mergePlugin.settings = {};
+  mergePlugin.app = { vault: { configDir: ".obsidian" } };
+  mergePlugin.getProjectSyncStorage = () => ({ read: async () => null, write: async () => {}, remove: async () => {} });
+  const sharedEngine = mergePlugin.createProjectSyncEngine();
+  assert.strictEqual(mergePlugin.createProjectSyncEngine(), sharedEngine, "sync and resolution must share the engine lock");
+  mergePlugin.settings.projectEndpointUrl = "http://localhost:18769/project";
+  assert.notStrictEqual(mergePlugin.createProjectSyncEngine(), sharedEngine, "changed source must invalidate a previously opened comparison");
+  await assert.rejects(() => mergePlugin.resolveProjectSyncConflict(sharedEngine, "texts/test.md", {}), /地址已改变/);
+  const currentEngine = mergePlugin.createProjectSyncEngine();
+  let finishResolution;
+  currentEngine.resolveConflict = async () => new Promise((resolve) => { finishResolution = resolve; });
+  const resolution = mergePlugin.resolveProjectSyncConflict(currentEngine, "texts/test.md", {});
+  assert.strictEqual(mergePlugin.syncInProgress, true);
+  await assert.rejects(() => mergePlugin.syncProjectContent(), /已有文库同步/);
+  await assert.rejects(() => mergePlugin.resolveProjectSyncConflict(currentEngine, "texts/test.md", {}), /正在进行/);
+  finishResolution({ conflicts: [] });
+  await resolution;
+  assert.strictEqual(mergePlugin.syncInProgress, false);
+  currentEngine.resolveConflict = async () => { throw new Error("stale comparison"); };
+  await assert.rejects(() => mergePlugin.resolveProjectSyncConflict(currentEngine, "texts/test.md", {}), /stale/);
+  assert.strictEqual(mergePlugin.syncInProgress, false, "a rejected save must release the plugin lock");
+
+  const draftPlugin = Object.create(PluginClass.prototype);
+  const draftPath = "texts/s14/translation/Leçon-01.md";
+  draftPlugin.app = {
+    vault: { adapter: { readBinary: () => assert.fail("unsaved drafts must block before disk mutation") } },
+    workspace: {},
+  };
+  draftPlugin.translationInlineEditor = { active: {
+    sourcePath: draftPath, input: { value: "unsaved paragraph draft" },
+    snapshot: { markdown: "original paragraph" }, saving: false, pasting: false,
+  } };
+  assert.strictEqual(await draftPlugin.getProjectSyncStorage().compareAndWrite(draftPath, "unused", Buffer.from("upstream")), false);
+  assert.strictEqual(await draftPlugin.getProjectSyncStorage().compareAndWrite(draftPath, "unused", null), false, "inline drafts must also block upstream deletion");
 
   const graphPlugin = Object.create(PluginClass.prototype);
   graphPlugin.projectGraphViews = new WeakSet();

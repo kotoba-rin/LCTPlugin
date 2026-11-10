@@ -14,6 +14,11 @@ const { TranslationInlineEditor } = require("./translation-inline-editor");
 const { readTranslationSegment, replaceTranslationSegment } = require("./translation-inline-source");
 const { bindTranslationPreview } = require("./translation-reading-preview");
 const { registerPdfReading, addPdfFileMenuItems } = require("./pdf-reading");
+const { createProjectTransport, createVaultSyncStorage } = require("./project-sync-obsidian");
+const { createPluginRequest } = require("./plugin-http-request");
+const { PROJECT_BASE_PATH, PROJECT_BASE_CONTENT } = require("./project-library-base");
+const { formatSkipNotice } = require("./project-sync-status");
+const { ProjectSyncReportModal } = require("./project-sync-report");
 const {
   Component,
   Notice,
@@ -94,13 +99,10 @@ const LESSON_RE = /<!--\s*lesson:\s*([^>\s]+)\s*-->/i;
 const UNTRANSLATED_RE = /<!--\s*untranslated\s*-->/gi;
 const MARKDOWN_RENDER_COMPONENT_KEY = "__lacanMarkdownRenderComponent";
 const LACAN_LESSON_LIST_VIEW_TYPE = "lacan-lesson-list";
-const DEFAULT_REPOSITORY_URL = "https://github.com/Kotoba-Rin/Lacan-Chinese-Translation-Project.git";
-const DEFAULT_GITHUB_PROXY_URL = "http://127.0.0.1:6789";
+const DEFAULT_PROJECT_ENDPOINT = "https://kotoba-rin.com/wp-json/lctp/v1/project";
 const PROJECT_GRAPH_CARD_QUERY = String.raw`path:/^知识库\/[^\/]+\.md$/`;
 const PROJECT_GRAPH_TRANSLATION_QUERY = String.raw`path:/^texts\/[^\/]+\/translation\/[^\/]+\.md$/`;
 const PROJECT_GRAPH_QUERY = `(${PROJECT_GRAPH_CARD_QUERY} OR ${PROJECT_GRAPH_TRANSLATION_QUERY}) -file:/^(README|index|SUMMARY)(\\.md)?$/`;
-const GIT_TIMEOUT_MS = 120000;
-const GIT_MAX_BUFFER = 50 * 1024 * 1024;
 const REASONING_EFFORT_LABELS = {
   low: "Low",
   medium: "Medium",
@@ -111,14 +113,13 @@ const REASONING_EFFORT_LABELS = {
 };
 
 const DEFAULT_SETTINGS = {
-  mode: "reader",
   projectGraphEnabled: true,
-  repositoryUrl: DEFAULT_REPOSITORY_URL,
-  repositoryBranch: "main",
-  upstreamLocalBranch: "lacan-upstream/main",
-  githubProxyEnabled: false,
-  githubProxyUrl: DEFAULT_GITHUB_PROXY_URL,
+  projectEndpointUrl: DEFAULT_PROJECT_ENDPOINT,
+  projectSyncLastResult: null,
+  projectLessonSync: {},
   autoSyncOnStartup: false,
+  pluginHttpProxyEnabled: false,
+  pluginHttpProxyUrl: "",
   segmentAiEnabled: false,
   segmentAiProvider: "codex",
   segmentAiCodexPath: "",
@@ -226,7 +227,17 @@ module.exports = class LacanTranslationHelper extends Plugin {
       legacyProfiles: legacySkillProfiles,
       defaultProfileId: loadedSettings.segmentAiDefaultSkillProfileId,
     });
-    delete this.settings.forks;
+    this.settings.pluginHttpProxyEnabled = Object.hasOwn(loadedSettings, "pluginHttpProxyEnabled")
+      ? loadedSettings.pluginHttpProxyEnabled === true
+      : loadedSettings.githubProxyEnabled === true;
+    this.settings.pluginHttpProxyUrl = String(loadedSettings.pluginHttpProxyUrl ?? loadedSettings.githubProxyUrl ?? "").trim();
+    for (const key of ["forks", "mode", "repositoryUrl", "repositoryBranch", "upstreamLocalBranch", "githubProxyEnabled", "githubProxyUrl"]) delete this.settings[key];
+    this.settings.projectEndpointUrl = String(this.settings.projectEndpointUrl || DEFAULT_PROJECT_ENDPOINT).trim();
+    this.settings.projectLessonSync = this.settings.projectLessonSync && typeof this.settings.projectLessonSync === "object" && !Array.isArray(this.settings.projectLessonSync)
+      ? this.settings.projectLessonSync : {};
+    this.projectCatalog = null;
+    this.projectCatalogViews = new Set();
+    this.projectLessonSyncProgress = new Map();
     this.settings.segmentAiSessions = Array.isArray(this.settings.segmentAiSessions)
       ? this.settings.segmentAiSessions
       : [];
@@ -290,7 +301,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.progressTimers = new Map();
     this.readingToolbarRenderTimer = null;
     this.syncInProgress = false;
-    this.gitProcesses = new Set();
+    this.projectSyncController = null;
     this.startupSyncTimer = null;
     this.createdFileTimers = new Set();
     this.projectGraphViews = new WeakSet();
@@ -510,32 +521,32 @@ module.exports = class LacanTranslationHelper extends Plugin {
 
     this.addCommand({
       id: "sync-configured-github-repositories",
-      name: "Sync configured GitHub repositories",
+      name: "更新文库文本清单（不下载课文）",
       callback: () =>
         this.runWithNotice(
           () => this.syncConfiguredRepositories({ notify: true }),
-          "Git 同步失败"
+          "文库同步失败"
         ),
+    });
+
+    this.addCommand({
+      id: "open-project-library",
+      name: "打开文库文本清单",
+      callback: () => this.runWithNotice(() => this.openProjectLibrary(), "打开文本清单失败"),
+    });
+
+    this.addCommand({
+      id: "show-project-sync-conflicts",
+      name: "查看文库同步与跳过记录",
+      callback: () => this.runWithNotice(() => this.showProjectSyncReport(), "打开同步报告失败"),
     });
 
     this.scheduleReadingToolbarRender();
     this.refreshSegmentAiEntrances();
 
-    if (this.settings.autoSyncOnStartup) {
-      this.startupSyncTimer = window.setTimeout(() => {
-        this.startupSyncTimer = null;
-        this.runWithNotice(
-          async () => {
-            if (this.settings.mode === "reader" && !this.confirmReaderAutoSyncRun()) {
-              new Notice("已跳过 Reader 自动同步。");
-              return;
-            }
-            await this.syncConfiguredRepositories({ notify: true });
-          },
-          "Git 自动同步失败"
-        );
-      }, 1500);
-    }
+    this.app.workspace.onLayoutReady(() => {
+      void this.runWithNotice(() => this.initializeProjectLibrary(), "文库清单初始化失败");
+    });
   }
 
   onunload() {
@@ -588,14 +599,11 @@ module.exports = class LacanTranslationHelper extends Plugin {
       this.segmentAiRuntime = null;
       this.segmentAiController = null;
     }
-    for (const child of this.gitProcesses) {
-      try {
-        child.kill();
-      } catch (error) {
-        console.warn("Lacan Translation Helper: failed to stop git process.", error);
-      }
-    }
-    this.gitProcesses.clear();
+    this.projectSyncController?.abort();
+    this.projectSyncController = null;
+    this.projectCatalogViews?.clear();
+    this.pluginRequest?.dispose();
+    this.pluginRequest = null;
   }
 
   getProjectGraphOptions(options = {}) {
@@ -726,7 +734,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.frenchLookupPopup?.destroy();
     this.frenchLookupTranslator?.destroy();
     this.frenchDictionaryService = new FrenchDictionaryService({
-      requestUrl: Obsidian.requestUrl,
+      requestUrl: this.getPluginRequest(),
       getToken: () => this.getEudicToken(),
     });
     this.frenchLookupTranslator = new FrenchSelectionTranslator({
@@ -1486,6 +1494,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
   }
 
   async handleCreatedFile(file) {
+    if (this.syncInProgress) return;
     if (!(file instanceof TFile) || !this.isTranslationLessonPath(file.path)) {
       return;
     }
@@ -1514,6 +1523,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
       return;
     }
 
+    if (this.syncInProgress) return;
     const normalized = normalizePath(file.path);
     if (this.progressWritePaths.has(normalized)) {
       this.progressDirtyPaths.add(normalized);
@@ -2047,207 +2057,260 @@ module.exports = class LacanTranslationHelper extends Plugin {
     await this.saveData(this.settings);
   }
 
-  async syncConfiguredRepositories({ notify = false } = {}) {
-    return this.withGitSyncLock(() => this.syncConfiguredRepositoriesUnlocked({ notify }));
+  getPluginRequest() {
+    if (!this.pluginRequest) {
+      this.pluginRequest = createPluginRequest({
+        requestUrl: Obsidian.requestUrl,
+        getSettings: () => this.settings,
+      });
+    }
+    return this.pluginRequest;
   }
 
-  async syncConfiguredRepositoriesUnlocked({ notify = false } = {}) {
-    if (!this.settings.repositoryUrl?.trim()) {
-      throw new Error("尚未配置 Lacan-Chinese-Translation-Project 仓库地址。");
+  async syncConfiguredRepositories(options = {}) {
+    // Keep the existing command entry point so saved shortcuts continue to work.
+    return this.syncProjectContent(options);
+  }
+
+  async ensureProjectBase() {
+    const existing = this.app.vault.getAbstractFileByPath(PROJECT_BASE_PATH);
+    if (existing) return { file: existing, created: false };
+    const file = await this.app.vault.create(PROJECT_BASE_PATH, PROJECT_BASE_CONTENT);
+    return { file, created: true };
+  }
+
+  async openProjectLibrary() {
+    const { file } = await this.ensureProjectBase();
+    await this.openFile(file);
+  }
+
+  async initializeProjectLibrary() {
+    const { file, created } = await this.ensureProjectBase();
+    const engine = this.createProjectSyncEngine();
+    this.projectCatalog = await engine.readCachedCatalog();
+    this.refreshProjectCatalogViews();
+    await this.reloadProjectBaseViews();
+    if (created) await this.openFile(file);
+    if (!this.projectCatalog || this.settings.autoSyncOnStartup) {
+      try { await this.refreshProjectCatalog(); }
+      catch (error) {
+        this.projectCatalogError = error.message || "无法读取文本清单，请检查网络后重试。";
+        this.refreshProjectCatalogViews();
+        throw error;
+      }
     }
+    return this.projectCatalog;
+  }
 
-    await this.ensureGitRepositoryInitialized({ notify });
-
-    if (this.settings.mode === "reader") {
-      await this.syncReaderRepository({ ensureRepository: false });
-    } else {
-      await this.syncEditorRepository({ ensureRepository: false });
-    }
-
-    this.refreshReadingAfterRepositorySync();
-
-    if (notify) {
-      new Notice("Git 同步完成。");
+  async reloadProjectBaseViews() {
+    if (this.projectBaseViewsReloaded) return;
+    this.projectBaseViewsReloaded = true;
+    // Bases can retain a custom view instance after its plugin is reloaded.
+    // Reopen only this library's Base, keeping the leaf and its saved state.
+    for (const leaf of this.app.workspace?.getLeavesOfType?.("bases") || []) {
+      if (leaf.view.file?.path !== PROJECT_BASE_PATH) continue;
+      const state = leaf.getViewState();
+      await leaf.setViewState({ type: "empty" });
+      await leaf.setViewState(state);
     }
   }
 
-  async withGitSyncLock(action) {
-    if (this.syncInProgress) {
-      throw new Error("已有 Git 同步正在进行，请等待完成后再试。");
-    }
+  refreshProjectCatalogViews() {
+    for (const view of this.projectCatalogViews || []) view.onDataUpdated();
+  }
 
+  getLessonSyncPercent(originalPath) {
+    const active = this.projectLessonSyncProgress?.get(originalPath);
+    if (Number.isFinite(active)) return active;
+    const status = this.settings.projectLessonSync?.[originalPath];
+    return status?.status !== "skipped" && status?.version ? 100 : 0;
+  }
+
+  setLessonSyncPercent(originalPath, percent) {
+    this.projectLessonSyncProgress ||= new Map();
+    this.projectLessonSyncProgress.set(originalPath, Math.max(0, Math.min(100, percent)));
+    for (const view of this.projectCatalogViews || []) view.updateSyncProgress(originalPath);
+  }
+
+  async refreshProjectCatalog({ notify = false } = {}) {
+    return this.runProjectLibraryTask(async (engine, signal) => {
+      await this.ensureProjectBase();
+      this.projectCatalog = await engine.getCatalog({ signal });
+      this.projectCatalogError = null;
+      this.refreshProjectCatalogViews();
+      if (notify) new Notice(`文本清单已更新：${this.projectCatalog.lessonCount} 个课次。课文请在 Base 中逐课同步。`);
+      return this.projectCatalog;
+    }, { label: "正在更新文本清单…" });
+  }
+
+  async initializeProjectSeminar(slug) {
+    return this.runProjectLibraryTask(async (engine, signal) => {
+      const catalog = this.projectCatalog || await engine.getCatalog({ signal });
+      this.projectCatalog = catalog;
+      const seminar = catalog.seminars.find((entry) => entry.slug === slug);
+      if (!seminar) throw new Error("文本清单中不存在这个研讨班，请先更新清单。");
+      const result = await engine.initializeSeminar(slug, { signal });
+      for (const folder of ["original", "translation", "notes", "assets"]) {
+        await this.ensureFolder(`texts/${slug}/${folder}`);
+      }
+      this.recordProjectSyncResult(result);
+      await this.saveSettings();
+      new Notice(result.skippedFiles?.length
+        ? `目录已准备好。术语表已有本地修改，已跳过更新。\n${formatSkipNotice(result.skippedFiles)}`
+        : `${seminar.code.toUpperCase()} 已初始化：术语表和目录已准备好，课文请逐课同步。`, 10000);
+      return result;
+    }, { label: "正在初始化研讨班…" });
+  }
+
+  async syncProjectLesson(originalPath) {
+    this.setLessonSyncPercent(originalPath, 0);
+    try {
+      return await this.runProjectLibraryTask(async (engine, signal) => {
+        const result = await engine.syncLesson(originalPath, { signal });
+        const skippedFiles = result.skippedFiles || [];
+        this.settings.projectLessonSync ||= {};
+        this.settings.projectLessonSync[originalPath] = skippedFiles.length
+          ? { status: "skipped", skippedFiles, checkedAt: Date.now() }
+          : { status: "synced", version: result.version, syncedAt: Date.now() };
+        this.recordProjectSyncResult(result);
+        await this.saveSettings();
+        this.setLessonSyncPercent(originalPath, skippedFiles.length ? 0 : 100);
+        this.refreshReadingAfterRepositorySync();
+        new Notice(skippedFiles.length ? formatSkipNotice(skippedFiles) : "本课原文和译文已同步。", 12000);
+        return result;
+      }, { label: "正在同步本课原文和译文…", originalPath });
+    } catch (error) {
+      this.setLessonSyncPercent(originalPath, 0);
+      throw error;
+    }
+  }
+
+  recordProjectSyncResult(result) {
+    this.settings.projectSyncLastResult = {
+      version: result.version, checkedAt: Date.now(),
+      added: result.added, updated: result.updated, deleted: result.deleted,
+      merged: result.merged || 0, unchanged: result.unchanged,
+      skippedCount: result.skippedFiles?.length || 0, skippedFiles: result.skippedFiles || [],
+      conflictCount: result.conflicts.length, conflictReportPath: result.conflictReportPath,
+    };
+  }
+
+  async runProjectLibraryTask(action, { label = "正在同步文库…", originalPath } = {}) {
+    if (this.syncInProgress) throw new Error("已有文库同步正在进行，请等待完成或取消后再试。");
     this.syncInProgress = true;
+    this.activeLessonSync = originalPath || null;
+    const controller = new AbortController();
+    this.projectSyncController = controller;
+    const progress = new Notice(label, 0);
+    this.refreshProjectCatalogViews();
     try {
-      return await action();
-    } finally {
-      this.syncInProgress = false;
-    }
-  }
-
-  async syncReaderRepository({ ensureRepository = true } = {}) {
-    const url = this.settings.repositoryUrl?.trim();
-    const branch = this.settings.repositoryBranch?.trim() || "main";
-    if (!url) {
-      throw new Error("尚未配置 Lacan-Chinese-Translation-Project 仓库地址。");
-    }
-    if (ensureRepository) {
-      await this.ensureGitRepositoryInitialized();
-    }
-
-    await this.resetReaderRepositoryToRemote(url, branch);
-  }
-
-  async syncEditorRepository({ ensureRepository = true } = {}) {
-    const url = this.settings.repositoryUrl?.trim();
-    const branch = this.settings.repositoryBranch?.trim() || "main";
-    const localBranch = this.settings.upstreamLocalBranch?.trim() || "lacan-upstream/main";
-    if (!url) {
-      throw new Error("尚未配置 Lacan-Chinese-Translation-Project 仓库地址。");
-    }
-    if (ensureRepository) {
-      await this.ensureGitRepositoryInitialized();
-    }
-
-    await this.fetchRepositoryToLocalBranch(url, branch, localBranch);
-  }
-
-  async fetchRepositoryToLocalBranch(url, remoteBranch, localBranch) {
-    await this.execGit(["check-ref-format", "--branch", localBranch]);
-    const currentBranch = (await this.execGit(["branch", "--show-current"])).trim();
-    if (currentBranch && currentBranch === localBranch) {
-      throw new Error(`当前分支是 ${localBranch}，为避免覆盖当前分支，已取消同步。`);
-    }
-
-    await this.execGit(["fetch", "--no-tags", url, `+${remoteBranch}:refs/heads/${localBranch}`], {
-      useGithubProxy: true,
-      remoteUrl: url,
-    });
-  }
-
-  async execGit(args, { useGithubProxy = false, remoteUrl = "" } = {}) {
-    const cwd = this.getVaultBasePath();
-    const childProcess = require("child_process");
-    const gitArgs = this.withGitHubProxy(args, useGithubProxy, remoteUrl);
-
-    return new Promise((resolve, reject) => {
-      const child = childProcess.execFile("git", gitArgs, {
-        cwd,
-        maxBuffer: GIT_MAX_BUFFER,
-        timeout: GIT_TIMEOUT_MS,
-      }, (error, stdout, stderr) => {
-        this.gitProcesses.delete(child);
-        if (error) {
-          const timedOut = error.killed && error.signal === "SIGTERM";
-          const detail = String(stderr || stdout || error.message).trim();
-          if (timedOut) {
-            reject(new Error(detail || "Git 命令执行超时，已自动停止。"));
-            return;
-          }
-          reject(new Error(detail || error.message));
-          return;
+      const engine = this.createProjectSyncEngine((event) => {
+        const ratio = event.total > 0 ? event.completed / event.total : 0;
+        let percent = event.phase === "complete" ? 99
+          : event.phase === "applying" ? 65 + Math.floor(ratio * 34)
+            : event.phase === "downloading" ? 5 + Math.floor(ratio * 60) : 0;
+        if (originalPath) {
+          percent = Math.max(this.projectLessonSyncProgress?.get(originalPath) || 0, percent);
+          this.setLessonSyncPercent(originalPath, percent);
         }
-        resolve(String(stdout || ""));
+        progress.setMessage?.(`${label}${originalPath ? ` ${percent}%` : ""}`);
       });
-      this.gitProcesses.add(child);
-      child.once("exit", () => {
-        this.gitProcesses.delete(child);
-      });
+      return await action(engine, controller.signal);
+    } finally {
+      progress.hide?.();
+      if (this.projectSyncController === controller) this.projectSyncController = null;
+      this.syncInProgress = false;
+      this.activeLessonSync = null;
+      this.refreshProjectCatalogViews();
+    }
+  }
+
+  createProjectSyncEngine(onProgress) {
+    const { ProjectSyncEngine } = require("./project-sync");
+    const endpointUrl = this.settings.projectEndpointUrl || DEFAULT_PROJECT_ENDPOINT;
+    const stateDir = `${this.app.vault.configDir || ".obsidian"}/plugins/lacan-translation-helper/project-sync`;
+    const key = JSON.stringify([endpointUrl, stateDir]);
+    if (this.projectSyncEngineKey === key && this.projectSyncEngine) {
+      this.projectSyncEngine.onProgress = onProgress;
+      return this.projectSyncEngine;
+    }
+    this.projectSyncEngine = new ProjectSyncEngine({
+      endpointUrl,
+      stateDir,
+      storage: this.getProjectSyncStorage(),
+      transport: createProjectTransport(this.getPluginRequest()),
+      onProgress,
+    });
+    this.projectSyncEngineKey = key;
+    return this.projectSyncEngine;
+  }
+
+  getProjectSyncStorage() {
+    return createVaultSyncStorage(this.app.vault, {
+      isWriteBlocked: (path) => {
+        const editor = this.translationInlineEditor?.active;
+        return Boolean(editor?.sourcePath === path && (editor.saving || editor.pasting
+          || editor.input?.value !== editor.snapshot?.markdown));
+      },
+      getEditorTexts: (path) => {
+        const texts = [];
+        this.app.workspace.iterateAllLeaves?.((leaf) => {
+          const view = leaf.view;
+          if (view?.file?.path === path && view.editor?.getValue && view.getMode?.() !== "preview") {
+            texts.push(view.editor.getValue());
+          }
+        });
+        return texts;
+      },
     });
   }
 
-  async resetReaderRepositoryToRemote(url, branch) {
-    await this.execGit(["check-ref-format", "--branch", branch]);
-    await this.execGit(["fetch", "--no-tags", url, branch], {
-      useGithubProxy: true,
-      remoteUrl: url,
-    });
-    const status = await this.gitStatusPorcelain();
-    if (!this.confirmReaderOverwrite(status)) {
-      throw new Error("已取消 Reader 同步，当前项目未被覆盖。");
-    }
-
-    await this.discardReaderWorkTree();
-    await this.execGit(["checkout", "-B", branch, "FETCH_HEAD"]);
-    await this.execGit(["reset", "--hard", "FETCH_HEAD"]);
-    await this.execGit(["clean", "-fd"]);
+  async syncProjectContent(options = {}) {
+    return this.refreshProjectCatalog(options);
   }
 
-  async discardReaderWorkTree() {
-    if (await this.gitHasHead()) {
-      await this.execGit(["reset", "--hard"]);
-    }
-
-    await this.execGit(["clean", "-fd"]);
+  cancelProjectSync() {
+    this.projectSyncController?.abort();
   }
 
-  async gitStatusPorcelain() {
-    return this.execGit(["status", "--porcelain=v1", "--untracked-files=all"]);
+  async showProjectSyncReport() {
+    if (this.syncInProgress) throw new Error("请等待文库同步或冲突保存完成后查看报告。");
+    const storage = this.getProjectSyncStorage();
+    const summary = this.settings.projectSyncLastResult;
+    const reportPath = summary?.conflictReportPath || `${this.app.vault.configDir || ".obsidian"}/plugins/lacan-translation-helper/project-sync/conflicts.json`;
+    const bytes = await storage.read(reportPath);
+    if (!bytes && !summary) { new Notice("尚无文库同步记录。"); return; }
+    const report = bytes ? JSON.parse(new TextDecoder().decode(bytes)) : { version: summary?.version, conflicts: [] };
+    const engine = this.createProjectSyncEngine();
+    new ProjectSyncReportModal(this.app, storage, Array.isArray(report) ? { version: summary?.version, conflicts: report } : report, {
+      readOnly: true,
+      skippedFiles: summary?.skippedFiles || [],
+      checkedVersion: summary?.version,
+      engine: {
+        getConflictComparison: (path) => {
+          if (this.syncInProgress) throw new Error("文库正在更新，请稍后重新打开比较。");
+          return engine.getConflictComparison(path);
+        },
+        resolveConflict: (path, options) => this.resolveProjectSyncConflict(engine, path, options),
+      },
+      onResolved: async (result) => {
+        this.settings.projectSyncLastResult = {
+          ...(this.settings.projectSyncLastResult || { added: 0, updated: 0, deleted: 0, unchanged: 0 }),
+          version: result.version, checkedAt: Date.now(), conflictCount: result.conflicts.length,
+          conflictReportPath: result.conflictReportPath || reportPath,
+        };
+        await this.saveSettings();
+        this.refreshReadingAfterRepositorySync();
+      },
+    }).open();
   }
 
-  confirmReaderOverwrite(status) {
-    const changedCount = status
-      .split(/\r?\n/)
-      .filter((line) => line.trim()).length;
-    return window.confirm(
-      [
-        `Reader 模式会用主仓库内容覆盖当前本地文件。`,
-        changedCount > 0
-          ? `检测到 ${changedCount} 个本地改动或未跟踪文件。`
-          : `当前没有检测到本地改动，但同步仍会把项目直接对齐到远端。`,
-        `确认后会丢弃本地改动，并删除未被 Git 跟踪的非忽略文件。`,
-        `如需保留本地编辑内容，请取消同步并切换到 Editer 模式或先手动备份。`,
-        `是否继续？`,
-      ].join("\n")
-    );
-  }
-
-  async gitHasHead() {
-    try {
-      await this.execGit(["rev-parse", "--verify", "HEAD"]);
-      return true;
-    } catch (_error) {
-      return false;
-    }
-  }
-
-  confirmReaderAutoSyncRun() {
-    return window.confirm(
-      [
-        `Reader 模式的启动自动同步会在打开 Obsidian 后更新当前项目。`,
-        `同步开始后仍会显示覆盖确认框；确认后本地项目会直接对齐到主仓库。`,
-        `如需保留本地编辑内容，请取消本次自动同步，并在设置中关闭自动同步或切换到 Editer 模式。`,
-        `是否继续本次自动同步？`,
-      ].join("\n")
-    );
-  }
-
-  confirmReaderAutoSyncEnable() {
-    return window.confirm(
-      [
-        `Reader 模式下，启动时自动同步默认应保持关闭。`,
-        `开启后，Obsidian 启动时会尝试同步主仓库，并可能覆盖当前项目。`,
-        `如果你会在本地编辑译文，请使用 Editer 模式或保持自动同步关闭。`,
-        `是否仍要开启 Reader 自动同步？`,
-      ].join("\n")
-    );
-  }
-
-  async ensureGitRepositoryInitialized({ notify = false } = {}) {
-    if (this.hasGitRepositoryMetadata()) {
-      return false;
-    }
-
-    await this.execGit(["init"]);
-    if (notify) {
-      new Notice("当前项目未初始化 Git，已自动执行 git init。");
-    }
-    return true;
-  }
-
-  hasGitRepositoryMetadata() {
-    const fs = require("fs");
-    const path = require("path");
-    return fs.existsSync(path.join(this.getVaultBasePath(), ".git"));
+  async resolveProjectSyncConflict(engine, path, options) {
+    if (this.syncInProgress) throw new Error("已有文库同步或冲突保存正在进行，请稍后再试。");
+    if (engine !== this.createProjectSyncEngine()) throw new Error("文库同步地址已改变，请重新打开冲突比较。");
+    this.syncInProgress = true;
+    try { return await engine.resolveConflict(path, options); }
+    finally { this.syncInProgress = false; }
   }
 
   refreshReadingAfterRepositorySync() {
@@ -2256,38 +2319,12 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.renderReadingToolbar();
   }
 
-  withGitHubProxy(args, useGithubProxy, remoteUrl) {
-    const proxyUrl = this.settings.githubProxyUrl?.trim() || DEFAULT_GITHUB_PROXY_URL;
-    if (
-      !useGithubProxy ||
-      !this.settings.githubProxyEnabled ||
-      !proxyUrl ||
-      !this.isGitHubRepositoryUrl(remoteUrl)
-    ) {
-      return args;
-    }
-    return ["-c", `http.proxy=${proxyUrl}`, "-c", `https.proxy=${proxyUrl}`, ...args];
-  }
-
-  isGitHubRepositoryUrl(url) {
-    const normalized = String(url || "").trim().toLowerCase();
-    if (!normalized) {
-      return false;
-    }
-    return (
-      /^(?:https?:\/\/|git:\/\/)github\.com[:/]/.test(normalized) ||
-      /^ssh:\/\/(?:[^@]+@)?github\.com[:/]/.test(normalized) ||
-      /^[^@\s]+@github\.com[:/]/.test(normalized) ||
-      /^github\.com[:/]/.test(normalized)
-    );
-  }
-
   getVaultBasePath() {
     const adapter = this.app.vault.adapter;
     if (typeof adapter.getBasePath === "function") {
       return adapter.getBasePath();
     }
-    throw new Error("Git 功能需要 Obsidian 桌面端本地 vault。");
+    throw new Error("本机 Agent 需要 Obsidian 桌面端本地文库。");
   }
 
   scheduleReadingToolbarRender(delay = 220) {
@@ -3523,6 +3560,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
 
     const timer = window.setTimeout(async () => {
       this.progressTimers.delete(normalized);
+      if (this.syncInProgress) return;
       await this.runWithNotice(
         () => this.updateTranslationProgressByPath(normalized),
         "翻译进度更新失败"
@@ -3874,146 +3912,97 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
           ));
       });
 
+    let proxyAddressInput;
     new Setting(containerEl)
-      .setName("模式")
-      .setDesc("决定同步主项目时是否更新当前文件。")
-      .addDropdown((dropdown) => {
-        dropdown
-          .addOption("reader", "Reader")
-          .addOption("editer", "Editer")
-          .setValue(this.plugin.settings.mode)
-          .onChange(async (value) => {
-            this.plugin.settings.mode = value;
-            if (
-              value === "reader"
-              && this.plugin.settings.autoSyncOnStartup
-              && !this.plugin.confirmReaderAutoSyncEnable()
-            ) {
-              this.plugin.settings.autoSyncOnStartup = false;
-              new Notice("已关闭 Reader 模式启动时自动同步。");
-            }
-            await this.plugin.saveSettings();
-            this.plugin.scheduleReadingToolbarRender();
-            this.display();
-          });
-      });
-
-    const modeHelpEl = containerEl.createDiv("lacan-mode-help setting-item-description");
-    modeHelpEl.createEl("p", {
-      text: "Reader：同步 GitHub 主仓库的最新更新到本地当前项目，适合只阅读或查看译文的人。",
-    });
-    modeHelpEl.createEl("p", {
-      text: "Editer：同步主仓库时只下载为对照版本，不覆盖你正在编辑的当前文件，适合参与翻译的人。",
-    });
+      .setName("启用插件 HTTP 代理")
+      .setDesc("用于文库同步、词典查询和生词本请求。关闭时沿用 Obsidian 的网络设置；AI CLI 使用自身的网络配置。")
+      .addToggle((toggle) => toggle
+        .setValue(Boolean(this.plugin.settings.pluginHttpProxyEnabled))
+        .onChange(async (value) => {
+          this.plugin.settings.pluginHttpProxyEnabled = value;
+          proxyAddressInput?.setDisabled(!value);
+          await this.plugin.saveSettings();
+        }));
 
     new Setting(containerEl)
-      .setName("Lacan-Chinese-Translation-Project 仓库地址")
-      .setDesc("填写主项目在 GitHub 上的地址。Reader 会更新当前本地项目；Editer 会下载为主项目对照版本。")
+      .setName("插件 HTTP 代理地址")
+      .setDesc("启用后生效。填写 HTTP 或 HTTPS 代理地址，例如 http://127.0.0.1:7890。")
       .addText((text) => {
-        text
-          .setPlaceholder(DEFAULT_REPOSITORY_URL)
-          .setValue(this.plugin.settings.repositoryUrl || "")
+        proxyAddressInput = text;
+        text.setPlaceholder("http://127.0.0.1:7890")
+          .setValue(this.plugin.settings.pluginHttpProxyUrl || "")
+          .setDisabled(!this.plugin.settings.pluginHttpProxyEnabled)
           .onChange(async (value) => {
-            this.plugin.settings.repositoryUrl = value.trim();
+            this.plugin.settings.pluginHttpProxyUrl = value.trim();
             await this.plugin.saveSettings();
           });
       });
 
     new Setting(containerEl)
-      .setName("启用 GitHub HTTP 代理")
-      .setDesc("仅用于插件同步 GitHub 仓库，不会改变 Obsidian 其它网络操作。如 Obsidian 或系统已有可用代理，可保持关闭。")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(Boolean(this.plugin.settings.githubProxyEnabled))
-          .onChange(async (value) => {
-            this.plugin.settings.githubProxyEnabled = value;
-            await this.plugin.saveSettings();
-          });
-      });
+      .setName("文库同步地址")
+      .setDesc("从 WordPress 获取完整文本清单，课文在 Base 中逐课同步，不会整库下载。")
+      .addText((text) => text
+        .setPlaceholder(DEFAULT_PROJECT_ENDPOINT)
+        .setValue(this.plugin.settings.projectEndpointUrl || DEFAULT_PROJECT_ENDPOINT)
+        .onChange(async (value) => {
+          this.plugin.settings.projectEndpointUrl = value.trim() || DEFAULT_PROJECT_ENDPOINT;
+          this.plugin.projectCatalog = null;
+          this.plugin.projectLessonSyncProgress?.clear();
+          this.plugin.settings.projectLessonSync = {};
+          await this.plugin.saveSettings();
+          this.plugin.refreshProjectCatalogViews();
+        }));
 
     new Setting(containerEl)
-      .setName("GitHub HTTP 代理地址")
-      .setDesc("启用上面的开关后生效。输入框中的地址只是配置样例，请按自己的代理地址填写。")
-      .addText((text) => {
-        text
-          .setPlaceholder(DEFAULT_GITHUB_PROXY_URL)
-          .setValue(this.plugin.settings.githubProxyUrl || DEFAULT_GITHUB_PROXY_URL)
-          .onChange(async (value) => {
-            this.plugin.settings.githubProxyUrl = value.trim() || DEFAULT_GITHUB_PROXY_URL;
-            await this.plugin.saveSettings();
-          });
-      });
+      .setName("本地笔记与修改保护")
+      .setDesc("识别到正文、备注、注释或建言有本地修改时，整课跳过，不合并、不覆盖。需要重新同步时，请先保留修改副本，再删除有改动的本地文件后同步。未保存的编辑同样受保护。");
 
     new Setting(containerEl)
-      .setName("上游分支")
-      .setDesc("通常保持 main。不熟悉 Git 的用户不用修改。")
-      .addText((text) => {
-        text
-          .setPlaceholder("main")
-          .setValue(this.plugin.settings.repositoryBranch || "main")
-          .onChange(async (value) => {
-            this.plugin.settings.repositoryBranch = value.trim() || "main";
-            await this.plugin.saveSettings();
-          });
-      });
+      .setName("启动时更新文本清单")
+      .setDesc("仅刷新已发布课次目录，不下载课文。首次安装会自动获取清单。")
+      .addToggle((toggle) => toggle
+        .setValue(Boolean(this.plugin.settings.autoSyncOnStartup))
+        .onChange(async (value) => {
+          this.plugin.settings.autoSyncOnStartup = value;
+          await this.plugin.saveSettings();
+        }));
 
+    let cancelSyncButton;
     new Setting(containerEl)
-      .setName("Editer 模式主项目对照名称")
-      .setDesc("Editer 模式下，插件会把主项目下载为这个对照版本，用来和你正在编辑的内容比较。不了解的话保持默认。")
-      .addText((text) => {
-        text
-          .setPlaceholder("lacan-upstream/main")
-          .setValue(this.plugin.settings.upstreamLocalBranch || "lacan-upstream/main")
-          .onChange(async (value) => {
-            this.plugin.settings.upstreamLocalBranch = value.trim() || "lacan-upstream/main";
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("启动时自动同步")
-      .setDesc("打开 Obsidian 时自动同步主项目。Reader 默认建议关闭；Editer 只更新主项目对照版本。")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(Boolean(this.plugin.settings.autoSyncOnStartup))
-          .onChange(async (value) => {
-            if (
-              value
-              && this.plugin.settings.mode === "reader"
-              && !this.plugin.confirmReaderAutoSyncEnable()
-            ) {
-              this.plugin.settings.autoSyncOnStartup = false;
-              await this.plugin.saveSettings();
-              this.display();
-              return;
-            }
-            this.plugin.settings.autoSyncOnStartup = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("立即同步")
-      .setDesc("立即获取主项目的最新内容。当前目录未初始化 Git 时会先自动执行 git init。Reader 会更新当前文件；Editer 不覆盖当前文件。")
+      .setName("更新文本清单")
+      .setDesc("只更新目录。打开 Base 后，先初始化研讨班，再点击每课的同步按钮，同时下载原文和译文。")
+      .addButton((button) => button
+        .setButtonText(this.plugin.syncInProgress ? "处理中…" : "更新清单")
+        .setCta()
+        .setDisabled(this.plugin.syncInProgress)
+        .onClick(async () => {
+          button.setDisabled(true);
+          button.setButtonText("同步中…");
+          cancelSyncButton?.setDisabled(false);
+          try { await this.plugin.runWithNotice(() => this.plugin.syncConfiguredRepositories({ notify: true }), "文库同步失败"); }
+          finally { this.display(); }
+        }))
       .addButton((button) => {
-        button
-          .setButtonText("同步")
-          .setCta()
-          .setDisabled(this.plugin.syncInProgress)
-          .onClick(async () => {
-            button.setDisabled(true);
-            button.setButtonText("同步中...");
-            try {
-              await this.plugin.runWithNotice(
-                () => this.plugin.syncConfiguredRepositories({ notify: true }),
-                "Git 同步失败"
-              );
-            } finally {
-              button.setButtonText("同步");
-              button.setDisabled(false);
-            }
-          });
+        cancelSyncButton = button;
+        button.setButtonText("取消同步")
+          .setDisabled(!this.plugin.syncInProgress)
+          .onClick(() => this.plugin.cancelProjectSync());
+      })
+      .addButton((button) => {
+        button.setButtonText("打开 Base")
+          .onClick(() => this.plugin.runWithNotice(() => this.plugin.openProjectLibrary(), "打开文本清单失败"));
       });
+
+    const summary = this.plugin.settings.projectSyncLastResult;
+    new Setting(containerEl)
+      .setName("最近同步与跳过记录")
+      .setDesc(summary
+        ? `最近检查版本 ${summary.version}；新增 ${summary.added}，更新 ${summary.updated}，跳过 ${summary.skippedCount || 0}，保留的旧版冲突记录 ${summary.conflictCount || 0}。最近检查：${new Date(summary.checkedAt).toLocaleString()}`
+        : "尚未同步。已有本地修改的文本会整课跳过；删除文件后可重新下载。")
+      .addButton((button) => button
+        .setButtonText("查看同步报告")
+        .setDisabled(!summary)
+        .onClick(() => this.plugin.runWithNotice(() => this.plugin.showProjectSyncReport(), "打开同步报告失败")));
   }
 
   renderSettingsTabs(containerEl) {
@@ -4532,193 +4521,131 @@ class LacanLessonListBasesView extends ObsidianBasesView {
     super(controller);
     this.plugin = plugin;
     this.containerEl = parentEl.createDiv("lacan-bases-list");
+    this.catalogContainer = parentEl.closest?.(".view-content");
+    this.catalogContainer?.addClass("lacan-catalog-base");
+    this.openSeminars = new Set();
+    this.progressElements = new Map();
+    plugin.projectCatalogViews ||= new Set();
+    plugin.projectCatalogViews.add(this);
+    this.onDataUpdated();
+  }
+
+  onunload() {
+    this.plugin.projectCatalogViews?.delete(this);
+    this.catalogContainer?.removeClass("lacan-catalog-base");
   }
 
   onDataUpdated() {
     this.containerEl.empty();
-    const groups = this.data?.groupedData?.length
-      ? this.data.groupedData
-      : [{ entries: this.data?.entries || [] }];
-    const mode = String(this.config?.get?.("mode") || "reader");
-
-    for (const group of groups) {
-      const entries = group.entries || [];
-      const details = this.containerEl.createEl("details", {
-        cls: "lacan-bases-group",
+    this.progressElements.clear();
+    const catalog = this.plugin.projectCatalog;
+    if (!catalog) {
+      this.containerEl.createEl("p", {
+        cls: "lacan-bases-catalog-status",
+        text: this.plugin.projectCatalogError || "正在获取完整文本清单，课文将在点击同步后下载。",
       });
-      const summary = details.createEl("summary", {
-        cls: "lacan-bases-group-summary",
-      });
-      const groupTitle = this.getGroupTitle(group);
+      this.createActionLink(this.containerEl, "更新文本清单", () => this.plugin.refreshProjectCatalog({ notify: true }));
+      return;
+    }
+    this.containerEl.createEl("p", {
+      cls: "lacan-bases-catalog-status",
+      text: `${catalog.lessonCount} 个课次 · ${catalog.seminars.length} 个研讨班 · 课文按需同步`,
+    });
+    const search = this.containerEl.createEl("input", {
+      cls: "lacan-bases-catalog-search", type: "search", placeholder: "搜索研讨班或课次",
+      attr: { "aria-label": "搜索完整文本清单" },
+    });
+    search.value = this.searchText || "";
+    this.groupsEl = this.containerEl.createDiv("lacan-bases-catalog-groups");
+    search.addEventListener("input", () => {
+      this.searchText = search.value;
+      this.renderCatalogGroups(catalog);
+    });
+    this.renderCatalogGroups(catalog);
+  }
 
+  renderCatalogGroups(catalog) {
+    this.groupsEl.empty();
+    this.progressElements.clear();
+    const query = String(this.searchText || "").trim().toLocaleLowerCase();
+    for (const seminar of catalog.seminars) {
+      const lessons = query ? seminar.lessons.filter((lesson) => `${seminar.title} ${lesson.title} ${lesson.originalPath}`.toLocaleLowerCase().includes(query)) : seminar.lessons;
+      if (!lessons.length) continue;
+      const details = this.groupsEl.createEl("details", { cls: "lacan-bases-group" });
+      const summary = details.createEl("summary", { cls: "lacan-bases-group-summary" });
       summary.createSpan({
         cls: "lacan-bases-group-title",
-        text: groupTitle,
+        text: `${String(seminar.order).padStart(2, "0")} · ${seminar.title}`,
       });
-
-      this.createActionLink(
-        summary,
-        "批量新建译文",
-        () => this.createMissingTranslationsForEntries(entries, groupTitle),
-        "批量新建译文失败"
-      );
-
-      summary.createSpan({
-        cls: "lacan-bases-group-count",
-        text: `${entries.length}`,
-      });
-
-      const listEl = details.createEl("ul", {
-        cls: "lacan-bases-group-list",
-      });
-
+      this.createActionLink(summary, "初始化研讨班", () => this.plugin.initializeProjectSeminar(seminar.slug), true);
+      summary.createSpan({ cls: "lacan-bases-group-count", text: `${lessons.length}` });
+      const listEl = details.createEl("ul", { cls: "lacan-bases-group-list" });
+      const renderEntries = () => {
+        if (details.dataset.entriesRendered === "true") return;
+        for (const lesson of lessons) this.renderLesson(listEl, lesson);
+        details.dataset.entriesRendered = "true";
+      };
       details.addEventListener("toggle", () => {
-        if (details.open && details.dataset.entriesRendered !== "true") {
-          this.renderGroupEntries(listEl, entries, mode);
-          details.dataset.entriesRendered = "true";
-        }
+        if (details.open) { this.openSeminars.add(seminar.slug); renderEntries(); }
+        else this.openSeminars.delete(seminar.slug);
       });
+      if (query || this.openSeminars.has(seminar.slug)) {
+        details.open = true;
+        renderEntries();
+      }
     }
   }
 
-  renderGroupEntries(listEl, entries, mode) {
-    for (const entry of entries) {
-      this.renderEntry(listEl, entry, mode);
-    }
+  renderLesson(listEl, lesson) {
+    const item = listEl.createEl("li", { cls: "lacan-bases-entry" });
+    const main = item.createDiv("lacan-bases-entry-main");
+    main.createSpan({ cls: "lacan-bases-entry-title", text: lesson.title });
+    this.createActionLink(main, "原文", () => this.openDownloadedFile(lesson.originalPath));
+    this.createActionLink(main, "译文", () => this.openDownloadedFile(lesson.translationPath));
+    this.createActionLink(main, this.plugin.activeLessonSync === lesson.originalPath ? "同步中…" : "同步",
+      () => this.plugin.syncProjectLesson(lesson.originalPath), true);
+    const progress = main.createSpan({ cls: "lacan-bases-progress" });
+    progress.setAttribute("role", "progressbar");
+    progress.setAttribute("aria-label", `${lesson.title} 原文和译文同步进度`);
+    progress.setAttribute("aria-valuemin", "0");
+    progress.setAttribute("aria-valuemax", "100");
+    this.progressElements.set(lesson.originalPath, progress);
+    this.updateSyncProgress(lesson.originalPath);
+    const syncStatus = this.plugin.settings.projectLessonSync?.[lesson.originalPath];
+    if (syncStatus?.status === "skipped" && this.plugin.activeLessonSync !== lesson.originalPath) main.createSpan({
+      cls: "lacan-bases-sync-status is-skipped", text: "已跳过",
+      attr: { title: formatSkipNotice(syncStatus.skippedFiles || []) },
+    });
+    const meta = item.createDiv("lacan-bases-entry-meta");
+    meta.createSpan({ text: `原文：${lesson.originalPath}` });
+    meta.createSpan({ text: `译文：${lesson.translationPath}` });
   }
 
-  getGroupTitle(group) {
-    const value = this.valueToString(group?.value);
-    if (value && value !== "[object Object]") {
-      return value;
-    }
-
-    const firstEntry = group.entries?.[0];
-    return this.valueToString(firstEntry?.getValue?.("formula.seminarGroup")) || "未分组";
+  updateSyncProgress(originalPath) {
+    const element = this.progressElements.get(originalPath);
+    if (!element) return;
+    const percent = this.plugin.getLessonSyncPercent(originalPath);
+    element.textContent = `${percent}%`;
+    element.setAttribute("aria-valuenow", `${percent}`);
   }
 
-  renderEntry(listEl, entry, mode) {
-    const lessonTitle = this.valueToString(entry.getValue("formula.lessonTitle"));
-    const originalPath = this.valueToString(entry.getValue("formula.originalPath"));
-    const translationPath = this.valueToString(entry.getValue("formula.translationPath"));
-    const notesIndexPath = this.valueToString(entry.getValue("formula.notesIndexPath"));
-    const progress = this.valueToString(entry.getValue("formula.translationProgressLabel")) || "0.00%";
-    const untranslatedCount = this.valueToString(entry.getValue("formula.untranslatedCount"));
-    const maxSegmentId = this.valueToString(entry.getValue("formula.maxSegmentId"));
-    const translationFile = this.plugin.app.vault.getAbstractFileByPath(translationPath);
-
-    const itemEl = listEl.createEl("li", {
-      cls: "lacan-bases-entry",
-    });
-    const mainEl = itemEl.createDiv("lacan-bases-entry-main");
-
-    mainEl.createSpan({
-      cls: "lacan-bases-entry-title",
-      text: lessonTitle,
-    });
-    this.createActionLink(mainEl, "原文", () => this.openOriginal(entry.file, originalPath));
-    this.createActionLink(
-      mainEl,
-      translationFile instanceof TFile ? "译文" : "新建翻译",
-      () => this.openOrCreateTranslation(entry.file, translationFile)
-    );
-    this.createActionLink(mainEl, "笔记", () => this.openOrCreateNotesIndex(notesIndexPath));
-    mainEl.createSpan({
-      cls: "lacan-bases-progress",
-      text: progress,
-    });
-
-    if (mode === "editer") {
-      const metaEl = itemEl.createDiv("lacan-bases-entry-meta");
-      metaEl.createSpan({ text: `原文：${originalPath}` });
-      metaEl.createSpan({ text: `译文：${translationPath}` });
-      metaEl.createSpan({ text: `笔记：${notesIndexPath}` });
-      metaEl.createSpan({ text: `未译：${untranslatedCount || 0}` });
-      metaEl.createSpan({ text: `最大分段：${maxSegmentId || 0}` });
-    }
-  }
-
-  createActionLink(parentEl, text, action) {
-    return this.createActionLinkWithNotice(parentEl, text, action, "打开课文失败");
-  }
-
-  createActionLinkWithNotice(parentEl, text, action, errorLabel = "打开课文失败") {
-    const linkEl = parentEl.createEl("a", {
-      cls: "lacan-bases-link",
-      href: "#",
-      text,
-    });
-    linkEl.addEventListener("click", async (event) => {
+  createActionLink(parentEl, text, action, syncAction = false) {
+    const link = parentEl.createEl("a", { cls: "lacan-bases-link", href: "#", text });
+    const disabled = syncAction && Boolean(this.plugin.syncInProgress);
+    link.setAttribute("aria-disabled", String(disabled));
+    if (disabled) link.addClass("is-disabled");
+    link.addEventListener("click", async (event) => {
       event.preventDefault();
       event.stopPropagation();
-      await this.plugin.runWithNotice(action, errorLabel);
+      if (disabled) return;
+      await this.plugin.runWithNotice(action, "文库操作失败");
     });
-    return linkEl;
+    return link;
   }
 
-  async createMissingTranslationsForEntries(entries, scopeLabel = "当前研讨班") {
-    const originalFiles = (entries || [])
-      .map((entry) => entry.file)
-      .filter((file) => file instanceof TFile && this.plugin.isOriginalLessonPath(file.path));
-    await this.plugin.createMissingTranslationSkeletons({
-      originalFiles,
-      scopeLabel,
-    });
-  }
-
-  async openOriginal(originalFile, originalPath) {
-    if (originalFile instanceof TFile) {
-      await this.plugin.openFile(originalFile);
-      return;
-    }
-
-    const file = this.plugin.app.vault.getAbstractFileByPath(originalPath);
-    if (file instanceof TFile) {
-      await this.plugin.openFile(file);
-    }
-  }
-
-  async openOrCreateTranslation(originalFile, translationFile) {
-    if (translationFile instanceof TFile) {
-      await this.plugin.openFile(translationFile);
-      return;
-    }
-
-    if (!(originalFile instanceof TFile)) {
-      throw new Error("找不到对应原文，无法创建译文。");
-    }
-
-    await this.plugin.createTranslationForOriginal(originalFile, {
-      openAfterCreate: true,
-      notify: true,
-      updateProgress: true,
-    });
-  }
-
-  async openOrCreateNotesIndex(notesIndexPath) {
-    const normalized = normalizePath(notesIndexPath || "");
-    if (!normalized) {
-      throw new Error("找不到阅读笔记目录路径。");
-    }
-
-    const existing = this.plugin.app.vault.getAbstractFileByPath(normalized);
-    if (existing instanceof TFile) {
-      await this.plugin.openFile(existing);
-      return;
-    }
-
-    await this.plugin.ensureFolder(normalized.split("/").slice(0, -1).join("/"));
-    const created = await this.plugin.app.vault.create(
-      normalized,
-      "# 阅读笔记\n\n本目录用于保存本研讨班的阅读笔记和补充材料。\n"
-    );
-    await this.plugin.openFile(created);
-  }
-
-  valueToString(value) {
-    if (!value || value.isEmpty?.()) {
-      return "";
-    }
-    return String(value);
+  async openDownloadedFile(path) {
+    const file = this.plugin.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) throw new Error("本课尚未下载，请先点击同步，同时获取原文和译文。");
+    await this.plugin.openFile(file);
   }
 }

@@ -7,6 +7,8 @@ const pluginDir = dirname(fileURLToPath(import.meta.url));
 const outputPath = join(pluginDir, "main.js");
 const checkOnly = process.argv.includes("--check");
 const license = await readFile(join(pluginDir, "LICENSE"), "utf8");
+const fflateLicense = await readFile(join(pluginDir, "node_modules/fflate/LICENSE"), "utf8");
+const diff3License = await readFile(join(pluginDir, "node_modules/node-diff3/LICENSE.md"), "utf8");
 
 const result = await build({
   absWorkingDir: pluginDir,
@@ -23,7 +25,7 @@ const result = await build({
   ],
   charset: "utf8",
   legalComments: "none",
-  banner: { js: `/*\n${license.trim()}\n*/` },
+  banner: { js: `/*\n${license.trim()}\n\nBundled dependency: fflate\n${fflateLicense.trim()}\n\nBundled dependency: node-diff3\n${diff3License.trim()}\n*/` },
   minify: false,
   sourcemap: false,
   write: !checkOnly,
