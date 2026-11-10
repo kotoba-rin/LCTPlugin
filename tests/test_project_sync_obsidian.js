@@ -119,6 +119,13 @@ const run = async () => {
     writeBinary: async (p, b) => fs.writeFile(local(p), Buffer.from(b)),
     rename: async () => { throw new Error("Destination file already exists!"); },
     remove: async (p) => fs.unlink(local(p)),
+    list: async (p) => {
+      const entries = await fs.readdir(local(p), { withFileTypes: true });
+      return {
+        files: entries.filter((entry) => !entry.isDirectory()).map((entry) => `${p}/${entry.name}`),
+        folders: entries.filter((entry) => entry.isDirectory()).map((entry) => `${p}/${entry.name}`),
+      };
+    },
   };
   let editedDuringProcess = false;
   let editorTexts = [];
@@ -136,6 +143,34 @@ const run = async () => {
   };
   try {
     const storage = createVaultSyncStorage(vault, { getEditorTexts: () => editorTexts, isWriteBlocked: () => inlineDirty });
+    const syncRoot = ".obsidian/plugins/lacan-translation-helper/project-sync";
+    const legacyBase = `${syncRoot}/bases/${hash("old upstream")}.bin`;
+    const keptFiles = new Map([
+      [`${syncRoot}/state.json`, '{"files":{"lesson.md":"trusted-hash"}}'],
+      [`${syncRoot}/bases/keep.bin`, "unrecognized user file"],
+      [`${syncRoot}/bases/nested/${hash("nested")}.bin`, "nested file"],
+      [`${syncRoot}/transactions/old/backup/${hash("backup")}.bin`, "rollback backup"],
+      [`${syncRoot}/incoming/old/${hash("incoming")}.bin`, "download in progress"],
+      ["assets/keep.bin", "user attachment"],
+    ]);
+    for (const [name, text] of keptFiles) await storage.write(name, bytes(text));
+    await storage.write(legacyBase, bytes("old upstream"));
+    assert.strictEqual(await storage.removeLegacyBaseCache(), 1, "only recognized legacy text-cache files are removed");
+    assert.strictEqual(await storage.read(legacyBase), null);
+    for (const [name, text] of keptFiles) assert.strictEqual(Buffer.from(await storage.read(name)).toString(), text, `cleanup preserves ${name}`);
+    assert.strictEqual(await storage.removeLegacyBaseCache(), 0, "cache cleanup is idempotent");
+    const safeList = adapter.list;
+    await storage.write(legacyBase, bytes("old upstream"));
+    adapter.list = async () => ({ files: [legacyBase, "assets/keep.bin"], folders: [] });
+    await assert.rejects(() => storage.removeLegacyBaseCache(), /缓存.*路径|路径.*缓存/);
+    assert.ok(await storage.read(legacyBase), "validate the entire listing before deleting cache files");
+    adapter.list = safeList;
+    await storage.removeLegacyBaseCache();
+    const linkedCache = `${syncRoot}/bases/${hash("linked")}.bin`;
+    await fs.symlink(local("assets/keep.bin"), local(linkedCache));
+    await assert.rejects(() => storage.removeLegacyBaseCache(), /符号链接/);
+    assert.strictEqual(await fs.readFile(local("assets/keep.bin"), "utf8"), "user attachment");
+    await fs.unlink(local(linkedCache));
     assert.strictEqual(await storage.compareAndWrite("texts/s14/translation/already-deleted.md", null, null), true, "explicitly accepting a local deletion is a successful no-op");
     inlineDirty = true;
     assert.strictEqual(await storage.compareAndWrite("texts/s14/translation/already-deleted.md", null, null), false, "accepting a missing file must still protect inline drafts");

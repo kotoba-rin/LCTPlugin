@@ -56,6 +56,7 @@ function setup() {
   plugin.saveSettings = async () => calls.push(["save"]);
   plugin.refreshReadingAfterRepositorySync = () => calls.push(["refresh-reading"]);
   const engine = {
+    cleanupLegacyBaseCache: async () => { calls.push(["cleanup-cache"]); return 0; },
     readCachedCatalog: async () => null,
     getCatalog: async () => { calls.push(["catalog"]); return catalog; },
     initializeSeminar: async (slug) => { calls.push(["glossary", slug]); return { ...result, added: 1 }; },
@@ -73,6 +74,7 @@ function setup() {
 async function run() {
   const { plugin, engine, files, writes, calls } = setup();
   await plugin.initializeProjectLibrary();
+  assert.strictEqual(calls.filter(([name]) => name === "cleanup-cache").length, 1, "startup migrates legacy text caches before reading the library");
   assert.strictEqual(plugin.projectCatalog.lessonCount, 2, "an empty vault must have the entire remote catalog");
   assert.deepStrictEqual(writes.map((entry) => entry.path), [PROJECT_BASE_PATH], "installation writes only the Base, never lesson stubs");
   assert.strictEqual(writes[0].contents, PROJECT_BASE_CONTENT);

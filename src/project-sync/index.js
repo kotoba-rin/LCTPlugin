@@ -1,7 +1,6 @@
 const { DEFAULT_PROJECT_ENDPOINT, sha256, encodeJson, parseJson, validateContentPath, validateUrl, validateLatest, validateManifest, isKnowledgePath } = require("./validation");
 const { checkCancelled, fetchBytes, verifyFile, downloadArchive } = require("./downloads");
 const { readBytes, digest, readHash, localChangesError, assertUnchanged, compareAndWrite, removeIfPresent, readState, rollback, cleanupTransaction, restorePreviousState, recoverTransaction, prepareTransaction } = require("./transactions");
-const { readBase, cacheBase, isTextPath } = require("./base-cache");
 const { decodeText } = require("./text-merge");
 const { readComparison } = require("./conflict-comparison");
 const { resolveConflict } = require("./resolve-conflict");
@@ -22,6 +21,13 @@ class ProjectSyncEngine {
 
   async sync({ signal } = {}) {
     return this.withSyncLock(() => this.runSync(signal));
+  }
+
+  async cleanupLegacyBaseCache() {
+    return this.withSyncLock(async () => {
+      await recoverTransaction(this.storage, this.stateDir, (event) => this.onProgress?.(event));
+      return (await this.storage.removeLegacyBaseCache?.()) ?? 0;
+    });
   }
 
   async getCatalog({ signal } = {}) {
@@ -184,9 +190,6 @@ class ProjectSyncEngine {
       } else if (!baseline && localHash !== file.sha256) {
         action = "skip"; kind = "existing_local_file";
       } else action = localHash === file.sha256 ? "adopt" : "update";
-      if (action !== "skip" && isTextPath(file.path) && decodeText(localBytes) !== null && localHash) {
-        await cacheBase(this.storage, this.stateDir, localHash, localBytes);
-      }
       plans.push({ path: file.path, file, action, kind, beforeHash: localHash, baseline });
     }
     for (const [path, baseline] of Object.entries(state.files)) {
@@ -253,15 +256,6 @@ class ProjectSyncEngine {
     return { path: plan.path, kind: plan.kind, incomingPath: plan.incomingPath || null, localHash: plan.beforeHash,
       upstreamHash: plan.file?.sha256 || null, baseHash: plan.baseline || null, upstreamVersion: plan.upstreamVersion,
       blocks: plan.comparison?.blocks || [], mergeable: Boolean(plan.comparison?.mergeable), missingBase: Boolean(plan.comparison?.missingBase) };
-  }
-
-  async prepareIncoming(plans, signal) {
-    for (const plan of plans) {
-      checkCancelled(signal);
-      if (!plan.incomingPath || !isTextPath(plan.path)) continue;
-      const upstream = await readBytes(this.storage, plan.incomingPath);
-      if (decodeText(upstream) !== null) await cacheBase(this.storage, this.stateDir, plan.file.sha256, upstream);
-    }
   }
 
   skippedFiles(plans, triggers = plans.filter((plan) => plan.action === "skip")) {
@@ -411,19 +405,21 @@ class ProjectSyncEngine {
   async runSync(signal) {
     checkCancelled(signal);
     await recoverTransaction(this.storage, this.stateDir, (event) => this.onProgress?.(event));
+    await this.storage.removeLegacyBaseCache?.();
     checkCancelled(signal);
     const state = await readState(this.storage, `${this.stateDir}/state.json`);
     const { latest, manifest } = await this.loadRelease(signal);
     if (state.version === latest.version && state.manifest_sha256 && state.manifest_sha256 !== latest.manifest_sha256) throw new Error("同一文库版本的内容发生变化，已停止同步。");
     const plans = await this.planFiles(manifest, state, signal);
     const downloads = await this.downloadFiles(plans, latest, manifest, state, signal);
-    await this.prepareIncoming(plans, signal);
     return this.applySyncPlans(plans, state, latest, signal, downloads);
   }
 
   async runScopedSync(paths, signal, { release, assetSources = [], strict = false } = {}) {
     checkCancelled(signal);
     await recoverTransaction(this.storage, this.stateDir, (event) => this.onProgress?.(event));
+    await this.storage.removeLegacyBaseCache?.();
+    checkCancelled(signal);
     const state = await readState(this.storage, `${this.stateDir}/state.json`);
     const { latest, manifest } = release || await this.loadRelease(signal);
     if (state.version === latest.version && state.manifest_sha256 && state.manifest_sha256 !== latest.manifest_sha256) throw new Error("同一文库版本的内容发生变化，已停止同步。");
@@ -439,12 +435,25 @@ class ProjectSyncEngine {
     const downloads = await this.downloadFiles(plans, latest, manifest, state, signal, { allowArchive: false });
     const assets = new Set();
     for (const path of assetSources) {
+      checkCancelled(signal);
       const plan = plans.find((entry) => entry.path === path);
-      if (!plan || plan.action === "skip") continue;
-      const upstream = plan.incomingPath ? await readBytes(this.storage, plan.incomingPath) : await readBase(this.storage, this.stateDir, plan.file.sha256);
-      const text = decodeText(upstream || await readBytes(this.storage, path));
+      if (!plan?.file || plan.action === "skip") continue;
+      const upstream = await readBytes(this.storage, plan.incomingPath || path);
+      const upstreamHash = digest(upstream);
+      if (plan.incomingPath) {
+        if (upstreamHash !== plan.file.sha256) throw new Error(`暂存文件校验失败：${path}`);
+      } else {
+        const dirty = await this.storage.hasUnsavedChanges?.(path, plan.beforeHash);
+        if (dirty || upstreamHash !== plan.beforeHash || upstreamHash !== plan.file.sha256) {
+          plan.action = "skip";
+          plan.kind = dirty ? "unsaved_changes" : "changed_during_sync";
+          continue;
+        }
+      }
+      const text = decodeText(upstream);
       for (const asset of referencedAssets(text, path, manifest.files)) if (!selected.has(asset)) assets.add(asset);
     }
+    if (strict && plans.some((plan) => plan.action === "skip")) return this.skippedResult(plans, state, latest, downloads);
     if (assets.size) {
       for (const asset of assets) selected.add(asset);
       const assetState = { ...state, files: Object.fromEntries(Object.entries(state.files).filter(([path]) => assets.has(path))) };
@@ -455,7 +464,6 @@ class ProjectSyncEngine {
       downloads.downloadedFiles += assetDownloads.downloadedFiles;
       plans.push(...assetPlans);
     }
-    await this.prepareIncoming(plans, signal);
     return this.applySyncPlans(plans, state, latest, signal, downloads, { paired: strict });
   }
 }

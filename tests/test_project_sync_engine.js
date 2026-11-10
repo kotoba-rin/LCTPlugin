@@ -102,6 +102,8 @@ const run = async () => {
   assert.strictEqual(result.added, 2, "first sync must create all published files without invoking Git");
   assert.strictEqual(storage.text("texts/s14/original/Leçon-01.md"), "<!-- id: s14-01-0001 -->\nFrench");
   assert.strictEqual(storage.text("my-note.md"), "private note");
+  assert.ok(![...storage.files.keys()].some((path) => path.startsWith(`${stateDir}/bases/`)),
+    "ordinary sync stores trusted hashes in state.json without duplicating text bodies");
 
   remote.requests.length = 0;
   const unchanged = await engine(storage, remote).sync();
@@ -148,7 +150,8 @@ const run = async () => {
   assert.strictEqual(overlapping.skippedFiles.length, 1);
   await seedConflict(resolveStorage, resolveRemote, p);
   const comparison = await resolver.getConflictComparison(p);
-  assert.strictEqual(comparison.baseText, crlfBase);
+  assert.strictEqual(comparison.baseText, null, "hash-only state cannot reconstruct the previous full text");
+  assert.strictEqual(comparison.missingBase, true);
   assert.strictEqual(comparison.localText, "标题\r\n我的译文\r\n笔记\r\n尾部\r\n");
   assert.strictEqual(comparison.upstreamText, resolveUpstream);
   assert.ok(comparison.blocks.some((block) => block.conflict));
@@ -159,7 +162,8 @@ const run = async () => {
   assert.strictEqual(resolveStorage.text(p), "标题\r\n人工合并译文\r\n笔记\r\n尾部\r\n");
   const resolveState = JSON.parse(resolveStorage.text(`${stateDir}/state.json`));
   assert.strictEqual(resolveState.files[p], sha256(bytes(resolveUpstream)));
-  assert.strictEqual(resolveStorage.text(`${stateDir}/bases/${resolveState.files[p]}.bin`), resolveUpstream);
+  assert.ok(![...resolveStorage.files.keys()].some((path) => path.startsWith(`${stateDir}/bases/`)),
+    "explicit legacy conflict resolution must not recreate full-text baseline caches");
   assert.strictEqual((await resolver.sync()).conflicts.length, 0, "an explicitly resolved local patch does not immediately conflict again");
   resolver.transport = fixture({ [p]: "新版标题\n官方译文\n笔记\n尾部\n" }, "v3").transport;
   assert.strictEqual((await resolver.sync()).skippedFiles.length, 1);
@@ -205,7 +209,9 @@ const run = async () => {
 
   const legacyStorage = new MemoryStorage({ [p]: "a\nb\nc\nd\n", [`${stateDir}/state.json`]: JSON.stringify({ schema_version: 1, version: "v0", files: { [p]: sha256(bytes("a\nb\nc\nd\n")) }, conflicts: [] }) });
   await engine(legacyStorage, fixture({ [p]: "A\nb\nc\nd\n" })).sync();
-  assert.strictEqual(legacyStorage.text(`${stateDir}/bases/${sha256(bytes("a\nb\nc\nd\n"))}.bin`), "a\nb\nc\nd\n");
+  assert.ok(![...legacyStorage.files.keys()].some((path) => path.startsWith(`${stateDir}/bases/`)),
+    "legacy state upgrades preserve hash-based protection without caching the old body");
+  assert.strictEqual(JSON.parse(legacyStorage.text(`${stateDir}/state.json`)).files[p], sha256(bytes("A\nb\nc\nd\n")));
   const legacyModified = new MemoryStorage({ [p]: "my legacy edit", [`${stateDir}/state.json`]: JSON.stringify({ schema_version: 1, version: "v0", files: { [p]: sha256(bytes("old upstream")) }, conflicts: [] }) });
   const legacyEngine = engine(legacyModified, fixture({ [p]: "new upstream" }));
   assert.strictEqual((await legacyEngine.sync()).skippedFiles[0].reason, "local_modified");

@@ -2116,6 +2116,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
   async initializeProjectLibrary() {
     const { file, created } = await this.ensureProjectBase();
     const engine = this.createProjectSyncEngine();
+    await engine.cleanupLegacyBaseCache();
     this.projectCatalog = await engine.readCachedCatalog();
     await this.refreshKnowledgeLibrary({ engine });
     this.refreshProjectCatalogViews();

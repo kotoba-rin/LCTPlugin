@@ -1,7 +1,7 @@
 {
   "id": "lacan-translation-helper",
   "name": "Lacan Translation Helper",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "minAppVersion": "1.8.0",
   "description": "Read Lacan seminars with segment notes, bilingual reading, translation tools, and a read-only local Agent interpretation sidebar.",
   "author": "Lacan Chinese Translation Project",

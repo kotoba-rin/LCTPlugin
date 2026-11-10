@@ -1,5 +1,5 @@
 const { digest, readBytes } = require("./transactions");
-const { readBase, isTextPath } = require("./base-cache");
+const { isTextPath } = require("./base-cache");
 const { decodeText, mergeText, detectEol, comparisonBlocks } = require("./text-merge");
 const { validateContentPath, HASH_RE } = require("./validation");
 
@@ -24,7 +24,8 @@ const readComparison = async (engine, state, path) => {
   const conflict = state.conflicts?.find((entry) => entry.path === path);
   if (!conflict) throw new Error("这个文件已没有待处理冲突，请刷新同步报告。");
   const baseHash = conflict.baseHash || state.files[path] || null;
-  const baseBytes = await readBase(engine.storage, engine.stateDir, baseHash);
+  // Historical conflict records remain resolvable without keeping old bodies.
+  const baseBytes = null;
   const localBytes = await readBytes(engine.storage, path);
   let upstreamBytes = null;
   if (conflict.upstreamHash !== null) {
@@ -32,7 +33,6 @@ const readComparison = async (engine, state, path) => {
     const expectedPath = engine.incomingPath(conflict.upstreamVersion || state.version, { path, sha256: conflict.upstreamHash });
     if (conflict.incomingPath !== expectedPath) throw new Error("冲突的上游副本路径无效，请重新同步。");
     upstreamBytes = await readBytes(engine.storage, expectedPath);
-    if (digest(upstreamBytes) !== conflict.upstreamHash) upstreamBytes = await readBase(engine.storage, engine.stateDir, conflict.upstreamHash);
     if (digest(upstreamBytes) !== conflict.upstreamHash) throw new Error("上游冲突副本缺失或已修改，请重新同步。");
   }
   return { comparison: buildComparison({ path, kind: conflict.kind, baseHash, baseBytes, localBytes, upstreamBytes }),

@@ -140,6 +140,27 @@ const createVaultSyncStorage = (vault, { getEditorTexts = () => [], isWriteBlock
       else await adapter.remove(path);
       return true;
     },
+    async removeLegacyBaseCache() {
+      const directory = `${stateRoot}bases`;
+      const prefix = `${directory}/`;
+      validate(directory);
+      if (!await adapter.exists(directory)) return 0;
+      const listing = await adapter.list(directory);
+      if (!Array.isArray(listing?.files)) throw new Error("旧正文缓存目录格式无效。");
+      const obsolete = [];
+      for (const path of listing.files) {
+        if (typeof path !== "string" || !path.startsWith(prefix) || path.slice(prefix.length).includes("/")) {
+          throw new Error("旧正文缓存包含不安全的文件路径。");
+        }
+        if (/^[a-f0-9]{64}\.bin$/.test(path.slice(prefix.length))) {
+          validate(path);
+          obsolete.push(path);
+        }
+      }
+      let removed = 0;
+      for (const path of obsolete) if (await storage.remove(path)) removed += 1;
+      return removed;
+    },
     async compareAndWrite(path, expectedHash, bytes) {
       validate(path);
       const editorsUnchanged = () => !isWriteBlocked(path)
