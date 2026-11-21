@@ -19,4 +19,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - name: Check WordPress library endpoints and statistics
+        run: |
+          php -l wordpress/lctp-library-stats.php
+          php tests/test_wordpress_library_sync.php
+          php tests/test_wordpress_library_stats.php
+          php tests/test_wordpress_library_stats_periods.php
       - run: npm run package:plugin
