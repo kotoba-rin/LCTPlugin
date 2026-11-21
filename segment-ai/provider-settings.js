@@ -61,9 +61,7 @@ const normalizeProfile = (value) => {
   }));
 };
 
-// Active legacy fields remain the persistence surface used by controllers. Profiles
-// snapshot those fields only at migration and provider switches, so every provider
-// keeps its own native thread IDs, cached capabilities, and unsent follow-ups.
+// Keep the active provider at the top level so deleting history leaves no second copy.
 const normalizeProviderSettings = (settings) => {
   if (!isRecord(settings)) throw new TypeError("Provider settings must be an object.");
   for (const key of Object.keys(settings)) {
@@ -84,7 +82,7 @@ const normalizeProviderSettings = (settings) => {
   ]));
   const activeProfile = normalizeProfile(activeValues);
   Object.assign(settings, activeProfile);
-  profiles[provider] = clone(activeProfile);
+  delete profiles[provider];
   settings.segmentAiProvider = provider;
   settings.segmentAiProviderProfiles = profiles;
   for (const { pathSetting } of PROVIDER_DEFINITIONS) {
@@ -97,7 +95,10 @@ const switchProviderSettings = (settings, nextProvider) => {
   normalizeProviderSettings(settings);
   const provider = normalizeProvider(nextProvider);
   if (settings.segmentAiProvider === provider) return provider;
-  Object.assign(settings, clone(settings.segmentAiProviderProfiles[provider]));
+  const profiles = settings.segmentAiProviderProfiles;
+  profiles[settings.segmentAiProvider] = normalizeProfile(settings);
+  Object.assign(settings, profiles[provider]);
+  delete profiles[provider];
   settings.segmentAiProvider = provider;
   return provider;
 };

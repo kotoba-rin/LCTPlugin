@@ -98,28 +98,14 @@ try {
   await syncPlugin.syncConfiguredRepositories();
   assert.deepStrictEqual(repositorySyncCalls, ["https"], "legacy modes must use the same safe HTTP sync without Git");
 
-  const mergePlugin = Object.create(PluginClass.prototype);
-  mergePlugin.settings = {};
-  mergePlugin.app = { vault: { configDir: ".obsidian" } };
-  mergePlugin.getProjectSyncStorage = () => ({ read: async () => null, write: async () => {}, remove: async () => {} });
-  const sharedEngine = mergePlugin.createProjectSyncEngine();
-  assert.strictEqual(mergePlugin.createProjectSyncEngine(), sharedEngine, "sync and resolution must share the engine lock");
-  mergePlugin.settings.projectEndpointUrl = "http://localhost:18769/project";
-  assert.notStrictEqual(mergePlugin.createProjectSyncEngine(), sharedEngine, "changed source must invalidate a previously opened comparison");
-  await assert.rejects(() => mergePlugin.resolveProjectSyncConflict(sharedEngine, "texts/test.md", {}), /地址已改变/);
-  const currentEngine = mergePlugin.createProjectSyncEngine();
-  let finishResolution;
-  currentEngine.resolveConflict = async () => new Promise((resolve) => { finishResolution = resolve; });
-  const resolution = mergePlugin.resolveProjectSyncConflict(currentEngine, "texts/test.md", {});
-  assert.strictEqual(mergePlugin.syncInProgress, true);
-  await assert.rejects(() => mergePlugin.syncProjectContent(), /已有文库同步/);
-  await assert.rejects(() => mergePlugin.resolveProjectSyncConflict(currentEngine, "texts/test.md", {}), /正在进行/);
-  finishResolution({ conflicts: [] });
-  await resolution;
-  assert.strictEqual(mergePlugin.syncInProgress, false);
-  currentEngine.resolveConflict = async () => { throw new Error("stale comparison"); };
-  await assert.rejects(() => mergePlugin.resolveProjectSyncConflict(currentEngine, "texts/test.md", {}), /stale/);
-  assert.strictEqual(mergePlugin.syncInProgress, false, "a rejected save must release the plugin lock");
+  const sourcePlugin = Object.create(PluginClass.prototype);
+  sourcePlugin.settings = {};
+  sourcePlugin.app = { vault: { configDir: ".obsidian" } };
+  sourcePlugin.getProjectSyncStorage = () => ({ read: async () => null, write: async () => {}, remove: async () => {} });
+  const sharedEngine = sourcePlugin.createProjectSyncEngine();
+  assert.strictEqual(sourcePlugin.createProjectSyncEngine(), sharedEngine, "sync calls must share the engine lock");
+  sourcePlugin.settings.projectEndpointUrl = "http://localhost:18769/project";
+  assert.notStrictEqual(sourcePlugin.createProjectSyncEngine(), sharedEngine, "changing the source must create an engine for the new endpoint");
 
   const draftPlugin = Object.create(PluginClass.prototype);
   const draftPath = "texts/s14/translation/Leçon-01.md";
@@ -135,23 +121,22 @@ try {
   assert.strictEqual(await draftPlugin.getProjectSyncStorage().compareAndWrite(draftPath, "unused", null), false, "inline drafts must also block upstream deletion");
 
   const graphPlugin = Object.create(PluginClass.prototype);
-  graphPlugin.projectGraphViews = new WeakSet();
-  let graphUpdates = 0;
+  let projectGraphTabs = 0;
   let graphSaves = 0;
   let graphReveals = 0;
   let graphOptions = { search: "file:README", linkDistance: 250, scale: 0.4 };
   const graphLeaf = {
     view: {
       getViewType: () => "graph",
+      onOptionsChange() { graphCore.instance.saveOptions(); },
       dataEngine: {
         getOptions: () => graphOptions,
-        setOptions: (options) => { graphOptions = options; graphUpdates += 1; },
+        setOptions: (options) => { graphOptions = options; graphLeaf.view.onOptionsChange(); },
       },
     },
   };
-  const localGraphLeaf = {
-    view: { dataEngine: { setOptions: () => assert.fail("local graph must be unchanged") } },
-  };
+  graphLeaf.setViewState = async (state) => assert.strictEqual(state.type, "graph");
+  const personalGraphLeaf = { view: { dataEngine: { setOptions: () => assert.fail("personal graph must be unchanged") } } };
   const graphCore = {
     enabled: true,
     instance: { options: {}, saveOptions: () => { graphSaves += 1; } },
@@ -159,14 +144,14 @@ try {
   graphPlugin.app = {
     internalPlugins: { getPluginById: () => graphCore },
     workspace: {
-      getLeavesOfType: (type) => type === "graph" ? [graphLeaf] : [localGraphLeaf],
+      getLeavesOfType: () => projectGraphTabs ? [personalGraphLeaf, graphLeaf] : [personalGraphLeaf],
       revealLeaf: async (leaf) => { assert.strictEqual(leaf, graphLeaf); graphReveals += 1; },
-      getLeaf: () => assert.fail("reuse the existing graph tab"),
+      getLeaf: (kind) => { assert.strictEqual(kind, "tab"); projectGraphTabs += 1; return graphLeaf; },
     },
   };
   await graphPlugin.openProjectGraph();
   assert.strictEqual(graphReveals, 1);
-  assert.strictEqual(graphSaves, 1);
+  assert.strictEqual(graphSaves, 0, "applying the project preset must never persist global options");
   assert.strictEqual(graphOptions.linkDistance, 250, "preserve graph layout preferences");
   assert.strictEqual(graphOptions.scale, 0.4);
   assert.strictEqual(graphOptions.hideUnresolved, true);
@@ -194,16 +179,48 @@ try {
     assert.ok(excludedNames.test(name), `exclude ${name}`);
   }
   graphOptions.search = "file:对象a";
-  const updatesBeforeLayoutChange = graphUpdates;
-  graphPlugin.applyProjectGraphToViews();
-  assert.strictEqual(graphUpdates, updatesBeforeLayoutChange, "do not reset a user's active filter on every layout event");
-  assert.strictEqual(graphOptions.search, "file:对象a");
+  graphLeaf.view.onOptionsChange();
+  assert.strictEqual(graphSaves, 0, "changing a project graph must not overwrite the personal graph");
   await graphPlugin.openProjectGraph();
   assert.ok(graphOptions.search.includes(" OR "), "the command reapplies the project filter");
+  assert.strictEqual(projectGraphTabs, 1, "reuse only the project tab");
   graphCore.enabled = false;
   await assert.rejects(() => graphPlugin.openProjectGraph(), /核心插件/);
   graphLeaf.view.dataEngine = {};
-  assert.doesNotThrow(() => graphPlugin.applyProjectGraphToViews({ force: true }));
+  graphCore.enabled = true;
+  await assert.rejects(() => graphPlugin.openProjectGraph(), /不支持/);
+
+  const popoutPlugin = Object.create(PluginClass.prototype);
+  const mockDocument = () => {
+    const doc = new EventTarget();
+    doc.defaultView = { document: doc, AbortController };
+    return doc;
+  };
+  const mainDoc = mockDocument();
+  const existingDoc = mockDocument();
+  const laterDoc = mockDocument();
+  const workspaceEvents = new Map();
+  const clicks = [];
+  popoutPlugin.app = { workspace: {
+    containerEl: { ownerDocument: mainDoc },
+    iterateAllLeaves: (fn) => fn({ view: { containerEl: { ownerDocument: existingDoc } } }),
+    on: (name, fn) => workspaceEvents.set(name, fn),
+  } };
+  popoutPlugin.registerEvent = () => {};
+  popoutPlugin.handleKnowledgeInternalLinkClick = (event) => { clicks.push(event.currentTarget); return true; };
+  popoutPlugin.registerReadingLinkEvents();
+  workspaceEvents.get("window-open")(null, laterDoc.defaultView);
+  workspaceEvents.get("window-open")(null, laterDoc.defaultView);
+  for (const doc of [mainDoc, existingDoc, laterDoc]) doc.dispatchEvent(new Event("click"));
+  assert.deepStrictEqual(clicks, [mainDoc, existingDoc, laterDoc]);
+  workspaceEvents.get("window-close")(null, laterDoc.defaultView);
+  laterDoc.dispatchEvent(new Event("click"));
+  assert.strictEqual(clicks.length, 3, "closing a popout releases its listeners");
+
+  const link = { classList: { contains: () => true } };
+  const otherWindowTarget = { closest: () => link };
+  assert.strictEqual(popoutPlugin.segmentLinkElementFromEvent({ target: otherWindowTarget }), link);
+  assert.strictEqual(popoutPlugin.segmentLinkElementFromEvent({ target: { nodeType: 3, parentElement: otherWindowTarget } }), link);
 
   for (const method of ["scheduleSegmentAiMcpBackgroundCheck", "runSegmentAiMcpBackgroundCheck", "refreshSegmentAiMcpServers", "getSegmentAiMcpServerCatalog"]) {
     assert.strictEqual(typeof plugin[method], "undefined", "MCP settings and background checks must be removed");

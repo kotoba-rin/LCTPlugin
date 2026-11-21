@@ -152,6 +152,7 @@ const shouldResetAutoScroll = (previousState, nextState) => {
 };
 
 const workspaceFrameKey = (state, historyOpen) => JSON.stringify({
+  segmentAiEnabled: state?.segmentAiEnabled !== false,
   activeConversationId: String(state?.activeConversationId || ""),
   openConversationIds: Array.isArray(state?.openConversationIds)
     ? state.openConversationIds
@@ -533,7 +534,8 @@ class LacanInterpretationView extends ItemView {
     this.renderWorkspaceIdentity(conversationHeader, activeConversation);
     this.renderWorkspaceActions(
       conversationHeader,
-      activeConversation
+      activeConversation,
+      state.segmentAiEnabled !== false
     );
 
     if (activeConversation.error) {
@@ -640,7 +642,7 @@ class LacanInterpretationView extends ItemView {
       frameKey: workspaceFrameKey(state, this.historyOpen),
       activeRenderKey: workspaceConversationRenderKey(activeConversation),
     };
-    this.renderWorkspaceComposer(rootEl, activeConversation, state);
+    if (state.segmentAiEnabled !== false) this.renderWorkspaceComposer(rootEl, activeConversation, state);
     this.applyWorkspaceScroll(scrollEl, activeConversation.id);
     if (
       Number(scrollEl.scrollHeight || 0)
@@ -813,7 +815,7 @@ class LacanInterpretationView extends ItemView {
     });
   }
 
-  renderWorkspaceActions(headerEl, conversation) {
+  renderWorkspaceActions(headerEl, conversation, enabled = true) {
     const actionsEl = headerEl.createDiv("lacan-ai-view-actions");
     this.createButton(actionsEl, "译文", () => (
       this.plugin.openSegmentSource?.(
@@ -831,6 +833,7 @@ class LacanInterpretationView extends ItemView {
         conversation.requestedId
       )
     ));
+    if (!enabled || conversation.status === "starting") return;
     if (ACTIVE_GENERATION_STATUSES.has(conversation.status)) {
       this.createButton(
         actionsEl,
@@ -1026,6 +1029,7 @@ class LacanInterpretationView extends ItemView {
       && this.workspaceDom.projectTranslationsKey === projectTranslationsKey(conversation)
       && ACTIVE_GENERATION_STATUSES.has(this.workspaceDom.status)
       && ACTIVE_GENERATION_STATUSES.has(conversation.status)
+      && (this.workspaceDom.status === "starting") === (conversation.status === "starting")
     );
   }
 

@@ -116,7 +116,6 @@ const REASONING_EFFORT_LABELS = {
 };
 
 const DEFAULT_SETTINGS = {
-  projectGraphEnabled: true,
   projectEndpointUrl: DEFAULT_PROJECT_ENDPOINT,
   projectSyncLastResult: null,
   projectLessonSync: {},
@@ -309,7 +308,6 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.projectSyncController = null;
     this.startupSyncTimer = null;
     this.createdFileTimers = new Set();
-    this.projectGraphViews = new WeakSet();
     this.progressWritePaths = new Set();
     this.progressDirtyPaths = new Set();
     this.progressWriteSuppressTimers = new Map();
@@ -363,22 +361,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
         .onClick(() => this.frenchLookupPopup?.lookupCurrentSelection("translation")));
     }));
 
-    this.registerDomEvent(document, "click", (event) => {
-      if (this.handleKnowledgeInternalLinkClick(event)) return;
-      this.handleSegmentInternalLinkClick(event);
-    }, { capture: true });
-    this.registerDomEvent(document, "mouseover", (event) => {
-      this.handleSegmentLinkPreviewEnter(event);
-    }, { capture: true });
-    this.registerDomEvent(document, "mouseout", (event) => {
-      this.handleSegmentLinkPreviewLeave(event);
-    }, { capture: true });
-    this.registerDomEvent(document, "focusin", (event) => {
-      this.handleSegmentLinkPreviewEnter(event);
-    }, { capture: true });
-    this.registerDomEvent(document, "focusout", (event) => {
-      this.handleSegmentLinkPreviewLeave(event);
-    }, { capture: true });
+    this.registerReadingLinkEvents();
 
     this.registerReadingNoteEditorExtension();
 
@@ -477,9 +460,6 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.registerEvent(
       this.app.workspace.on("layout-change", () => {
         this.scheduleReadingToolbarRender();
-        if (this.settings.projectGraphEnabled) {
-          this.applyProjectGraphToViews();
-        }
       })
     );
 
@@ -490,12 +470,6 @@ module.exports = class LacanTranslationHelper extends Plugin {
     );
 
     this.registerProjectBasesView();
-
-    this.app.workspace.onLayoutReady(() => {
-      if (this.settings.projectGraphEnabled) {
-        this.runWithNotice(() => this.configureProjectGraph(), "项目关系图设置失败");
-      }
-    });
 
     this.addCommand({
       id: "open-project-graph",
@@ -567,6 +541,13 @@ module.exports = class LacanTranslationHelper extends Plugin {
   }
 
   onunload() {
+    for (const controller of this.readingLinkDocuments?.values() || []) controller.abort();
+    this.readingLinkDocuments?.clear();
+    if (this.projectGraphViews) {
+      for (const leaf of this.app.workspace.getLeavesOfType("graph")) {
+        if (this.projectGraphViews.has(leaf.view)) leaf.detach();
+      }
+    }
     this.translationInlineEditor?.destroy();
     this.translationInlineEditor = null;
     for (const cleanup of this.translationPreviewCleanups || []) cleanup();
@@ -639,42 +620,26 @@ module.exports = class LacanTranslationHelper extends Plugin {
     };
   }
 
-  applyProjectGraphToViews({ force = false } = {}) {
-    for (const leaf of this.app.workspace.getLeavesOfType("graph")) {
-      const view = leaf.view;
-      // The core graph API is internal: guard it for unsupported Obsidian versions.
-      const engine = view?.dataEngine;
-      if (!engine?.setOptions || !engine?.getOptions) continue;
-      if (!force && this.projectGraphViews.has(view)) continue;
-      // Mark before updating: rendering can trigger another layout-change event.
-      this.projectGraphViews.add(view);
-      engine.setOptions(this.getProjectGraphOptions(engine.getOptions()));
-    }
-  }
-
-  async configureProjectGraph({ force = false } = {}) {
-    const graph = this.app.internalPlugins?.getPluginById?.("graph");
-    if (!graph?.enabled || !graph.instance?.saveOptions) return false;
-    graph.instance.options = this.getProjectGraphOptions(graph.instance.options);
-    graph.instance.saveOptions();
-    this.applyProjectGraphToViews({ force });
-    return true;
-  }
-
   async openProjectGraph() {
-    if (!await this.configureProjectGraph({ force: true })) {
+    if (!this.app.internalPlugins?.getPluginById?.("graph")?.enabled) {
       throw new Error("请先在 Obsidian 核心插件中启用关系图谱。");
     }
-    const leaf = this.app.workspace.getLeavesOfType("graph")[0]
-      || this.app.workspace.getLeaf("tab");
-    if (leaf.view?.getViewType?.() !== "graph") {
+    const workspace = this.app.workspace;
+    this.projectGraphViews ||= new WeakSet();
+    let leaf = workspace.getLeavesOfType("graph").find((item) => this.projectGraphViews.has(item.view));
+    if (!leaf) {
+      leaf = workspace.getLeaf("tab");
       await leaf.setViewState({ type: "graph", active: true });
     }
-    await this.app.workspace.revealLeaf(leaf);
-    this.applyProjectGraphToViews({ force: true });
-    if (typeof leaf.view?.dataEngine?.setOptions !== "function") {
+    await workspace.revealLeaf(leaf);
+    const view = leaf.view;
+    if (!view.dataEngine?.getOptions || !view.dataEngine?.setOptions || typeof view.onOptionsChange !== "function") {
       throw new Error("当前 Obsidian 版本不支持自动设置图谱，请在图谱筛选中手动设置范围。");
     }
+    // The core graph writes all options to the vault when search or zoom changes.
+    view.onOptionsChange = () => {};
+    this.projectGraphViews.add(view);
+    view.dataEngine.setOptions(this.getProjectGraphOptions(view.dataEngine.getOptions()));
   }
 
   registerProjectBasesView() {
@@ -982,7 +947,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
   }
 
   updateSegmentAiState(state) {
-    this.segmentAiState = state || { status: "empty" };
+    this.segmentAiState = { ...(state || { status: "empty" }), segmentAiEnabled: Boolean(this.settings.segmentAiEnabled) };
     const leaves = this.app.workspace?.getLeavesOfType?.(LACAN_INTERPRETATION_VIEW_TYPE) || [];
     for (const leaf of leaves) {
       leaf.view?.setState?.(this.segmentAiState);
@@ -1016,6 +981,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     }
     try {
       await this.openSegmentInterpretationView();
+      if (!this.settings.segmentAiEnabled) return { state: "disabled" };
       if (!this.segmentAiController) {
         this.initializeSegmentAi();
       }
@@ -1060,6 +1026,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
   }
 
   async retrySegmentInterpretation(conversationId = this.activeSegmentAiConversationId()) {
+    if (!this.settings.segmentAiEnabled) return { state: "disabled" };
     if (!this.segmentAiController) {
       return { state: "failed" };
     }
@@ -1067,6 +1034,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
   }
 
   async followUpSegmentInterpretation(conversationId, question) {
+    if (!this.settings.segmentAiEnabled) return { state: "disabled" };
     if (!this.segmentAiController) {
       return { state: "failed" };
     }
@@ -1518,7 +1486,8 @@ module.exports = class LacanTranslationHelper extends Plugin {
   }
 
   async handleCreatedFile(file) {
-    if (this.syncInProgress) return;
+    // Obsidian emits create for existing files while opening the vault.
+    if (!this.app.workspace.layoutReady || this.syncInProgress) return;
     if (!(file instanceof TFile) || !this.isTranslationLessonPath(file.path)) {
       return;
     }
@@ -2337,43 +2306,17 @@ module.exports = class LacanTranslationHelper extends Plugin {
   }
 
   async showProjectSyncReport() {
-    if (this.syncInProgress) throw new Error("请等待文库同步或冲突保存完成后查看报告。");
+    if (this.syncInProgress) throw new Error("请等待文库同步完成后查看报告。");
     const storage = this.getProjectSyncStorage();
     const summary = this.settings.projectSyncLastResult;
     const reportPath = summary?.conflictReportPath || `${this.app.vault.configDir || ".obsidian"}/plugins/lacan-translation-helper/project-sync/conflicts.json`;
     const bytes = await storage.read(reportPath);
     if (!bytes && !summary) { new Notice("尚无文库同步记录。"); return; }
     const report = bytes ? JSON.parse(new TextDecoder().decode(bytes)) : { version: summary?.version, conflicts: [] };
-    const engine = this.createProjectSyncEngine();
-    new ProjectSyncReportModal(this.app, storage, Array.isArray(report) ? { version: summary?.version, conflicts: report } : report, {
-      readOnly: true,
+    new ProjectSyncReportModal(this.app, Array.isArray(report) ? { version: summary?.version, conflicts: report } : report, {
       skippedFiles: summary?.skippedFiles || [],
       checkedVersion: summary?.version,
-      engine: {
-        getConflictComparison: (path) => {
-          if (this.syncInProgress) throw new Error("文库正在更新，请稍后重新打开比较。");
-          return engine.getConflictComparison(path);
-        },
-        resolveConflict: (path, options) => this.resolveProjectSyncConflict(engine, path, options),
-      },
-      onResolved: async (result) => {
-        this.settings.projectSyncLastResult = {
-          ...(this.settings.projectSyncLastResult || { added: 0, updated: 0, deleted: 0, unchanged: 0 }),
-          version: result.version, checkedAt: Date.now(), conflictCount: result.conflicts.length,
-          conflictReportPath: result.conflictReportPath || reportPath,
-        };
-        await this.saveSettings();
-        this.refreshReadingAfterRepositorySync();
-      },
     }).open();
-  }
-
-  async resolveProjectSyncConflict(engine, path, options) {
-    if (this.syncInProgress) throw new Error("已有文库同步或冲突保存正在进行，请稍后再试。");
-    if (engine !== this.createProjectSyncEngine()) throw new Error("文库同步地址已改变，请重新打开冲突比较。");
-    this.syncInProgress = true;
-    try { return await engine.resolveConflict(path, options); }
-    finally { this.syncInProgress = false; }
   }
 
   refreshReadingAfterRepositorySync() {
@@ -2931,6 +2874,35 @@ module.exports = class LacanTranslationHelper extends Plugin {
     linkEl.setAttribute("title", `打开「${segmentId}」${this.segmentDocumentLabel(targetPath)}`);
   }
 
+  registerReadingLinkEvents() {
+    const documents = this.readingLinkDocuments = new Map();
+    const bind = (doc) => {
+      if (!doc?.addEventListener || documents.has(doc)) return;
+      const controller = new doc.defaultView.AbortController();
+      documents.set(doc, controller);
+      const options = { capture: true, signal: controller.signal };
+      doc.addEventListener("click", (event) => {
+        if (!this.handleKnowledgeInternalLinkClick(event)) this.handleSegmentInternalLinkClick(event);
+      }, options);
+      for (const type of ["mouseover", "focusin"]) {
+        doc.addEventListener(type, (event) => this.handleSegmentLinkPreviewEnter(event), options);
+      }
+      for (const type of ["mouseout", "focusout"]) {
+        doc.addEventListener(type, (event) => this.handleSegmentLinkPreviewLeave(event), options);
+      }
+    };
+    const workspace = this.app.workspace;
+    bind(workspace.containerEl?.ownerDocument || document);
+    workspace.iterateAllLeaves?.((leaf) => bind(leaf.containerEl?.ownerDocument || leaf.view?.containerEl?.ownerDocument));
+    this.registerEvent(workspace.on("window-open", (_pane, win) => bind(win.document)));
+    this.registerEvent(workspace.on("window-close", (pane, win) => {
+      const doc = pane?.doc || win.document;
+      documents.get(doc)?.abort();
+      documents.delete(doc);
+      if (doc && this.segmentPreviewEl?.ownerDocument === doc) this.hideSegmentPreview();
+    }));
+  }
+
   handleSegmentInternalLinkClick(event) {
     const linkEl = this.segmentLinkElementFromEvent(event);
     if (!linkEl) {
@@ -2957,8 +2929,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     }
     if (
       event.type === "mouseover" &&
-      typeof Node !== "undefined" &&
-      event.relatedTarget instanceof Node &&
+      event.relatedTarget?.nodeType &&
       linkEl.contains(event.relatedTarget)
     ) {
       return;
@@ -2989,8 +2960,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
 
     const relatedTarget = event.relatedTarget;
     if (
-      typeof Node !== "undefined" &&
-      relatedTarget instanceof Node &&
+      relatedTarget?.nodeType &&
       (linkEl.contains(relatedTarget) || this.segmentPreviewEl?.contains?.(relatedTarget))
     ) {
       return;
@@ -3001,7 +2971,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
   }
 
   segmentLinkElementFromEvent(event) {
-    const targetEl = event.target instanceof Element ? event.target : null;
+    const targetEl = event.target?.nodeType === 3 ? event.target.parentElement : event.target;
     const linkEl = targetEl?.closest?.("a.lacan-segment-link, a.internal-link") || null;
     return this.isPotentialSegmentLinkElement(linkEl) ? linkEl : null;
   }
@@ -3137,7 +3107,8 @@ module.exports = class LacanTranslationHelper extends Plugin {
     const documentLabel = this.segmentDocumentLabel(targetPath);
 
     this.hideSegmentPreview({ keepHideTimer: true });
-    const previewEl = document.createElement("div");
+    const doc = linkEl.ownerDocument;
+    const previewEl = doc.createElement("div");
     previewEl.className = "lacan-segment-preview-popover";
     previewEl.addEventListener("mouseenter", () => {
       if (this.segmentPreviewHideTimer) {
@@ -3149,17 +3120,17 @@ module.exports = class LacanTranslationHelper extends Plugin {
 
     const titleEl = previewEl.createDiv
       ? previewEl.createDiv("lacan-segment-preview-title")
-      : previewEl.appendChild(document.createElement("div"));
+      : previewEl.appendChild(doc.createElement("div"));
     titleEl.className = "lacan-segment-preview-title";
     titleEl.textContent = `「${normalizedSegmentId}」${documentLabel}`;
 
     const contentEl = previewEl.createDiv
       ? previewEl.createDiv("lacan-segment-preview-content")
-      : previewEl.appendChild(document.createElement("div"));
+      : previewEl.appendChild(doc.createElement("div"));
     contentEl.className = "lacan-segment-preview-content";
     contentEl.textContent = "加载中...";
 
-    document.body.appendChild(previewEl);
+    doc.body.appendChild(previewEl);
     this.positionSegmentPreview(previewEl, linkEl);
     this.segmentPreviewEl = previewEl;
     const token = ++this.segmentPreviewRenderToken;
@@ -3179,19 +3150,20 @@ module.exports = class LacanTranslationHelper extends Plugin {
   }
 
   positionSegmentPreview(previewEl, anchorEl) {
+    const win = anchorEl.ownerDocument.defaultView;
     const rect = anchorEl.getBoundingClientRect();
     const margin = 10;
-    const width = Math.min(520, Math.max(320, window.innerWidth - margin * 2));
+    const width = Math.min(520, Math.max(320, win.innerWidth - margin * 2));
     previewEl.style.width = `${width}px`;
-    let left = Math.min(rect.left, window.innerWidth - width - margin);
+    let left = Math.min(rect.left, win.innerWidth - width - margin);
     left = Math.max(margin, left);
     const estimatedHeight = Math.min(360, Math.max(160, previewEl.offsetHeight || 220));
     let top = rect.bottom + margin;
-    if (top + estimatedHeight > window.innerHeight - margin) {
+    if (top + estimatedHeight > win.innerHeight - margin) {
       top = Math.max(margin, rect.top - estimatedHeight - margin);
     }
-    previewEl.style.left = `${left + window.scrollX}px`;
-    previewEl.style.top = `${top + window.scrollY}px`;
+    previewEl.style.left = `${left + win.scrollX}px`;
+    previewEl.style.top = `${top + win.scrollY}px`;
   }
 
   hideSegmentPreview({ keepHideTimer = false } = {}) {
@@ -3951,22 +3923,8 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
     }
 
     new Setting(containerEl)
-      .setName("默认优化项目关系图")
-      .setDesc("打开全局图谱时只显示知识卡片（绿色）与翻译正文（蓝色），排除 README、索引页、附件和未解析链接，并隐藏孤立节点。关闭后可自行调整图谱筛选；局部图谱不受影响。")
-      .addToggle((toggle) => {
-        toggle.setValue(Boolean(this.plugin.settings.projectGraphEnabled))
-          .onChange(async (value) => {
-            this.plugin.settings.projectGraphEnabled = value;
-            await this.plugin.saveSettings();
-            if (value) {
-              await this.plugin.configureProjectGraph({ force: true });
-            }
-          });
-      });
-
-    new Setting(containerEl)
       .setName("知识卡片与翻译关系图")
-      .setDesc("查看卡片之间以及卡片与译文章节之间已有的链接关系。")
+      .setDesc("在项目图谱标签页中查看知识卡片与译文章节的链接。")
       .addButton((button) => {
         button.setButtonText("打开关系图")
           .onClick(() => this.plugin.runWithNotice(

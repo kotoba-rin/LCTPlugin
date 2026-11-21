@@ -3267,6 +3267,7 @@ var require_plugin_http_request = __commonJS({
 // src/project-library-base.js
 var require_project_library_base = __commonJS({
   "src/project-library-base.js"(exports2, module2) {
+    var { isDeepStrictEqual } = require("node:util");
     var PROJECT_BASE_PATH2 = "Lacan-Chinese-Translation-Project.base";
     var PROJECT_BASE_CONTENT2 = `filters:
   and:
@@ -3348,10 +3349,23 @@ views:
       if (parsed?.views != null && !Array.isArray(parsed.views)) throw new Error("Base 的 views 必须是列表，已保留原文件。");
       if (parsed?.views?.some((view) => view?.type === "lacan-knowledge-list")) return contents;
       const newline = contents.includes("\r\n") ? "\r\n" : "\n";
+      const expected = { ...parsed, views: [...parsed?.views || [], { type: "lacan-knowledge-list", name: "知识库" }] };
+      const verified = (candidate) => {
+        if (!parseYaml) return candidate;
+        try {
+          if (isDeepStrictEqual(parseYaml(candidate), expected)) return candidate;
+        } catch {
+        }
+        if (stringifyYaml) {
+          const serialized = stringifyYaml(expected).replace(/\r?\n/g, newline);
+          if (isDeepStrictEqual(parseYaml(serialized), expected)) return serialized;
+        }
+        throw new Error("无法保留 Base 的原有配置，已取消迁移。");
+      };
       const lines = contents.split(/\r?\n/);
       const start = lines.findIndex((line) => /^(?:views|"views"|'views')\s*:/.test(line));
       const addition = ["  - type: lacan-knowledge-list", "    name: 知识库"];
-      if (start < 0) return `${contents}${contents.endsWith("\n") || !contents ? "" : newline}views:${newline}${addition.join(newline)}${newline}`;
+      if (start < 0) return verified(`${contents}${contents.endsWith("\n") || !contents ? "" : newline}views:${newline}${addition.join(newline)}${newline}`);
       let end = start + 1;
       while (end < lines.length && (!/^\S/.test(lines[end]) || /^(?:#|-\s)/.test(lines[end]))) end += 1;
       const block = lines.slice(start, end).join("\n");
@@ -3361,7 +3375,7 @@ views:
         if (!parsed || !stringifyYaml) throw new Error("当前 Base 使用复杂 views 格式，请保留原文件并手动添加知识库视图。");
         const replacement = stringifyYaml({ views: [...parsed.views || [], { type: "lacan-knowledge-list", name: "知识库" }] }).trimEnd().split(/\r?\n/);
         lines.splice(start, end - start, ...replacement);
-        return lines.join(newline);
+        return verified(lines.join(newline));
       }
       if (!parseYaml) {
         const first = lines.slice(start + 1, end).find((line) => line.trim() && !line.trim().startsWith("#"));
@@ -3372,7 +3386,7 @@ views:
       const inserted = [`${indent}- type: lacan-knowledge-list`, `${indent}  name: 知识库`];
       while (end > start + 1 && !lines[end - 1].trim()) end -= 1;
       lines.splice(end, 0, ...inserted);
-      return lines.join(newline);
+      return verified(lines.join(newline));
     }
     module2.exports = { PROJECT_BASE_PATH: PROJECT_BASE_PATH2, PROJECT_BASE_CONTENT: PROJECT_BASE_CONTENT2, migrateProjectBaseContent: migrateProjectBaseContent2 };
   }
@@ -4222,58 +4236,14 @@ var require_project_sync_report = __commonJS({
     };
     var { skipReasonText } = require_project_sync_status();
     var ProjectSyncReportModal2 = class extends Modal {
-      constructor(app, storage, report, { engine, onResolved, readOnly = false, skippedFiles = [], checkedVersion } = {}) {
+      constructor(app, report, { skippedFiles = [], checkedVersion } = {}) {
         super(app);
-        this.storage = storage;
         this.report = report;
-        this.engine = engine;
-        this.onResolved = onResolved;
-        this.readOnly = readOnly;
         this.skippedFiles = skippedFiles;
         this.checkedVersion = checkedVersion;
-        this.sessions = /* @__PURE__ */ new Map();
-        this.requestId = 0;
       }
       onOpen() {
-        this.isClosed = false;
         this.modalEl?.classList.add("lacan-sync-report-modal");
-        this.renderReport();
-      }
-      onClose() {
-        this.isClosed = true;
-        this.requestId += 1;
-      }
-      renderReport() {
-        if (this.readOnly) return this.renderReadOnlyReport();
-        this.titleEl.setText("文库同步与冲突比较");
-        const root = this.contentEl;
-        root.empty();
-        root.createEl("p", { text: `版本：${this.report.version || "未知"}`, cls: "lacan-sync-muted" });
-        root.createEl("p", { text: "冲突默认保留本地修改。可逐段比较并调整选择，确认保存后写入合并结果。", cls: "lacan-sync-help" });
-        const conflicts = this.report.conflicts || [];
-        if (!conflicts.length) root.createEl("p", { text: "本次没有冲突。" });
-        const list = root.createDiv("lacan-sync-conflict-list");
-        for (const conflict of conflicts) {
-          const row = list.createDiv("lacan-sync-conflict");
-          row.createEl("code", { text: conflict.path });
-          const actions = row.createDiv("lacan-sync-actions");
-          if (this.engine?.getConflictComparison) {
-            const compare = actions.createEl("button", { text: "比较与解决冲突" });
-            compare.addEventListener("click", () => {
-              void this.selectConflict(conflict);
-            });
-          }
-          this.addLocalButton(actions, conflict.path);
-          if (conflict.incomingPath) {
-            const incoming = actions.createEl("button", { text: "查看上游版本" });
-            incoming.addEventListener("click", () => {
-              void this.showIncoming(conflict).catch((error) => new Obsidian2.Notice(error.message));
-            });
-          }
-        }
-        this.detailEl = root.createDiv("lacan-sync-comparison");
-      }
-      renderReadOnlyReport() {
         this.titleEl.setText("文库同步记录");
         const root = this.contentEl;
         root.empty();
@@ -4310,229 +4280,6 @@ var require_project_sync_report = __commonJS({
         local.addEventListener("click", () => {
           void this.app.workspace.openLinkText(path, "", true).catch((error) => new Obsidian2.Notice(error.message));
         });
-      }
-      async selectConflict(conflict, reload = false) {
-        const requestId = ++this.requestId;
-        this.detailEl.empty();
-        this.detailEl.createEl("p", { text: "正在读取比较内容…" });
-        try {
-          let session = this.sessions.get(conflict.path);
-          if (!session || reload) {
-            const comparison = await this.engine.getConflictComparison(conflict.path);
-            session = { conflict, comparison, choices: {}, manualValues: {}, activeHunk: 0, resultEdited: false, saving: false, error: "" };
-            this.sessions.set(conflict.path, session);
-          }
-          if (requestId === this.requestId) {
-            this.renderComparison(session);
-            this.detailEl.scrollIntoView?.({ block: "start" });
-          }
-        } catch (error) {
-          if (requestId !== this.requestId) return;
-          this.detailEl.empty();
-          this.detailEl.createEl("p", { text: error.message, cls: "lacan-sync-error" });
-        }
-      }
-      textPane(root, title, content, label, cls = "") {
-        const pane = root.createDiv(`lacan-sync-text-pane ${cls}`);
-        pane.createEl("h5", { text: title });
-        if (content === null) pane.createEl("p", { text: label.includes("基线") ? "没有可用的可信基线。" : "此版本没有该文件。", cls: "lacan-sync-muted" });
-        const area = pane.createEl("textarea", { cls: "lacan-sync-compare-text" });
-        area.readOnly = true;
-        area.value = content ?? "";
-        area.setAttribute("aria-label", label);
-        area.spellcheck = false;
-        area.rows = Math.max(5, Math.min(16, String(content ?? "").split("\n").length + 1));
-        area.wrap = "soft";
-        return area;
-      }
-      renderComparison(session) {
-        const root = this.detailEl;
-        root.empty();
-        const comparison = session.comparison;
-        root.createEl("h3", { text: comparison.path.split("/").at(-1) });
-        root.createEl("code", { text: comparison.path, cls: "lacan-sync-file-path" });
-        if (comparison.missingBase) root.createEl("p", { text: "缺少可信基线，无法判断哪一方改过。以下按段比较差异，默认保留本地内容。", cls: "lacan-sync-warning" });
-        const toolbar = root.createDiv("lacan-sync-actions");
-        const reload = toolbar.createEl("button", { text: "重新比较（放弃当前草稿）" });
-        session.reloadButton = reload;
-        reload.disabled = session.saving;
-        reload.addEventListener("click", () => {
-          void this.selectConflict(session.conflict, true);
-        });
-        this.addLocalButton(toolbar, comparison.path);
-        if (!comparison.canResolveText) {
-          root.createEl("p", { text: "此文件无法进行文本合并（附件或非 UTF-8 文本）。本地文件已保留，请另行比较附件；上游副本仍在同步缓存中。" });
-          if (session.conflict.incomingPath) root.createEl("code", { text: session.conflict.incomingPath });
-          return;
-        }
-        const full = root.createEl("details", { cls: "lacan-sync-full-comparison" });
-        full.createEl("summary", { text: "完整文件比较（基线／本地／上游）" });
-        const panes = full.createDiv("lacan-sync-compare-grid lacan-sync-full-grid");
-        this.textPane(panes, "基线：上次收到的上游原文", comparison.baseText, "基线完整内容（只读）");
-        this.textPane(panes, "本地：你的当前修改", comparison.localText, "本地完整内容（只读）");
-        this.textPane(panes, "上游：这次收到的新版", comparison.upstreamText, "上游完整内容（只读）");
-        session.fileDeletion = comparison.localText === null || comparison.upstreamText === null;
-        session.blocks = comparison.blocks || [];
-        const conflictEntries = session.blocks.map((block, index) => ({ block, index })).filter(({ block }) => block.conflict);
-        for (const { index } of conflictEntries) session.choices[index] ??= "local";
-        if (session.fileDeletion) session.fileChoice ??= "local";
-        session.choiceControls = [];
-        const conflicts = root.createDiv("lacan-sync-hunks");
-        session.activeHunk = Math.max(0, Math.min(session.activeHunk || 0, conflictEntries.length - 1));
-        if (conflictEntries.length) {
-          const navigation = conflicts.createDiv("lacan-sync-hunk-navigation");
-          navigation.createEl("span", { text: `冲突 ${session.activeHunk + 1} / ${conflictEntries.length}`, cls: "lacan-sync-hunk-count", attr: { "aria-live": "polite" } });
-          const pageActions = navigation.createDiv("lacan-sync-actions");
-          for (const [step, label] of [[-1, "上一处冲突"], [1, "下一处冲突"]]) {
-            const page = pageActions.createEl("button", { text: label });
-            page.disabled = session.saving || session.activeHunk + step < 0 || session.activeHunk + step >= conflictEntries.length;
-            page.addEventListener("click", () => {
-              session.activeHunk += step;
-              this.renderComparison(session);
-            });
-          }
-          const { block, index } = conflictEntries[session.activeHunk];
-          const number = session.activeHunk + 1;
-          const hunk = conflicts.createDiv("lacan-sync-hunk");
-          const ids = block.conflict.segmentIds || [];
-          const position = ids.length ? ids.join("、") : block.conflict.label || (Number.isInteger(block.conflict.oIndex) ? `基线第 ${block.conflict.oIndex + 1} 行附近` : `冲突 ${number}`);
-          hunk.createEl("h4", { text: position });
-          const grid = hunk.createDiv("lacan-sync-compare-grid");
-          this.textPane(grid, "本地 · 默认保留", block.conflict.a.join(""), `冲突 ${number} 本地（只读）`, "is-local");
-          this.textPane(grid, "上游", block.conflict.b.join(""), `冲突 ${number} 上游（只读）`);
-          const base = hunk.createEl("details", { cls: "lacan-sync-base-comparison" });
-          base.createEl("summary", { text: "查看此段基线" });
-          this.textPane(base, "基线", comparison.missingBase ? null : block.conflict.o.join(""), `冲突 ${number} 基线（只读）`);
-          if (session.fileDeletion) hunk.createEl("p", { text: "一方已删除文件。以下选择应用于整个文件，可翻页检查各段。", cls: "lacan-sync-warning" });
-          const actions2 = hunk.createDiv("lacan-sync-actions");
-          const labels = session.fileDeletion ? [["local", comparison.localText === null ? "保留本地删除" : "保留本地文件"], ["upstream", comparison.upstreamText === null ? "采用上游删除" : "采用上游文件"], ["manual", "手动填写完整文件"]] : [["local", "保留本地这一处"], ["upstream", "采用上游这一处"], ["manual", "手动填写这一处"]];
-          for (const [choice, label] of labels) {
-            const button = actions2.createEl("button", { text: label });
-            button.disabled = session.saving || session.resultEdited;
-            button.setAttribute("aria-pressed", (session.fileDeletion ? session.fileChoice : session.choices[index]) === choice ? "true" : "false");
-            session.choiceControls.push(button);
-            button.addEventListener("click", () => {
-              if (session.fileDeletion) session.fileChoice = choice;
-              else session.choices[index] = choice;
-              session.error = "";
-              const key = session.fileDeletion ? "file" : index;
-              if (choice === "manual" && !Object.hasOwn(session.manualValues, key)) session.manualValues[key] = session.fileDeletion ? comparison.localText ?? "" : block.conflict.a.join("");
-              this.renderComparison(session);
-            });
-          }
-          if ((session.fileDeletion ? session.fileChoice : session.choices[index]) === "manual") {
-            const key = session.fileDeletion ? "file" : index;
-            const manual = hunk.createEl("textarea", { cls: "lacan-sync-manual-text" });
-            manual.value = session.manualValues[key] || "";
-            manual.setAttribute("aria-label", session.fileDeletion ? "完整文件手工结果" : `冲突 ${number} 手工结果`);
-            manual.spellcheck = false;
-            manual.disabled = session.saving || session.resultEdited;
-            session.choiceControls.push(manual);
-            manual.addEventListener("input", () => {
-              session.manualValues[key] = manual.value;
-              this.updateResult(session);
-            });
-          }
-        }
-        const result = root.createEl("details", { cls: "lacan-sync-result" });
-        result.open = session.resultEdited;
-        result.createEl("summary", { text: "完整合并结果（检查或编辑）" });
-        result.createEl("p", { text: "无冲突的改动已自动纳入。直接修改完整结果后，逐处选择会锁定；重新比较可恢复默认选择。", cls: "lacan-sync-muted" });
-        session.resultEl = result.createEl("textarea", { cls: "lacan-sync-result-text" });
-        session.resultEl.setAttribute("aria-label", "合并结果");
-        session.resultEl.spellcheck = false;
-        session.resultEl.addEventListener("input", () => {
-          session.result = session.resultEl.value;
-          session.resultEdited = true;
-          for (const control of session.choiceControls) control.disabled = true;
-          session.statusEl.setText("完整结果已有手工修改。确认保存会采用下方内容；逐处选择已锁定，避免覆盖你的修改。");
-        });
-        const footer = root.createDiv("lacan-sync-resolution-footer");
-        session.statusEl = footer.createEl("p", { cls: "lacan-sync-selection-status", attr: { "aria-live": "polite" } });
-        const actions = footer.createDiv("lacan-sync-actions");
-        session.saveButton = actions.createEl("button", { text: "确认保存合并结果", cls: "mod-cta" });
-        session.saveButton.addEventListener("click", () => {
-          void this.saveResolution(session);
-        });
-        session.errorEl = footer.createEl("p", { cls: "lacan-sync-error", attr: { role: "alert" } });
-        session.errorEl.setText(session.error);
-        this.updateResult(session);
-      }
-      updateResult(session) {
-        const comparison = session.comparison;
-        let unresolved = 0;
-        const parts = [];
-        for (let index = 0; index < session.blocks.length; index += 1) {
-          const block = session.blocks[index];
-          if (block.ok) {
-            parts.push(block.ok.join(""));
-            continue;
-          }
-          const choice = session.choices[index];
-          if (!choice) unresolved += 1;
-          parts.push(choice === "manual" ? session.manualValues[index] ?? "" : (choice === "upstream" ? block.conflict.b : block.conflict.a).join(""));
-        }
-        let content = parts.join("");
-        if (session.fileDeletion) content = session.fileChoice === "manual" ? session.manualValues.file ?? "" : session.fileChoice === "upstream" ? comparison.upstreamText : comparison.localText;
-        if (!session.resultEdited) session.result = content;
-        session.unresolved = unresolved;
-        session.resultEl.value = session.result === null ? "（确认后保留该文件的删除状态）" : session.result.replace(/\r\n/g, "\n");
-        session.resultEl.readOnly = session.saving || unresolved > 0 || session.result === null;
-        session.saveButton.disabled = session.saving || unresolved > 0;
-        session.reloadButton.disabled = session.saving;
-        session.saveButton.setText(session.saving ? "正在安全保存…" : session.result === null ? "确认保留删除" : "确认保存合并结果");
-        session.statusEl.setText(unresolved ? `还有 ${unresolved} 处冲突待选择；预览暂用这些位置的本地内容。` : session.resultEdited ? "完整结果已有手工修改，确认保存会采用编辑后的内容。" : session.result === null ? "当前选择保留文件删除状态，确认后生效。" : session.fileDeletion ? "已选择保留完整文件，确认保存后生效。" : `保留本地 ${Object.values(session.choices).filter((choice) => choice === "local").length} 处，采用上游 ${Object.values(session.choices).filter((choice) => choice === "upstream").length} 处，手工填写 ${Object.values(session.choices).filter((choice) => choice === "manual").length} 处。无冲突改动已纳入，确认保存后生效。`);
-      }
-      async saveResolution(session) {
-        if (session.saving || session.unresolved) return;
-        session.saving = true;
-        session.error = "";
-        session.errorEl.setText("");
-        for (const control of session.choiceControls) control.disabled = true;
-        this.updateResult(session);
-        let result;
-        try {
-          result = await this.engine.resolveConflict(session.comparison.path, {
-            expectedLocalHash: session.comparison.localHash,
-            expectedUpstreamHash: session.comparison.upstreamHash,
-            content: session.result
-          });
-        } catch (error) {
-          session.saving = false;
-          session.error = `${error.message} 当前合并草稿已保留；可复制结果后重新比较。`;
-          if (!this.isClosed) this.renderComparison(session);
-          return;
-        }
-        this.report.version = result.version || this.report.version;
-        this.report.conflicts = result.conflicts;
-        this.sessions.delete(session.comparison.path);
-        this.requestId += 1;
-        if (!this.isClosed) this.renderReport();
-        new Obsidian2.Notice("合并结果已保存，本地修改已纳入后续增量同步。");
-        try {
-          await this.onResolved?.(result);
-        } catch (error) {
-          new Obsidian2.Notice(`合并已保存，刷新视图失败：${error.message}`);
-        }
-      }
-      async showIncoming(conflict) {
-        const bytes = await this.storage.read(conflict.incomingPath);
-        if (!bytes) throw new Error("找不到上游副本，请重新同步。 ");
-        const modal = new Modal(this.app);
-        modal.onOpen = () => {
-          modal.modalEl?.classList.add("lacan-sync-report-modal");
-          modal.titleEl.setText(`上游版本：${conflict.path}`);
-          if (/\.(md|txt|csv|json)$/i.test(conflict.path)) {
-            const area = modal.contentEl.createEl("textarea", { cls: "lacan-sync-upstream-text" });
-            area.readOnly = true;
-            area.value = new TextDecoder().decode(bytes);
-            area.setAttribute("aria-label", "上游原始内容，只读，可选择复制");
-          } else {
-            modal.contentEl.createEl("p", { text: `上游附件已保存在本地同步缓存中，大小 ${bytes.byteLength} 字节。` });
-            modal.contentEl.createEl("code", { text: conflict.incomingPath });
-          }
-        };
-        modal.open();
       }
     };
     module2.exports = { ProjectSyncReportModal: ProjectSyncReportModal2 };
@@ -5965,7 +5712,7 @@ var require_codex_app_server_runtime = __commonJS({
         this.childProcess = null;
         this.client = null;
         this.startupPromise = null;
-        this.lifecycleVersion = 0;
+        this.closed = false;
         this.activeTurns = /* @__PURE__ */ new Map();
         this.earlyTurnEvents = /* @__PURE__ */ new Map();
         this.pendingTurnStarts = /* @__PURE__ */ new Map();
@@ -5987,6 +5734,7 @@ var require_codex_app_server_runtime = __commonJS({
         };
       }
       async ensureServer() {
+        if (this.closed) throw new CodexRuntimeError("RuntimeClosed", "本地 Agent 已关闭。");
         if (this.startupPromise) {
           return this.startupPromise;
         }
@@ -6001,7 +5749,6 @@ var require_codex_app_server_runtime = __commonJS({
         }
       }
       async startServer() {
-        const lifecycleVersion = this.lifecycleVersion;
         let installation;
         try {
           installation = await this.discoverCli("codex", {
@@ -6016,7 +5763,7 @@ var require_codex_app_server_runtime = __commonJS({
             { cause: error }
           ));
         }
-        if (lifecycleVersion !== this.lifecycleVersion) {
+        if (this.closed) {
           throw new CodexRuntimeError("TurnInterrupted", "CLI 检测期间任务已取消。");
         }
         this.diagnostics.cliPath = installation.path;
@@ -6660,13 +6407,13 @@ var require_codex_app_server_runtime = __commonJS({
         });
         active.reject(error);
       }
-      async interrupt(target = {}) {
+      async interrupt(target) {
         let active;
         const threadId = String(target?.threadId || "").trim();
         const turnId = String(target?.turnId || "").trim();
         if (threadId && turnId) {
           active = this.activeTurns.get(turnEventKey(threadId, turnId));
-        } else if (this.activeTurns.size === 1) {
+        } else if (target === void 0 && this.activeTurns.size === 1) {
           active = this.activeTurns.values().next().value;
         }
         if (!active || !this.client) {
@@ -6679,7 +6426,7 @@ var require_codex_app_server_runtime = __commonJS({
         return true;
       }
       async shutdown() {
-        this.lifecycleVersion += 1;
+        this.closed = true;
         if (this.activeTurns.size > 0 && this.client && !this.client.closed) {
           await Promise.allSettled(
             [...this.activeTurns.values()].map((active) => this.interrupt({
@@ -7341,8 +7088,9 @@ export function apply(ctx, config) {
           active.finish(this.error("ProcessStopUnconfirmed", "CLI 未确认退出，暂时不能恢复这个会话。请在终端检查该进程。"));
         }, this.stopTimeoutMs * 2);
       }
-      async interrupt({ threadId = "", turnId = "" } = {}) {
-        const active = [...this.activeTurns.values()].filter((turn) => (!threadId || turn.threadId === threadId) && (!turnId || turn.turnId === turnId));
+      async interrupt(target) {
+        if (target !== void 0 && (!target?.threadId || !target.turnId)) return false;
+        const active = [...this.activeTurns.values()].filter((turn) => target === void 0 || turn.threadId === target.threadId && turn.turnId === target.turnId);
         for (const turn of active) {
           turn.interrupted = true;
           this.requestStop(turn);
@@ -7592,7 +7340,7 @@ var require_provider_settings = __commonJS({
       ]));
       const activeProfile = normalizeProfile(activeValues);
       Object.assign(settings, activeProfile);
-      profiles[provider] = clone(activeProfile);
+      delete profiles[provider];
       settings.segmentAiProvider = provider;
       settings.segmentAiProviderProfiles = profiles;
       for (const { pathSetting } of PROVIDER_DEFINITIONS2) {
@@ -7604,7 +7352,10 @@ var require_provider_settings = __commonJS({
       normalizeProviderSettings2(settings);
       const provider = normalizeProvider2(nextProvider);
       if (settings.segmentAiProvider === provider) return provider;
-      Object.assign(settings, clone(settings.segmentAiProviderProfiles[provider]));
+      const profiles = settings.segmentAiProviderProfiles;
+      profiles[settings.segmentAiProvider] = normalizeProfile(settings);
+      Object.assign(settings, profiles[provider]);
+      delete profiles[provider];
       settings.segmentAiProvider = provider;
       return provider;
     };
@@ -8147,435 +7898,6 @@ var require_workspace_store = __commonJS({
   }
 });
 
-// segment-ai/interpretation-controller.js
-var require_interpretation_controller = __commonJS({
-  "segment-ai/interpretation-controller.js"(exports2, module2) {
-    var { PROMPT_VERSION } = require_prompt_builder();
-    var UNAVAILABLE_ERROR_CODES = /* @__PURE__ */ new Set([
-      "CodexNotFound",
-      "CodexAuthRequired",
-      "AppServerIncompatible",
-      "ReadOnlyBoundaryRejected",
-      "ExternalToolsAvailable"
-    ]);
-    var SegmentInterpretationController = class {
-      constructor({
-        resolver,
-        promptBuilder,
-        sessionStore,
-        runtime,
-        onState = () => {
-        },
-        persistSessions = async () => {
-        },
-        now = () => /* @__PURE__ */ new Date()
-      } = {}) {
-        if (!resolver || !promptBuilder || !sessionStore || !runtime) {
-          throw new TypeError("SegmentInterpretationController requires all domain services.");
-        }
-        this.resolver = resolver;
-        this.promptBuilder = promptBuilder;
-        this.sessionStore = sessionStore;
-        this.runtime = runtime;
-        this.onState = onState;
-        this.persistSessions = persistSessions;
-        this.now = now;
-        this.currentContext = null;
-        this.currentThreadId = null;
-        this.currentAnswer = "";
-        this.currentConversation = [];
-        this.lastRequest = null;
-        this.inFlight = null;
-        this.inFlightKey = null;
-      }
-      interpret(sourcePath, requestedId, { forceNew = false } = {}) {
-        const requestKey = `${sourcePath}::${requestedId}::${forceNew ? "new" : "reuse"}`;
-        if (this.inFlight && this.inFlightKey === requestKey) {
-          return this.inFlight;
-        }
-        if (this.inFlight) {
-          return Promise.resolve(this.busyResult(
-            "已有一个分段正在生成，请先等待完成或停止。"
-          ));
-        }
-        this.inFlightKey = requestKey;
-        this.inFlight = this.performInterpret(sourcePath, requestedId, { forceNew }).finally(() => {
-          this.inFlight = null;
-          this.inFlightKey = null;
-        });
-        return this.inFlight;
-      }
-      async performInterpret(sourcePath, requestedId, { forceNew }) {
-        this.lastRequest = { sourcePath, requestedId };
-        this.emit({
-          status: "resolving",
-          sourcePath,
-          requestedId,
-          answer: ""
-        });
-        try {
-          const context = await this.resolver.resolve(sourcePath, requestedId);
-          this.currentContext = context;
-          this.currentAnswer = "";
-          this.currentConversation = [];
-          const evaluation = this.sessionStore.evaluate(context);
-          if (!forceNew && evaluation.state === "stale") {
-            return await this.restoreStaleSession(context, evaluation);
-          }
-          if (!forceNew && evaluation.state === "current") {
-            return await this.restoreCurrentSession(context, evaluation.record);
-          }
-          return await this.startInitialTurn(context);
-        } catch (error) {
-          return this.emitFailure(error);
-        }
-      }
-      async restoreCurrentSession(context, record) {
-        this.emit({
-          status: "starting",
-          phase: "restoring",
-          context,
-          answer: ""
-        });
-        const cachedAnswer = String(record.answer || "");
-        this.currentAnswer = cachedAnswer;
-        const restored = await this.runtime.restoreThread({
-          threadId: record.threadId,
-          baseInstructions: this.promptBuilder.buildInitial(context).baseInstructions
-        });
-        this.currentThreadId = restored.threadId;
-        const runtimeStatus = String(restored.status || "").trim().toLowerCase();
-        const runtimeAnswer = String(restored.text || "");
-        const hasCompletedCache = record.status === "completed" && Boolean(cachedAnswer.trim());
-        this.currentAnswer = runtimeStatus === "completed" && runtimeAnswer.trim() ? runtimeAnswer : cachedAnswer || runtimeAnswer;
-        this.currentConversation = this.currentAnswer ? [{ role: "assistant", content: this.currentAnswer }] : [];
-        const restoredStatus = hasCompletedCache ? "completed" : String(runtimeStatus || record.status || "").trim().toLowerCase();
-        if (restoredStatus === "interrupted") {
-          const error = {
-            code: "TurnInterrupted",
-            message: "上一次解读已停止，可以重新解读。"
-          };
-          this.sessionStore.upsert({
-            ...record,
-            lastOpenedAt: this.now().toISOString(),
-            status: "interrupted",
-            answer: this.currentAnswer
-          });
-          await this.persist();
-          this.emit({
-            status: "failed",
-            context,
-            answer: this.currentAnswer,
-            conversation: [...this.currentConversation],
-            threadId: this.currentThreadId,
-            restored: true,
-            error
-          });
-          return {
-            state: "interrupted",
-            context,
-            threadId: this.currentThreadId,
-            answer: this.currentAnswer,
-            restored: true,
-            error
-          };
-        }
-        if (!this.currentAnswer.trim()) {
-          this.sessionStore.upsert({
-            ...record,
-            lastOpenedAt: this.now().toISOString(),
-            status: "failed",
-            answer: this.currentAnswer
-          });
-          await this.persist();
-          return this.emitFailure({
-            code: "EmptyAgentResponse",
-            message: "旧解读会话没有可显示的回答，请重新解读。"
-          });
-        }
-        this.sessionStore.upsert({
-          ...record,
-          lastOpenedAt: this.now().toISOString(),
-          status: "completed",
-          answer: this.currentAnswer
-        });
-        await this.persist();
-        this.emit({
-          status: "completed",
-          context,
-          answer: this.currentAnswer,
-          conversation: [...this.currentConversation],
-          threadId: this.currentThreadId,
-          restored: true
-        });
-        return {
-          state: "completed",
-          context,
-          threadId: this.currentThreadId,
-          answer: this.currentAnswer,
-          restored: true
-        };
-      }
-      async restoreStaleSession(context, evaluation) {
-        const record = evaluation.record;
-        this.currentThreadId = record.threadId;
-        this.emit({
-          status: "starting",
-          phase: "restoring-stale",
-          context,
-          answer: "",
-          session: record
-        });
-        const cachedAnswer = String(record.answer || "");
-        this.currentAnswer = cachedAnswer;
-        this.currentConversation = cachedAnswer ? [{ role: "assistant", content: cachedAnswer }] : [];
-        let restoreError;
-        try {
-          const restored = await this.runtime.restoreThread({
-            threadId: record.threadId,
-            baseInstructions: this.promptBuilder.buildInitial(context).baseInstructions
-          });
-          this.currentThreadId = restored.threadId;
-          this.currentAnswer = restored.text || cachedAnswer;
-          this.currentConversation = this.currentAnswer ? [{ role: "assistant", content: this.currentAnswer }] : [];
-          this.sessionStore.upsert({
-            ...record,
-            lastOpenedAt: this.now().toISOString(),
-            answer: this.currentAnswer
-          });
-          await this.persist();
-        } catch (error) {
-          restoreError = normalizeControllerError(error);
-          this.currentAnswer = cachedAnswer;
-          this.currentConversation = cachedAnswer ? [{ role: "assistant", content: cachedAnswer }] : [];
-        }
-        this.emit({
-          status: "stale",
-          context,
-          answer: this.currentAnswer,
-          conversation: [...this.currentConversation],
-          session: record,
-          staleReasons: evaluation.reasons,
-          threadId: this.currentThreadId,
-          restored: !restoreError,
-          ...restoreError ? { error: restoreError } : {}
-        });
-        return {
-          state: "stale",
-          context,
-          session: record,
-          answer: this.currentAnswer,
-          ...restoreError ? { error: restoreError } : {}
-        };
-      }
-      async startInitialTurn(context) {
-        const builtPrompt = this.promptBuilder.buildInitial(context);
-        this.emit({
-          status: "starting",
-          phase: "starting",
-          context,
-          answer: ""
-        });
-        const result = await this.runtime.runTurn({
-          baseInstructions: builtPrompt.baseInstructions,
-          prompt: builtPrompt.userPrompt,
-          onEvent: (event) => this.handleRuntimeEvent(event, context)
-        });
-        return this.finishSuccessfulTurn({
-          context,
-          result,
-          conversation: result.text ? [{ role: "assistant", content: result.text }] : []
-        });
-      }
-      followUp(question) {
-        if (!this.currentContext || !this.currentThreadId) {
-          return Promise.resolve(this.emitFailure({
-            code: "ThreadUnavailable",
-            message: "当前没有可继续追问的分段会话。"
-          }));
-        }
-        if (this.inFlight) {
-          return Promise.resolve(this.busyResult("当前回答尚未完成。"));
-        }
-        this.inFlightKey = `follow-up::${this.currentThreadId}`;
-        this.inFlight = this.performFollowUp(question).finally(() => {
-          this.inFlight = null;
-          this.inFlightKey = null;
-        });
-        return this.inFlight;
-      }
-      async performFollowUp(question) {
-        const context = this.currentContext;
-        const prompt = this.promptBuilder.buildFollowUp(context, question);
-        const normalizedQuestion = String(question || "").trim();
-        this.currentAnswer = "";
-        this.currentConversation = [{ role: "user", content: normalizedQuestion }];
-        this.emit({
-          status: "starting",
-          phase: "follow-up",
-          context,
-          answer: "",
-          conversation: [...this.currentConversation],
-          threadId: this.currentThreadId
-        });
-        try {
-          const result = await this.runtime.runTurn({
-            threadId: this.currentThreadId,
-            baseInstructions: this.promptBuilder.buildInitial(context).baseInstructions,
-            prompt,
-            onEvent: (event) => this.handleRuntimeEvent(event, context)
-          });
-          return await this.finishSuccessfulTurn({
-            context,
-            result,
-            conversation: [
-              { role: "user", content: normalizedQuestion },
-              { role: "assistant", content: result.text }
-            ]
-          });
-        } catch (error) {
-          return this.emitFailure(error);
-        }
-      }
-      async finishSuccessfulTurn({ context, result, conversation }) {
-        this.currentThreadId = result.threadId;
-        this.currentAnswer = result.text || "";
-        this.currentConversation = conversation;
-        const status = result.status === "interrupted" ? "interrupted" : "completed";
-        if (status === "completed" && !this.currentAnswer.trim()) {
-          this.sessionStore.upsert({
-            segmentKey: `${context.reference.translationPath}::${context.reference.primaryId}`,
-            threadId: result.threadId,
-            contextHash: context.contextHash,
-            promptVersion: PROMPT_VERSION,
-            lastOpenedAt: this.now().toISOString(),
-            status: "failed"
-          });
-          await this.persist();
-          return this.emitFailure({
-            code: "EmptyAgentResponse",
-            message: "本地 Agent 已结束，但没有返回可显示的解读，请重新解读。"
-          });
-        }
-        this.sessionStore.upsert({
-          segmentKey: `${context.reference.translationPath}::${context.reference.primaryId}`,
-          threadId: result.threadId,
-          contextHash: context.contextHash,
-          promptVersion: PROMPT_VERSION,
-          lastOpenedAt: this.now().toISOString(),
-          status,
-          answer: this.currentAnswer
-        });
-        await this.persist();
-        if (status === "interrupted") {
-          this.emit({
-            status: "failed",
-            context,
-            answer: this.currentAnswer,
-            conversation: [...this.currentConversation],
-            threadId: this.currentThreadId,
-            error: {
-              code: "TurnInterrupted",
-              message: "解读已停止，已保留当前收到的内容。"
-            }
-          });
-          return { state: "interrupted", context, ...result };
-        }
-        this.emit({
-          status: "completed",
-          context,
-          answer: this.currentAnswer,
-          conversation: [...this.currentConversation],
-          threadId: this.currentThreadId,
-          restored: false
-        });
-        return { state: "completed", context, ...result };
-      }
-      handleRuntimeEvent(event, context) {
-        if (event.type === "started") {
-          this.currentThreadId = event.threadId;
-          this.emit({
-            status: "searching",
-            phase: "searching",
-            context,
-            answer: this.currentAnswer,
-            conversation: [...this.currentConversation],
-            threadId: event.threadId,
-            turnId: event.turnId
-          });
-          return;
-        }
-        if (event.type === "delta") {
-          this.currentAnswer = event.text;
-          this.emit({
-            status: "streaming",
-            phase: "answering",
-            context,
-            answer: event.text,
-            conversation: [...this.currentConversation],
-            threadId: event.threadId,
-            turnId: event.turnId
-          });
-        }
-      }
-      retry() {
-        if (!this.lastRequest) {
-          return Promise.resolve(this.emitFailure({
-            code: "SegmentNotFound",
-            message: "没有可重试的分段。"
-          }));
-        }
-        return this.interpret(
-          this.lastRequest.sourcePath,
-          this.lastRequest.requestedId,
-          { forceNew: true }
-        );
-      }
-      stop() {
-        return this.runtime.interrupt();
-      }
-      busyResult(message) {
-        return {
-          state: "busy",
-          error: normalizeControllerError({
-            code: "TurnBusy",
-            message
-          })
-        };
-      }
-      emitFailure(error) {
-        const normalized = normalizeControllerError(error);
-        const status = UNAVAILABLE_ERROR_CODES.has(normalized.code) ? "unavailable" : "failed";
-        this.emit({
-          status,
-          context: this.currentContext,
-          answer: this.currentAnswer,
-          conversation: [...this.currentConversation],
-          threadId: this.currentThreadId,
-          error: normalized
-        });
-        return { state: "failed", error: normalized };
-      }
-      async persist() {
-        await this.persistSessions(this.sessionStore.toJSON());
-      }
-      emit(state) {
-        this.onState(state);
-        return state;
-      }
-    };
-    var normalizeControllerError = (error) => ({
-      code: String(error?.code || "Unknown"),
-      message: String(error?.message || "分段解读失败，可重试或复制诊断。")
-    });
-    module2.exports = {
-      SegmentInterpretationController,
-      UNAVAILABLE_ERROR_CODES,
-      normalizeControllerError
-    };
-  }
-});
-
 // segment-ai/workspace-controller.js
 var require_workspace_controller = __commonJS({
   "segment-ai/workspace-controller.js"(exports2, module2) {
@@ -8584,8 +7906,11 @@ var require_workspace_controller = __commonJS({
       normalizeProjectTranslations,
       workspaceError
     } = require_workspace_store();
-    var { normalizeControllerError } = require_interpretation_controller();
     var { segmentKeyFor } = require_session_store();
+    var normalizeControllerError = (error) => ({
+      code: String(error?.code || "Unknown"),
+      message: String(error?.message || "分段解读失败，可重试或复制诊断。")
+    });
     var InterpretationWorkspaceController2 = class {
       constructor({
         resolver,
@@ -9141,7 +8466,7 @@ var require_workspace_controller = __commonJS({
       }
       async stop(conversationId) {
         const active = this.runningTurns.get(String(conversationId || ""));
-        if (!active) {
+        if (!active?.threadId || !active.turnId) {
           return false;
         }
         return this.runtime.interrupt({
@@ -9161,6 +8486,7 @@ var require_workspace_controller = __commonJS({
       }
       async delete(conversationId) {
         const removed = this.store.delete(conversationId);
+        this.contexts.delete(conversationId);
         await this.publish({ persist: true });
         return removed;
       }
@@ -9439,6 +8765,7 @@ var require_obsidian_integration = __commonJS({
       );
     };
     var workspaceFrameKey = (state, historyOpen) => JSON.stringify({
+      segmentAiEnabled: state?.segmentAiEnabled !== false,
       activeConversationId: String(state?.activeConversationId || ""),
       openConversationIds: Array.isArray(state?.openConversationIds) ? state.openConversationIds : [],
       maxOpenSessions: Number(state?.maxOpenSessions || 0),
@@ -9777,7 +9104,8 @@ var require_obsidian_integration = __commonJS({
         this.renderWorkspaceIdentity(conversationHeader, activeConversation);
         this.renderWorkspaceActions(
           conversationHeader,
-          activeConversation
+          activeConversation,
+          state.segmentAiEnabled !== false
         );
         if (activeConversation.error) {
           this.renderError(scrollEl, activeConversation.error);
@@ -9873,7 +9201,7 @@ var require_obsidian_integration = __commonJS({
           frameKey: workspaceFrameKey(state, this.historyOpen),
           activeRenderKey: workspaceConversationRenderKey(activeConversation)
         };
-        this.renderWorkspaceComposer(rootEl, activeConversation, state);
+        if (state.segmentAiEnabled !== false) this.renderWorkspaceComposer(rootEl, activeConversation, state);
         this.applyWorkspaceScroll(scrollEl, activeConversation.id);
         if (Number(scrollEl.scrollHeight || 0) <= Number(scrollEl.clientHeight || 0) + 50) {
           navigatorEl.addClass?.("is-hidden");
@@ -10026,7 +9354,7 @@ var require_obsidian_integration = __commonJS({
           ].join(" · ")
         });
       }
-      renderWorkspaceActions(headerEl, conversation) {
+      renderWorkspaceActions(headerEl, conversation, enabled = true) {
         const actionsEl = headerEl.createDiv("lacan-ai-view-actions");
         this.createButton(actionsEl, "译文", () => this.plugin.openSegmentSource?.(
           conversation.sourcePath.replace(/\/original\//i, "/translation/"),
@@ -10040,6 +9368,7 @@ var require_obsidian_integration = __commonJS({
           originalPath,
           conversation.requestedId
         ));
+        if (!enabled || conversation.status === "starting") return;
         if (ACTIVE_GENERATION_STATUSES.has(conversation.status)) {
           this.createButton(
             actionsEl,
@@ -10212,7 +9541,7 @@ var require_obsidian_integration = __commonJS({
           conversation && this.workspaceDom?.answerEl && this.workspaceDom.frameKey === workspaceFrameKey(
             state,
             this.historyOpen
-          ) && this.workspaceDom.conversationId === conversation.id && this.workspaceDom.messageCount === conversation.messages.length && this.workspaceDom.projectTranslationsKey === projectTranslationsKey(conversation) && ACTIVE_GENERATION_STATUSES.has(this.workspaceDom.status) && ACTIVE_GENERATION_STATUSES.has(conversation.status)
+          ) && this.workspaceDom.conversationId === conversation.id && this.workspaceDom.messageCount === conversation.messages.length && this.workspaceDom.projectTranslationsKey === projectTranslationsKey(conversation) && ACTIVE_GENERATION_STATUSES.has(this.workspaceDom.status) && ACTIVE_GENERATION_STATUSES.has(conversation.status) && this.workspaceDom.status === "starting" === (conversation.status === "starting")
         );
       }
       canPreserveWorkspace(state, conversation) {
@@ -13413,6 +12742,7 @@ var require_transactions = __commonJS({
     };
     var validateJournal = (journal, stateDir) => {
       if (journal?.schema_version !== 1 || !Array.isArray(journal.entries) || !/^[a-zA-Z0-9-]+$/.test(journal.id || "")) throw new Error("同步恢复记录损坏，已停止同步。");
+      if (journal.phase !== void 0 && journal.phase !== "cleanup") throw new Error("同步恢复记录阶段无效。");
       validateState(journal.previous_state);
       for (const entry of journal.entries) {
         validateContentPath(entry.path);
@@ -13423,21 +12753,9 @@ var require_transactions = __commonJS({
       }
       return journal;
     };
-    var rollback = async (storage, journal, entries = journal.entries) => {
-      const preserved = [];
-      for (const entry of [...entries].reverse()) {
-        if (entry.skipped) continue;
-        const before = entry.beforeHash === null ? null : await readBytes(storage, entry.backupPath);
-        if (digest(before) !== entry.beforeHash) throw new Error(`同步恢复备份损坏：${entry.path}`);
-        if (await readHash(storage, entry.path) === entry.beforeHash) continue;
-        if (!await compareAndWrite(storage, entry.path, entry.afterHash, before)) preserved.push(entry.path);
-      }
-      return preserved;
-    };
-    var cleanupTransaction = async (storage, stateDir, journal, retainedPaths = []) => {
-      const retained = new Set(retainedPaths);
+    var cleanupTransaction = async (storage, stateDir, journal) => {
       for (const entry of journal.entries) {
-        if (!retained.has(entry.path)) await removeIfPresent(storage, entry.backupPath);
+        await removeIfPresent(storage, entry.backupPath);
       }
       await removeIfPresent(storage, `${stateDir}/journal.json`);
     };
@@ -13449,30 +12767,49 @@ var require_transactions = __commonJS({
         conflicts: state.conflicts || []
       }));
     };
+    var rollbackTransaction = async (storage, stateDir, journal) => {
+      const preserved = /* @__PURE__ */ new Set();
+      const backups = [];
+      for (const entry of [...journal.entries].reverse()) {
+        if (entry.skipped) continue;
+        const currentHash = await readHash(storage, entry.path);
+        if (currentHash === entry.beforeHash) continue;
+        const before = entry.beforeHash === null ? null : await readBytes(storage, entry.backupPath);
+        const validBackup = digest(before) === entry.beforeHash;
+        if (currentHash === entry.afterHash) {
+          if (!validBackup) throw new Error(`同步恢复备份损坏：${entry.path}`);
+          if (await compareAndWrite(storage, entry.path, entry.afterHash, before)) continue;
+        }
+        preserved.add(entry.path);
+        if (before !== null && validBackup) backups.push(entry);
+      }
+      await restorePreviousState(storage, stateDir, journal.previous_state);
+      if (preserved.size) {
+        await storage.write(`${stateDir}/recovery-conflicts.json`, encodeJson({
+          paths: [...preserved],
+          transaction_id: journal.id,
+          backups,
+          recovered_at: (/* @__PURE__ */ new Date()).toISOString()
+        }));
+      }
+      const cleanup = { ...journal, phase: "cleanup", entries: journal.entries.filter((entry) => !preserved.has(entry.path)) };
+      await storage.write(`${stateDir}/journal.json`, encodeJson(cleanup));
+      await cleanupTransaction(storage, stateDir, cleanup);
+    };
     var recoverTransaction = async (storage, stateDir, onProgress) => {
       const journalPath = `${stateDir}/journal.json`;
       const data = await readBytes(storage, journalPath);
       if (!data) return;
       const journal = validateJournal(parseJson(data, "同步恢复记录"), stateDir);
       onProgress?.({ phase: "recovering", completed: 0, total: journal.entries.length });
+      if (journal.phase === "cleanup") return cleanupTransaction(storage, stateDir, journal);
       let current = null;
       try {
         current = await readState(storage, `${stateDir}/state.json`);
       } catch {
       }
       if (current?.last_transaction !== journal.id) {
-        const preserved = await rollback(storage, journal);
-        await restorePreviousState(storage, stateDir, journal.previous_state);
-        if (preserved.length) {
-          await storage.write(`${stateDir}/recovery-conflicts.json`, encodeJson({
-            paths: preserved,
-            transaction_id: journal.id,
-            backups: journal.entries.filter((entry) => preserved.includes(entry.path)),
-            recovered_at: (/* @__PURE__ */ new Date()).toISOString()
-          }));
-          await cleanupTransaction(storage, stateDir, journal, preserved);
-          return;
-        }
+        return rollbackTransaction(storage, stateDir, journal);
       }
       await cleanupTransaction(storage, stateDir, journal);
     };
@@ -13501,7 +12838,7 @@ var require_transactions = __commonJS({
       await storage.write(`${stateDir}/journal.json`, encodeJson(journal));
       return journal;
     };
-    module2.exports = { readBytes, digest, readHash, localChangesError, assertUnchanged, backupPathFor, compareAndWrite, removeIfPresent, emptyState, validateState, readState, rollback, cleanupTransaction, restorePreviousState, recoverTransaction, prepareTransaction };
+    module2.exports = { readBytes, digest, readHash, localChangesError, assertUnchanged, backupPathFor, compareAndWrite, removeIfPresent, emptyState, validateState, readState, rollbackTransaction, cleanupTransaction, recoverTransaction, prepareTransaction };
   }
 });
 
@@ -14423,7 +13760,7 @@ var require_project_sync = __commonJS({
   "src/project-sync/index.js"(exports2, module2) {
     var { DEFAULT_PROJECT_ENDPOINT: DEFAULT_PROJECT_ENDPOINT2, sha256, encodeJson, parseJson, validateContentPath, validateUrl, validateLatest, validateManifest, isKnowledgePath } = require_validation();
     var { checkCancelled, fetchBytes, verifyFile, downloadArchive } = require_downloads();
-    var { readBytes, digest, readHash, localChangesError, assertUnchanged, compareAndWrite, removeIfPresent, readState, rollback, cleanupTransaction, restorePreviousState, recoverTransaction, prepareTransaction } = require_transactions();
+    var { readBytes, digest, readHash, localChangesError, assertUnchanged, compareAndWrite, removeIfPresent, readState, rollbackTransaction, cleanupTransaction, recoverTransaction, prepareTransaction } = require_transactions();
     var { decodeText } = require_text_merge();
     var { readComparison } = require_conflict_comparison();
     var { resolveConflict } = require_resolve_conflict();
@@ -14755,19 +14092,12 @@ var require_project_sync = __commonJS({
           return this.skippedResult(plans, state, latest, downloads, [trigger]);
         }
       }
+      async removeAppliedDownloads(plans, version) {
+        for (const plan of plans) {
+          if (plan.file && !["conflict", "skip"].includes(plan.action)) await removeIfPresent(this.storage, this.incomingPath(version, plan.file));
+        }
+      }
       async applyPlans(plans, state, latest, signal, { preservedConflicts = [], strict = false } = {}) {
-        const journal = await prepareTransaction(this.storage, this.stateDir, plans, state, latest, signal, { rejectChanged: strict });
-        const nextState = {
-          schema_version: 2,
-          version: latest.version,
-          source_revision: latest.source_revision || null,
-          manifest_sha256: latest.manifest_sha256,
-          files: { ...state.files },
-          local_deletions: { ...state.local_deletions || {} },
-          conflicts: [],
-          last_transaction: journal.id,
-          synced_at: (/* @__PURE__ */ new Date()).toISOString()
-        };
         const result = {
           version: latest.version,
           added: 0,
@@ -14780,6 +14110,28 @@ var require_project_sync = __commonJS({
           skippedFiles: [],
           statePath: `${this.stateDir}/state.json`,
           conflictReportPath: `${this.stateDir}/conflicts.json`
+        };
+        if (state.schema_version === 2 && state.version === latest.version && state.manifest_sha256 === latest.manifest_sha256 && (state.source_revision ?? null) === (latest.source_revision ?? null) && preservedConflicts.length === (state.conflicts || []).length && plans.every((plan) => plan.action === "adopt" && plan.baseline === plan.file.sha256 && !state.local_deletions?.[plan.path])) {
+          checkCancelled(signal);
+          result.unchanged = plans.length;
+          try {
+            await this.removeAppliedDownloads(plans, latest.version);
+          } catch {
+            result.cleanupPending = true;
+          }
+          return result;
+        }
+        const journal = await prepareTransaction(this.storage, this.stateDir, plans, state, latest, signal, { rejectChanged: strict });
+        const nextState = {
+          schema_version: 2,
+          version: latest.version,
+          source_revision: latest.source_revision || null,
+          manifest_sha256: latest.manifest_sha256,
+          files: { ...state.files },
+          local_deletions: { ...state.local_deletions || {} },
+          conflicts: [],
+          last_transaction: journal.id,
+          synced_at: (/* @__PURE__ */ new Date()).toISOString()
         };
         const entries = new Map(journal.entries.map((entry) => [entry.path, entry]));
         try {
@@ -14852,21 +14204,12 @@ var require_project_sync = __commonJS({
           checkCancelled(signal);
           await this.storage.write(result.statePath, encodeJson(nextState));
         } catch (error) {
-          const preserved = await rollback(this.storage, journal);
-          await restorePreviousState(this.storage, this.stateDir, state);
-          if (preserved.length) await this.storage.write(`${this.stateDir}/recovery-conflicts.json`, encodeJson({
-            paths: preserved,
-            transaction_id: journal.id,
-            backups: journal.entries.filter((entry) => preserved.includes(entry.path))
-          }));
-          await cleanupTransaction(this.storage, this.stateDir, journal, preserved);
+          await rollbackTransaction(this.storage, this.stateDir, journal);
           throw error;
         }
         try {
           await cleanupTransaction(this.storage, this.stateDir, journal);
-          for (const plan of plans) {
-            if (plan.file && !["conflict", "skip"].includes(plan.action)) await removeIfPresent(this.storage, this.incomingPath(latest.version, plan.file));
-          }
+          await this.removeAppliedDownloads(plans, latest.version);
           if (state.version && state.version !== latest.version) {
             for (const conflict of state.conflicts || []) {
               const plan = plans.find((entry) => entry.path === conflict.path);
@@ -15070,7 +14413,6 @@ var REASONING_EFFORT_LABELS = {
   ultra: "Ultra"
 };
 var DEFAULT_SETTINGS = {
-  projectGraphEnabled: true,
   projectEndpointUrl: DEFAULT_PROJECT_ENDPOINT,
   projectSyncLastResult: null,
   projectLessonSync: {},
@@ -15224,7 +14566,6 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.projectSyncController = null;
     this.startupSyncTimer = null;
     this.createdFileTimers = /* @__PURE__ */ new Set();
-    this.projectGraphViews = /* @__PURE__ */ new WeakSet();
     this.progressWritePaths = /* @__PURE__ */ new Set();
     this.progressDirtyPaths = /* @__PURE__ */ new Set();
     this.progressWriteSuppressTimers = /* @__PURE__ */ new Map();
@@ -15274,22 +14615,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
       menu.addItem((item) => item.setTitle("法语词典查词").setIcon("book-open").onClick(() => this.frenchLookupPopup?.lookupCurrentSelection("dictionary")));
       menu.addItem((item) => item.setTitle("翻译选区并解释法语语法").setIcon("languages").onClick(() => this.frenchLookupPopup?.lookupCurrentSelection("translation")));
     }));
-    this.registerDomEvent(document, "click", (event) => {
-      if (this.handleKnowledgeInternalLinkClick(event)) return;
-      this.handleSegmentInternalLinkClick(event);
-    }, { capture: true });
-    this.registerDomEvent(document, "mouseover", (event) => {
-      this.handleSegmentLinkPreviewEnter(event);
-    }, { capture: true });
-    this.registerDomEvent(document, "mouseout", (event) => {
-      this.handleSegmentLinkPreviewLeave(event);
-    }, { capture: true });
-    this.registerDomEvent(document, "focusin", (event) => {
-      this.handleSegmentLinkPreviewEnter(event);
-    }, { capture: true });
-    this.registerDomEvent(document, "focusout", (event) => {
-      this.handleSegmentLinkPreviewLeave(event);
-    }, { capture: true });
+    this.registerReadingLinkEvents();
     this.registerReadingNoteEditorExtension();
     this.registerMarkdownPostProcessor((element, context) => {
       this.getKnowledgeLibrary().decorateLinks(element, context.sourcePath || "");
@@ -15370,9 +14696,6 @@ module.exports = class LacanTranslationHelper extends Plugin {
     this.registerEvent(
       this.app.workspace.on("layout-change", () => {
         this.scheduleReadingToolbarRender();
-        if (this.settings.projectGraphEnabled) {
-          this.applyProjectGraphToViews();
-        }
       })
     );
     this.registerEvent(
@@ -15381,11 +14704,6 @@ module.exports = class LacanTranslationHelper extends Plugin {
       })
     );
     this.registerProjectBasesView();
-    this.app.workspace.onLayoutReady(() => {
-      if (this.settings.projectGraphEnabled) {
-        this.runWithNotice(() => this.configureProjectGraph(), "项目关系图设置失败");
-      }
-    });
     this.addCommand({
       id: "open-project-graph",
       name: "打开知识卡片与翻译关系图",
@@ -15443,6 +14761,13 @@ module.exports = class LacanTranslationHelper extends Plugin {
     });
   }
   onunload() {
+    for (const controller of this.readingLinkDocuments?.values() || []) controller.abort();
+    this.readingLinkDocuments?.clear();
+    if (this.projectGraphViews) {
+      for (const leaf of this.app.workspace.getLeavesOfType("graph")) {
+        if (this.projectGraphViews.has(leaf.view)) leaf.detach();
+      }
+    }
     this.translationInlineEditor?.destroy();
     this.translationInlineEditor = null;
     for (const cleanup of this.translationPreviewCleanups || []) cleanup();
@@ -15512,37 +14837,26 @@ module.exports = class LacanTranslationHelper extends Plugin {
       ]
     };
   }
-  applyProjectGraphToViews({ force = false } = {}) {
-    for (const leaf of this.app.workspace.getLeavesOfType("graph")) {
-      const view = leaf.view;
-      const engine = view?.dataEngine;
-      if (!engine?.setOptions || !engine?.getOptions) continue;
-      if (!force && this.projectGraphViews.has(view)) continue;
-      this.projectGraphViews.add(view);
-      engine.setOptions(this.getProjectGraphOptions(engine.getOptions()));
-    }
-  }
-  async configureProjectGraph({ force = false } = {}) {
-    const graph = this.app.internalPlugins?.getPluginById?.("graph");
-    if (!graph?.enabled || !graph.instance?.saveOptions) return false;
-    graph.instance.options = this.getProjectGraphOptions(graph.instance.options);
-    graph.instance.saveOptions();
-    this.applyProjectGraphToViews({ force });
-    return true;
-  }
   async openProjectGraph() {
-    if (!await this.configureProjectGraph({ force: true })) {
+    if (!this.app.internalPlugins?.getPluginById?.("graph")?.enabled) {
       throw new Error("请先在 Obsidian 核心插件中启用关系图谱。");
     }
-    const leaf = this.app.workspace.getLeavesOfType("graph")[0] || this.app.workspace.getLeaf("tab");
-    if (leaf.view?.getViewType?.() !== "graph") {
+    const workspace = this.app.workspace;
+    this.projectGraphViews ||= /* @__PURE__ */ new WeakSet();
+    let leaf = workspace.getLeavesOfType("graph").find((item) => this.projectGraphViews.has(item.view));
+    if (!leaf) {
+      leaf = workspace.getLeaf("tab");
       await leaf.setViewState({ type: "graph", active: true });
     }
-    await this.app.workspace.revealLeaf(leaf);
-    this.applyProjectGraphToViews({ force: true });
-    if (typeof leaf.view?.dataEngine?.setOptions !== "function") {
+    await workspace.revealLeaf(leaf);
+    const view = leaf.view;
+    if (!view.dataEngine?.getOptions || !view.dataEngine?.setOptions || typeof view.onOptionsChange !== "function") {
       throw new Error("当前 Obsidian 版本不支持自动设置图谱，请在图谱筛选中手动设置范围。");
     }
+    view.onOptionsChange = () => {
+    };
+    this.projectGraphViews.add(view);
+    view.dataEngine.setOptions(this.getProjectGraphOptions(view.dataEngine.getOptions()));
   }
   registerProjectBasesView() {
     if (typeof this.registerBasesView !== "function" || !Obsidian.BasesView) {
@@ -15823,7 +15137,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     }
   }
   updateSegmentAiState(state) {
-    this.segmentAiState = state || { status: "empty" };
+    this.segmentAiState = { ...state || { status: "empty" }, segmentAiEnabled: Boolean(this.settings.segmentAiEnabled) };
     const leaves = this.app.workspace?.getLeavesOfType?.(LACAN_INTERPRETATION_VIEW_TYPE) || [];
     for (const leaf of leaves) {
       leaf.view?.setState?.(this.segmentAiState);
@@ -15854,6 +15168,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     }
     try {
       await this.openSegmentInterpretationView();
+      if (!this.settings.segmentAiEnabled) return { state: "disabled" };
       if (!this.segmentAiController) {
         this.initializeSegmentAi();
       }
@@ -15896,12 +15211,14 @@ module.exports = class LacanTranslationHelper extends Plugin {
     return this.segmentAiState?.activeConversationId || null;
   }
   async retrySegmentInterpretation(conversationId = this.activeSegmentAiConversationId()) {
+    if (!this.settings.segmentAiEnabled) return { state: "disabled" };
     if (!this.segmentAiController) {
       return { state: "failed" };
     }
     return this.segmentAiController.retry(conversationId);
   }
   async followUpSegmentInterpretation(conversationId, question) {
+    if (!this.settings.segmentAiEnabled) return { state: "disabled" };
     if (!this.segmentAiController) {
       return { state: "failed" };
     }
@@ -16287,7 +15604,7 @@ module.exports = class LacanTranslationHelper extends Plugin {
     menu.showAtPosition({ x: rect.left, y: rect.bottom });
   }
   async handleCreatedFile(file) {
-    if (this.syncInProgress) return;
+    if (!this.app.workspace.layoutReady || this.syncInProgress) return;
     if (!(file instanceof TFile) || !this.isTranslationLessonPath(file.path)) {
       return;
     }
@@ -17029,7 +16346,7 @@ ${formatSkipNotice(result.skippedFiles)}` : `${seminar.code.toUpperCase()} 已�
     this.projectSyncController?.abort();
   }
   async showProjectSyncReport() {
-    if (this.syncInProgress) throw new Error("请等待文库同步或冲突保存完成后查看报告。");
+    if (this.syncInProgress) throw new Error("请等待文库同步完成后查看报告。");
     const storage = this.getProjectSyncStorage();
     const summary = this.settings.projectSyncLastResult;
     const reportPath = summary?.conflictReportPath || `${this.app.vault.configDir || ".obsidian"}/plugins/lacan-translation-helper/project-sync/conflicts.json`;
@@ -17039,40 +16356,10 @@ ${formatSkipNotice(result.skippedFiles)}` : `${seminar.code.toUpperCase()} 已�
       return;
     }
     const report = bytes ? JSON.parse(new TextDecoder().decode(bytes)) : { version: summary?.version, conflicts: [] };
-    const engine = this.createProjectSyncEngine();
-    new ProjectSyncReportModal(this.app, storage, Array.isArray(report) ? { version: summary?.version, conflicts: report } : report, {
-      readOnly: true,
+    new ProjectSyncReportModal(this.app, Array.isArray(report) ? { version: summary?.version, conflicts: report } : report, {
       skippedFiles: summary?.skippedFiles || [],
-      checkedVersion: summary?.version,
-      engine: {
-        getConflictComparison: (path) => {
-          if (this.syncInProgress) throw new Error("文库正在更新，请稍后重新打开比较。");
-          return engine.getConflictComparison(path);
-        },
-        resolveConflict: (path, options) => this.resolveProjectSyncConflict(engine, path, options)
-      },
-      onResolved: async (result) => {
-        this.settings.projectSyncLastResult = {
-          ...this.settings.projectSyncLastResult || { added: 0, updated: 0, deleted: 0, unchanged: 0 },
-          version: result.version,
-          checkedAt: Date.now(),
-          conflictCount: result.conflicts.length,
-          conflictReportPath: result.conflictReportPath || reportPath
-        };
-        await this.saveSettings();
-        this.refreshReadingAfterRepositorySync();
-      }
+      checkedVersion: summary?.version
     }).open();
-  }
-  async resolveProjectSyncConflict(engine, path, options) {
-    if (this.syncInProgress) throw new Error("已有文库同步或冲突保存正在进行，请稍后再试。");
-    if (engine !== this.createProjectSyncEngine()) throw new Error("文库同步地址已改变，请重新打开冲突比较。");
-    this.syncInProgress = true;
-    try {
-      return await engine.resolveConflict(path, options);
-    } finally {
-      this.syncInProgress = false;
-    }
   }
   refreshReadingAfterRepositorySync() {
     this.segmentPreviewCache.clear();
@@ -17528,6 +16815,34 @@ ${formatSkipNotice(result.skippedFiles)}` : `${seminar.code.toUpperCase()} 已�
     linkEl.setAttribute("href", "#");
     linkEl.setAttribute("title", `打开「${segmentId}」${this.segmentDocumentLabel(targetPath)}`);
   }
+  registerReadingLinkEvents() {
+    const documents = this.readingLinkDocuments = /* @__PURE__ */ new Map();
+    const bind = (doc) => {
+      if (!doc?.addEventListener || documents.has(doc)) return;
+      const controller = new doc.defaultView.AbortController();
+      documents.set(doc, controller);
+      const options = { capture: true, signal: controller.signal };
+      doc.addEventListener("click", (event) => {
+        if (!this.handleKnowledgeInternalLinkClick(event)) this.handleSegmentInternalLinkClick(event);
+      }, options);
+      for (const type of ["mouseover", "focusin"]) {
+        doc.addEventListener(type, (event) => this.handleSegmentLinkPreviewEnter(event), options);
+      }
+      for (const type of ["mouseout", "focusout"]) {
+        doc.addEventListener(type, (event) => this.handleSegmentLinkPreviewLeave(event), options);
+      }
+    };
+    const workspace = this.app.workspace;
+    bind(workspace.containerEl?.ownerDocument || document);
+    workspace.iterateAllLeaves?.((leaf) => bind(leaf.containerEl?.ownerDocument || leaf.view?.containerEl?.ownerDocument));
+    this.registerEvent(workspace.on("window-open", (_pane, win) => bind(win.document)));
+    this.registerEvent(workspace.on("window-close", (pane, win) => {
+      const doc = pane?.doc || win.document;
+      documents.get(doc)?.abort();
+      documents.delete(doc);
+      if (doc && this.segmentPreviewEl?.ownerDocument === doc) this.hideSegmentPreview();
+    }));
+  }
   handleSegmentInternalLinkClick(event) {
     const linkEl = this.segmentLinkElementFromEvent(event);
     if (!linkEl) {
@@ -17549,7 +16864,7 @@ ${formatSkipNotice(result.skippedFiles)}` : `${seminar.code.toUpperCase()} 已�
     if (!linkEl) {
       return;
     }
-    if (event.type === "mouseover" && typeof Node !== "undefined" && event.relatedTarget instanceof Node && linkEl.contains(event.relatedTarget)) {
+    if (event.type === "mouseover" && event.relatedTarget?.nodeType && linkEl.contains(event.relatedTarget)) {
       return;
     }
     const segmentId = this.segmentIdFromLinkElement(linkEl);
@@ -17573,14 +16888,14 @@ ${formatSkipNotice(result.skippedFiles)}` : `${seminar.code.toUpperCase()} 已�
       return;
     }
     const relatedTarget = event.relatedTarget;
-    if (typeof Node !== "undefined" && relatedTarget instanceof Node && (linkEl.contains(relatedTarget) || this.segmentPreviewEl?.contains?.(relatedTarget))) {
+    if (relatedTarget?.nodeType && (linkEl.contains(relatedTarget) || this.segmentPreviewEl?.contains?.(relatedTarget))) {
       return;
     }
     event.stopPropagation();
     this.scheduleHideSegmentPreview();
   }
   segmentLinkElementFromEvent(event) {
-    const targetEl = event.target instanceof Element ? event.target : null;
+    const targetEl = event.target?.nodeType === 3 ? event.target.parentElement : event.target;
     const linkEl = targetEl?.closest?.("a.lacan-segment-link, a.internal-link") || null;
     return this.isPotentialSegmentLinkElement(linkEl) ? linkEl : null;
   }
@@ -17678,7 +16993,8 @@ ${formatSkipNotice(result.skippedFiles)}` : `${seminar.code.toUpperCase()} 已�
     }
     const documentLabel = this.segmentDocumentLabel(targetPath);
     this.hideSegmentPreview({ keepHideTimer: true });
-    const previewEl = document.createElement("div");
+    const doc = linkEl.ownerDocument;
+    const previewEl = doc.createElement("div");
     previewEl.className = "lacan-segment-preview-popover";
     previewEl.addEventListener("mouseenter", () => {
       if (this.segmentPreviewHideTimer) {
@@ -17687,13 +17003,13 @@ ${formatSkipNotice(result.skippedFiles)}` : `${seminar.code.toUpperCase()} 已�
       }
     });
     previewEl.addEventListener("mouseleave", () => this.scheduleHideSegmentPreview(120));
-    const titleEl = previewEl.createDiv ? previewEl.createDiv("lacan-segment-preview-title") : previewEl.appendChild(document.createElement("div"));
+    const titleEl = previewEl.createDiv ? previewEl.createDiv("lacan-segment-preview-title") : previewEl.appendChild(doc.createElement("div"));
     titleEl.className = "lacan-segment-preview-title";
     titleEl.textContent = `「${normalizedSegmentId}」${documentLabel}`;
-    const contentEl = previewEl.createDiv ? previewEl.createDiv("lacan-segment-preview-content") : previewEl.appendChild(document.createElement("div"));
+    const contentEl = previewEl.createDiv ? previewEl.createDiv("lacan-segment-preview-content") : previewEl.appendChild(doc.createElement("div"));
     contentEl.className = "lacan-segment-preview-content";
     contentEl.textContent = "加载中...";
-    document.body.appendChild(previewEl);
+    doc.body.appendChild(previewEl);
     this.positionSegmentPreview(previewEl, linkEl);
     this.segmentPreviewEl = previewEl;
     const token = ++this.segmentPreviewRenderToken;
@@ -17709,19 +17025,20 @@ ${formatSkipNotice(result.skippedFiles)}` : `${seminar.code.toUpperCase()} 已�
     });
   }
   positionSegmentPreview(previewEl, anchorEl) {
+    const win = anchorEl.ownerDocument.defaultView;
     const rect = anchorEl.getBoundingClientRect();
     const margin = 10;
-    const width = Math.min(520, Math.max(320, window.innerWidth - margin * 2));
+    const width = Math.min(520, Math.max(320, win.innerWidth - margin * 2));
     previewEl.style.width = `${width}px`;
-    let left = Math.min(rect.left, window.innerWidth - width - margin);
+    let left = Math.min(rect.left, win.innerWidth - width - margin);
     left = Math.max(margin, left);
     const estimatedHeight = Math.min(360, Math.max(160, previewEl.offsetHeight || 220));
     let top = rect.bottom + margin;
-    if (top + estimatedHeight > window.innerHeight - margin) {
+    if (top + estimatedHeight > win.innerHeight - margin) {
       top = Math.max(margin, rect.top - estimatedHeight - margin);
     }
-    previewEl.style.left = `${left + window.scrollX}px`;
-    previewEl.style.top = `${top + window.scrollY}px`;
+    previewEl.style.left = `${left + win.scrollX}px`;
+    previewEl.style.top = `${top + win.scrollY}px`;
   }
   hideSegmentPreview({ keepHideTimer = false } = {}) {
     if (!keepHideTimer && this.segmentPreviewHideTimer) {
@@ -18364,16 +17681,7 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
       this.renderFrenchLookupSettings(containerEl);
       return;
     }
-    new Setting(containerEl).setName("默认优化项目关系图").setDesc("打开全局图谱时只显示知识卡片（绿色）与翻译正文（蓝色），排除 README、索引页、附件和未解析链接，并隐藏孤立节点。关闭后可自行调整图谱筛选；局部图谱不受影响。").addToggle((toggle) => {
-      toggle.setValue(Boolean(this.plugin.settings.projectGraphEnabled)).onChange(async (value) => {
-        this.plugin.settings.projectGraphEnabled = value;
-        await this.plugin.saveSettings();
-        if (value) {
-          await this.plugin.configureProjectGraph({ force: true });
-        }
-      });
-    });
-    new Setting(containerEl).setName("知识卡片与翻译关系图").setDesc("查看卡片之间以及卡片与译文章节之间已有的链接关系。").addButton((button) => {
+    new Setting(containerEl).setName("知识卡片与翻译关系图").setDesc("在项目图谱标签页中查看知识卡片与译文章节的链接。").addButton((button) => {
       button.setButtonText("打开关系图").onClick(() => this.plugin.runWithNotice(
         () => this.plugin.openProjectGraph(),
         "项目关系图打开失败"

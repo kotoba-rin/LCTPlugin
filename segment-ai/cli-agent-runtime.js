@@ -387,9 +387,10 @@ class CliAgentRuntime {
     }, this.stopTimeoutMs * 2);
   }
 
-  async interrupt({ threadId = "", turnId = "" } = {}) {
+  async interrupt(target) {
+    if (target !== undefined && (!target?.threadId || !target.turnId)) return false;
     const active = [...this.activeTurns.values()].filter((turn) => (
-      (!threadId || turn.threadId === threadId) && (!turnId || turn.turnId === turnId)
+      target === undefined || (turn.threadId === target.threadId && turn.turnId === target.turnId)
     ));
     for (const turn of active) {
       turn.interrupted = true;

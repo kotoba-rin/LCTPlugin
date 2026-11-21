@@ -48,6 +48,7 @@ const readState = async (storage, path) => {
 };
 const validateJournal = (journal, stateDir) => {
   if (journal?.schema_version !== 1 || !Array.isArray(journal.entries) || !/^[a-zA-Z0-9-]+$/.test(journal.id || "")) throw new Error("同步恢复记录损坏，已停止同步。");
+  if (journal.phase !== undefined && journal.phase !== "cleanup") throw new Error("同步恢复记录阶段无效。");
   validateState(journal.previous_state);
   for (const entry of journal.entries) {
     validateContentPath(entry.path);
@@ -58,21 +59,9 @@ const validateJournal = (journal, stateDir) => {
   }
   return journal;
 };
-const rollback = async (storage, journal, entries = journal.entries) => {
-  const preserved = [];
-  for (const entry of [...entries].reverse()) {
-    if (entry.skipped) continue;
-    const before = entry.beforeHash === null ? null : await readBytes(storage, entry.backupPath);
-    if (digest(before) !== entry.beforeHash) throw new Error(`同步恢复备份损坏：${entry.path}`);
-    if (await readHash(storage, entry.path) === entry.beforeHash) continue;
-    if (!await compareAndWrite(storage, entry.path, entry.afterHash, before)) preserved.push(entry.path);
-  }
-  return preserved;
-};
-const cleanupTransaction = async (storage, stateDir, journal, retainedPaths = []) => {
-  const retained = new Set(retainedPaths);
+const cleanupTransaction = async (storage, stateDir, journal) => {
   for (const entry of journal.entries) {
-    if (!retained.has(entry.path)) await removeIfPresent(storage, entry.backupPath);
+    await removeIfPresent(storage, entry.backupPath);
   }
   await removeIfPresent(storage, `${stateDir}/journal.json`);
 };
@@ -81,23 +70,43 @@ const restorePreviousState = async (storage, stateDir, state) => {
   await storage.write(`${stateDir}/conflicts.json`, encodeJson({ version: state.version,
     generated_at: state.synced_at || null, conflicts: state.conflicts || [] }));
 };
+const rollbackTransaction = async (storage, stateDir, journal) => {
+  const preserved = new Set();
+  const backups = [];
+  for (const entry of [...journal.entries].reverse()) {
+    if (entry.skipped) continue;
+    const currentHash = await readHash(storage, entry.path);
+    if (currentHash === entry.beforeHash) continue;
+    const before = entry.beforeHash === null ? null : await readBytes(storage, entry.backupPath);
+    const validBackup = digest(before) === entry.beforeHash;
+    if (currentHash === entry.afterHash) {
+      if (!validBackup) throw new Error(`同步恢复备份损坏：${entry.path}`);
+      if (await compareAndWrite(storage, entry.path, entry.afterHash, before)) continue;
+    }
+    preserved.add(entry.path);
+    if (before !== null && validBackup) backups.push(entry);
+  }
+  await restorePreviousState(storage, stateDir, journal.previous_state);
+  if (preserved.size) {
+    await storage.write(`${stateDir}/recovery-conflicts.json`, encodeJson({ paths: [...preserved], transaction_id: journal.id,
+      backups, recovered_at: new Date().toISOString() }));
+  }
+  // Mark rollback complete before deleting backups, so a retry only cleans up.
+  const cleanup = { ...journal, phase: "cleanup", entries: journal.entries.filter((entry) => !preserved.has(entry.path)) };
+  await storage.write(`${stateDir}/journal.json`, encodeJson(cleanup));
+  await cleanupTransaction(storage, stateDir, cleanup);
+};
 const recoverTransaction = async (storage, stateDir, onProgress) => {
   const journalPath = `${stateDir}/journal.json`;
   const data = await readBytes(storage, journalPath);
   if (!data) return;
   const journal = validateJournal(parseJson(data, "同步恢复记录"), stateDir);
   onProgress?.({ phase: "recovering", completed: 0, total: journal.entries.length });
+  if (journal.phase === "cleanup") return cleanupTransaction(storage, stateDir, journal);
   let current = null;
   try { current = await readState(storage, `${stateDir}/state.json`); } catch { /* The journal restores an interrupted state write. */ }
   if (current?.last_transaction !== journal.id) {
-    const preserved = await rollback(storage, journal);
-    await restorePreviousState(storage, stateDir, journal.previous_state);
-    if (preserved.length) {
-      await storage.write(`${stateDir}/recovery-conflicts.json`, encodeJson({ paths: preserved, transaction_id: journal.id,
-        backups: journal.entries.filter((entry) => preserved.includes(entry.path)), recovered_at: new Date().toISOString() }));
-      await cleanupTransaction(storage, stateDir, journal, preserved);
-      return;
-    }
+    return rollbackTransaction(storage, stateDir, journal);
   }
   await cleanupTransaction(storage, stateDir, journal);
 };
@@ -128,4 +137,4 @@ const prepareTransaction = async (storage, stateDir, plans, state, latest, signa
   return journal;
 };
 
-module.exports = { readBytes, digest, readHash, localChangesError, assertUnchanged, backupPathFor, compareAndWrite, removeIfPresent, emptyState, validateState, readState, rollback, cleanupTransaction, restorePreviousState, recoverTransaction, prepareTransaction };
+module.exports = { readBytes, digest, readHash, localChangesError, assertUnchanged, backupPathFor, compareAndWrite, removeIfPresent, emptyState, validateState, readState, rollbackTransaction, cleanupTransaction, recoverTransaction, prepareTransaction };

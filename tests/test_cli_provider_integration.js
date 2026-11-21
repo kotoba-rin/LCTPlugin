@@ -156,7 +156,16 @@ const run = async () => {
   assert.strictEqual(factory.frenchLookupTranslator.createRuntime().options.provider, "claude");
 
   const switching = makePlugin();
+  const cleared = makePlugin();
+  cleared.initializeSegmentAi();
+  await cleared.segmentAiController.persistWorkspace({
+    conversations: [], workspace: { openConversationIds: [], activeConversationId: null },
+  });
+  assert.ok(!JSON.stringify(cleared.settings).includes("旧草稿"));
   switching.initializeSegmentAi();
+  assert.strictEqual((await switching.retrySegmentInterpretation("codex-chat")).state, "disabled");
+  assert.strictEqual((await switching.followUpSegmentInterpretation("codex-chat", "追问")).state, "disabled");
+  assert.strictEqual(switching.segmentAiState.segmentAiEnabled, false);
   const oldRuntime = switching.segmentAiRuntime;
   const oldController = switching.segmentAiController;
   const oldTranslator = new MockFrenchTranslator({});

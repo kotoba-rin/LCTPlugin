@@ -75,7 +75,7 @@ class CodexAppServerRuntime {
     this.childProcess = null;
     this.client = null;
     this.startupPromise = null;
-    this.lifecycleVersion = 0;
+    this.closed = false;
     this.activeTurns = new Map();
     this.earlyTurnEvents = new Map();
     this.pendingTurnStarts = new Map();
@@ -98,6 +98,7 @@ class CodexAppServerRuntime {
   }
 
   async ensureServer() {
+    if (this.closed) throw new CodexRuntimeError("RuntimeClosed", "本地 Agent 已关闭。");
     if (this.startupPromise) {
       return this.startupPromise;
     }
@@ -118,7 +119,6 @@ class CodexAppServerRuntime {
   }
 
   async startServer() {
-    const lifecycleVersion = this.lifecycleVersion;
     let installation;
     try {
       installation = await this.discoverCli("codex", {
@@ -131,7 +131,7 @@ class CodexAppServerRuntime {
         "CodexNotFound", error.message, { cause: error }
       ));
     }
-    if (lifecycleVersion !== this.lifecycleVersion) {
+    if (this.closed) {
       throw new CodexRuntimeError("TurnInterrupted", "CLI 检测期间任务已取消。");
     }
     this.diagnostics.cliPath = installation.path;
@@ -837,13 +837,13 @@ class CodexAppServerRuntime {
     active.reject(error);
   }
 
-  async interrupt(target = {}) {
+  async interrupt(target) {
     let active;
     const threadId = String(target?.threadId || "").trim();
     const turnId = String(target?.turnId || "").trim();
     if (threadId && turnId) {
       active = this.activeTurns.get(turnEventKey(threadId, turnId));
-    } else if (this.activeTurns.size === 1) {
+    } else if (target === undefined && this.activeTurns.size === 1) {
       active = this.activeTurns.values().next().value;
     }
     if (!active || !this.client) {
@@ -857,7 +857,7 @@ class CodexAppServerRuntime {
   }
 
   async shutdown() {
-    this.lifecycleVersion += 1;
+    this.closed = true;
     if (this.activeTurns.size > 0 && this.client && !this.client.closed) {
       await Promise.allSettled(
         [...this.activeTurns.values()].map((active) => this.interrupt({

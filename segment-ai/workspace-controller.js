@@ -3,8 +3,12 @@ const {
   normalizeProjectTranslations,
   workspaceError,
 } = require("./workspace-store");
-const { normalizeControllerError } = require("./interpretation-controller");
 const { segmentKeyFor } = require("./session-store");
+
+const normalizeControllerError = (error) => ({
+  code: String(error?.code || "Unknown"),
+  message: String(error?.message || "分段解读失败，可重试或复制诊断。"),
+});
 
 class InterpretationWorkspaceController {
   constructor({
@@ -621,7 +625,7 @@ class InterpretationWorkspaceController {
 
   async stop(conversationId) {
     const active = this.runningTurns.get(String(conversationId || ""));
-    if (!active) {
+    if (!active?.threadId || !active.turnId) {
       return false;
     }
     return this.runtime.interrupt({
@@ -644,6 +648,7 @@ class InterpretationWorkspaceController {
 
   async delete(conversationId) {
     const removed = this.store.delete(conversationId);
+    this.contexts.delete(conversationId);
     await this.publish({ persist: true });
     return removed;
   }

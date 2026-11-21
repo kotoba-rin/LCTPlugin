@@ -545,6 +545,24 @@ const run = async () => {
     }, workspacePlugin);
     workspaceView.contentEl = workspaceRoot;
     await workspaceView.render();
+    workspaceView.state = { ...workspacePlugin.segmentAiState, segmentAiEnabled: false };
+    await workspaceView.render();
+    assert.ok(!descendants(workspaceRoot).some((el) => el.tag === "textarea" || el.textContent === "重新解读"));
+    assert.ok(descendants(workspaceRoot).some((el) => el.textContent === "译文"));
+    workspaceView.state = {
+      ...workspacePlugin.segmentAiState,
+      conversations: [{ ...workspaceConversation, status: "starting" }],
+    };
+    await workspaceView.render();
+    assert.ok(!descendants(workspaceRoot).some((el) => el.textContent === "停止"));
+    workspaceView.state = {
+      ...workspacePlugin.segmentAiState,
+      conversations: [{ ...workspaceConversation, status: "searching" }],
+    };
+    await workspaceView.render();
+    assert.ok(descendants(workspaceRoot).some((el) => el.textContent === "停止"));
+    workspaceView.state = workspacePlugin.segmentAiState;
+    await workspaceView.render();
     const tabBar = workspaceRoot.children.find(
       (child) => child.hasClass("lacan-ai-tabs")
     );

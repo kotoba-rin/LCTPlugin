@@ -1,6 +1,6 @@
 const { DEFAULT_PROJECT_ENDPOINT, sha256, encodeJson, parseJson, validateContentPath, validateUrl, validateLatest, validateManifest, isKnowledgePath } = require("./validation");
 const { checkCancelled, fetchBytes, verifyFile, downloadArchive } = require("./downloads");
-const { readBytes, digest, readHash, localChangesError, assertUnchanged, compareAndWrite, removeIfPresent, readState, rollback, cleanupTransaction, restorePreviousState, recoverTransaction, prepareTransaction } = require("./transactions");
+const { readBytes, digest, readHash, localChangesError, assertUnchanged, compareAndWrite, removeIfPresent, readState, rollbackTransaction, cleanupTransaction, recoverTransaction, prepareTransaction } = require("./transactions");
 const { decodeText } = require("./text-merge");
 const { readComparison } = require("./conflict-comparison");
 const { resolveConflict } = require("./resolve-conflict");
@@ -300,13 +300,28 @@ class ProjectSyncEngine {
     }
   }
 
+  async removeAppliedDownloads(plans, version) {
+    for (const plan of plans) {
+      if (plan.file && !["conflict", "skip"].includes(plan.action)) await removeIfPresent(this.storage, this.incomingPath(version, plan.file));
+    }
+  }
+
   async applyPlans(plans, state, latest, signal, { preservedConflicts = [], strict = false } = {}) {
+    const result = { version: latest.version, added: 0, updated: 0, merged: 0, deleted: 0, unchanged: 0, localModified: 0, conflicts: [...preservedConflicts], skippedFiles: [],
+      statePath: `${this.stateDir}/state.json`, conflictReportPath: `${this.stateDir}/conflicts.json` };
+    if (state.schema_version === 2 && state.version === latest.version && state.manifest_sha256 === latest.manifest_sha256
+      && (state.source_revision ?? null) === (latest.source_revision ?? null) && preservedConflicts.length === (state.conflicts || []).length
+      && plans.every((plan) => plan.action === "adopt" && plan.baseline === plan.file.sha256 && !state.local_deletions?.[plan.path])) {
+      checkCancelled(signal);
+      result.unchanged = plans.length;
+      try { await this.removeAppliedDownloads(plans, latest.version); }
+      catch { result.cleanupPending = true; }
+      return result;
+    }
     const journal = await prepareTransaction(this.storage, this.stateDir, plans, state, latest, signal, { rejectChanged: strict });
     const nextState = { schema_version: 2, version: latest.version, source_revision: latest.source_revision || null,
       manifest_sha256: latest.manifest_sha256, files: { ...state.files }, local_deletions: { ...(state.local_deletions || {}) },
       conflicts: [], last_transaction: journal.id, synced_at: new Date().toISOString() };
-    const result = { version: latest.version, added: 0, updated: 0, merged: 0, deleted: 0, unchanged: 0, localModified: 0, conflicts: [...preservedConflicts], skippedFiles: [],
-      statePath: `${this.stateDir}/state.json`, conflictReportPath: `${this.stateDir}/conflicts.json` };
     const entries = new Map(journal.entries.map((entry) => [entry.path, entry]));
     try {
       let completed = 0;
@@ -375,20 +390,14 @@ class ProjectSyncEngine {
       checkCancelled(signal);
       await this.storage.write(result.statePath, encodeJson(nextState));
     } catch (error) {
-      const preserved = await rollback(this.storage, journal);
-      await restorePreviousState(this.storage, this.stateDir, state);
-      if (preserved.length) await this.storage.write(`${this.stateDir}/recovery-conflicts.json`, encodeJson({ paths: preserved, transaction_id: journal.id,
-        backups: journal.entries.filter((entry) => preserved.includes(entry.path)) }));
-      await cleanupTransaction(this.storage, this.stateDir, journal, preserved);
+      await rollbackTransaction(this.storage, this.stateDir, journal);
       throw error;
     }
     // The baseline is committed. Cleanup can be retried after a restart and
     // must never roll back successfully committed project changes.
     try {
       await cleanupTransaction(this.storage, this.stateDir, journal);
-      for (const plan of plans) {
-        if (plan.file && !["conflict", "skip"].includes(plan.action)) await removeIfPresent(this.storage, this.incomingPath(latest.version, plan.file));
-      }
+      await this.removeAppliedDownloads(plans, latest.version);
       if (state.version && state.version !== latest.version) {
         for (const conflict of state.conflicts || []) {
           const plan = plans.find((entry) => entry.path === conflict.path);

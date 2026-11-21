@@ -63,10 +63,7 @@ assert.strictEqual(legacy.segmentAiDeepseekPath, "");
 assertNoMcpSettings(legacy);
 assert.deepStrictEqual(legacy.segmentAiConversations, [conversation]);
 assert.notStrictEqual(legacy.segmentAiConversations[0], conversation);
-assert.notStrictEqual(
-  legacy.segmentAiProviderProfiles.codex.segmentAiConversations,
-  legacy.segmentAiConversations
-);
+assert.ok(!Object.hasOwn(legacy.segmentAiProviderProfiles, "codex"));
 
 assert.strictEqual(switchProviderSettings(legacy, "claude"), "claude");
 assert.deepStrictEqual(legacy.segmentAiConversations, []);
@@ -102,10 +99,7 @@ assert.strictEqual(legacy.segmentAiModelCatalogUpdatedAt, 42);
 assertNoMcpSettings(legacy);
 assert.strictEqual(legacy.segmentAiClaudePath, "/users/local/claude");
 legacy.segmentAiConversations[0].draft = "Codex 草稿改动";
-assert.strictEqual(
-  legacy.segmentAiProviderProfiles.codex.segmentAiConversations[0].draft,
-  "尚未发送的追问"
-);
+assert.ok(!Object.hasOwn(legacy.segmentAiProviderProfiles, "codex"));
 switchProviderSettings(legacy, "claude");
 assert.strictEqual(legacy.segmentAiModel, "claude-model");
 assert.deepStrictEqual(legacy.segmentAiConversations.map((item) => item.threadId), ["claude-thread"]);
@@ -115,10 +109,14 @@ assert.strictEqual(legacy.segmentAiConversations[0].draft, "Codex 草稿改动")
 
 // Saved active values remain authoritative over an older profile snapshot.
 const reloaded = JSON.parse(JSON.stringify(legacy));
+reloaded.segmentAiProviderProfiles.codex = {
+  segmentAiConversations: [{ id: "deleted-chat", draft: "deleted-private-draft" }],
+};
 reloaded.segmentAiModel = "new-model-after-settings-save";
 normalizeProviderSettings(reloaded);
+assert.ok(!JSON.stringify(reloaded).includes("deleted-private-draft"));
 assert.strictEqual(reloaded.segmentAiModel, "new-model-after-settings-save");
-assert.strictEqual(reloaded.segmentAiProviderProfiles.codex.segmentAiModel, reloaded.segmentAiModel);
+assert.ok(!Object.hasOwn(reloaded.segmentAiProviderProfiles, "codex"));
 switchProviderSettings(reloaded, "codex");
 assert.strictEqual(reloaded.segmentAiConversations[0].draft, "Codex 草稿改动");
 
@@ -151,7 +149,8 @@ assert.deepStrictEqual(legacySessions.segmentAiSessions, [{ threadId: "legacy-co
 // Old true values must never be carried back by any provider switch or reload.
 for (const provider of ["codex", "claude", "deepseek", "codex"]) {
   legacy.segmentAiMcpEnabled = true;
-  legacy.segmentAiProviderProfiles.deepseek.segmentAiMcpEnabledServers = ["stale"];
+  const inactive = Object.values(legacy.segmentAiProviderProfiles)[0];
+  inactive.segmentAiMcpEnabledServers = ["stale"];
   switchProviderSettings(legacy, provider);
   assertNoMcpSettings(legacy);
 }

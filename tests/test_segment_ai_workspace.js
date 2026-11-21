@@ -67,6 +67,7 @@ class DeferredRuntime {
     const threadId = options.threadId || `thread-${callNumber}`;
     const turnId = `turn-${callNumber}`;
     this.calls.push({ ...options, threadId, turnId });
+    await this.beforeStarted?.(turnId);
     options.onEvent({
       type: "started",
       threadId,
@@ -485,18 +486,22 @@ const run = async () => {
         assert.strictEqual(threadId, "thread-empty-legacy");
         return {
           threadId,
-          text: "从 Codex thread 恢复的旧回答。",
+          text: restoreCalls === 1 ? "" : "从 Codex thread 恢复的旧回答。",
           status: "completed",
         };
       },
     },
   });
+  const emptyLegacy = await restoreController.interpret(translationPath, "s8-01-0300");
+  assert.strictEqual(emptyLegacy.state, "failed");
+  assert.strictEqual(emptyLegacy.error.code, "EmptyAgentResponse");
+  assert.deepStrictEqual(restoreStore.get("conversation-empty-legacy").messages, []);
   const restoredLegacy = await restoreController.interpret(
     translationPath,
     "s8-01-0300"
   );
   assert.strictEqual(restoredLegacy.state, "completed");
-  assert.strictEqual(restoreCalls, 1);
+  assert.strictEqual(restoreCalls, 2);
   assert.strictEqual(
     restoreStore.get("conversation-empty-legacy").answer,
     "从 Codex thread 恢复的旧回答。"
@@ -508,6 +513,10 @@ const run = async () => {
     now: () => new Date("2026-07-23T09:00:00.000Z"),
   });
   const runtime = new DeferredRuntime();
+  let startSecondTurn;
+  runtime.beforeStarted = (turnId) => turnId === "turn-2"
+    ? new Promise((resolve) => { startSecondTurn = resolve; })
+    : undefined;
   const snapshots = [];
   const persisted = [];
   let seminarFingerprint = "seminar-v1";
@@ -554,6 +563,10 @@ const run = async () => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.strictEqual(runtime.calls.length, 2, "different conversations should run concurrently");
   assert.strictEqual(controller.runningCount(), 2);
+  assert.strictEqual(await controller.stop(controllerStore.activeConversationId), false);
+  assert.deepStrictEqual(runtime.interruptCalls, [], "stopping an unacknowledged turn must leave its running neighbor alone");
+  startSecondTurn();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.ok(!Object.hasOwn(runtime.calls[0], "skillInputs"));
   assert.ok(!Object.hasOwn(runtime.calls[1], "skillInputs"));
   assert.ok(runtime.calls.every((call) => call.baseInstructions.includes("task-skill-seminar-v1")));

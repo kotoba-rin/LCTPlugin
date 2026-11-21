@@ -42,11 +42,17 @@ function migrationTests() {
   const preservedView = { type: "table", name: "A", extra: { untouched: true } };
   let serialized;
   const flow = migrateProjectBaseContent("filters: custom\nviews: [{type: table}]\nother: keep\n", {
-    parseYaml: () => ({ views: [preservedView] }),
+    parseYaml: (text) => ({ filters: "custom", views: text.includes("name: 知识库") ? serialized.views : [preservedView], other: "keep" }),
     stringifyYaml: (data) => { serialized = data; return "views:\n  - type: table\n    name: A\n    extra: {untouched: true}\n  - type: lacan-knowledge-list\n    name: 知识库\n"; },
   });
   assert.deepStrictEqual(serialized.views, [preservedView, { type: "lacan-knowledge-list", name: "知识库" }]);
   assert.ok(flow.startsWith("filters: custom\n") && flow.endsWith("other: keep\n"));
+  const flowRoot = { filters: ["my filter"], views: [preservedView] };
+  const migratedFlowRoot = migrateProjectBaseContent(JSON.stringify(flowRoot), { parseYaml: JSON.parse, stringifyYaml: JSON.stringify });
+  assert.deepStrictEqual(JSON.parse(migratedFlowRoot), {
+    ...flowRoot, views: [...flowRoot.views, { type: "lacan-knowledge-list", name: "知识库" }],
+  }, "a flow-format root stays valid and keeps all custom data");
+  assert.throws(() => migrateProjectBaseContent(JSON.stringify(flowRoot), { parseYaml: JSON.parse, stringifyYaml: () => "{}" }), /取消迁移/);
   assert.strictEqual(migrateProjectBaseContent("views:\n  - name: 我的知识\n    type: lacan-knowledge-list\n", {
     parseYaml: () => ({ views: [{ name: "我的知识", type: "lacan-knowledge-list" }] }),
   }), "views:\n  - name: 我的知识\n    type: lacan-knowledge-list\n");

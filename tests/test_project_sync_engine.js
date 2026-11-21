@@ -106,8 +106,13 @@ const run = async () => {
     "ordinary sync stores trusted hashes in state.json without duplicating text bodies");
 
   remote.requests.length = 0;
+  const metadataWrites = [];
+  storage.beforeWrite = (path) => { metadataWrites.push(path); };
   const unchanged = await engine(storage, remote).sync();
   assert.strictEqual(unchanged.downloadedFiles, 0);
+  assert.strictEqual(unchanged.unchanged, 2);
+  assert.deepStrictEqual(metadataWrites, [], "a current baseline and unchanged files need no new transaction");
+  storage.beforeWrite = null;
   assert.deepStrictEqual(remote.requests, [endpointUrl, remote.latest.manifest_url], "unchanged sync only requests metadata");
   assert.ok(![...storage.files.keys()].some((path) => path.includes("/incoming/")), "successful writes do not retain a duplicate library");
 
@@ -321,6 +326,22 @@ const run = async () => {
   assert.strictEqual(rollbackStorage.text(note), "old note");
   assert.strictEqual(rollbackStorage.text(`${stateDir}/state.json`), oldState);
 
+  const journalPath = `${stateDir}/journal.json`;
+  const remove = rollbackStorage.remove.bind(rollbackStorage);
+  rollbackStorage.remove = async (path) => {
+    if (path === journalPath) throw new Error("cleanup interrupted");
+    await remove(path);
+  };
+  rollbackStorage.failPath = note;
+  await assert.rejects(engine(rollbackStorage, fixture({ [p]: "new", [note]: "new note" }, "v2")).sync(), /cleanup interrupted/);
+  assert.strictEqual(rollbackStorage.text(p), "old");
+  rollbackStorage.files.set(p, bytes("written after rollback"));
+  rollbackStorage.remove = remove;
+  await engine(rollbackStorage, remote).cleanupLegacyBaseCache();
+  assert.strictEqual(rollbackStorage.text(p), "written after rollback", "restart only finishes cleanup after a completed rollback");
+  assert.strictEqual(rollbackStorage.text(journalPath), undefined);
+  assert.strictEqual(rollbackStorage.text(`${stateDir}/state.json`), oldState);
+
   const concurrentStorage = new MemoryStorage();
   await engine(concurrentStorage, fixture({ [p]: "old", [note]: "old note" })).sync();
   concurrentStorage.beforeCompare = async (path) => {
@@ -347,11 +368,31 @@ const run = async () => {
   const backupPath = backupPathFor(stateDir, "interrupted", p);
   interrupted.files.set(backupPath, bytes("old"));
   interrupted.files.set(p, bytes("partly committed new"));
-  interrupted.files.set(`${stateDir}/journal.json`, bytes(JSON.stringify({ schema_version: 1, id: "interrupted", previous_state: previousState,
-    entries: [{ path: p, beforeHash: sha256(bytes("old")), afterHash: sha256(bytes("partly committed new")), backupPath }] })));
+  const legacyJournal = { schema_version: 1, id: "interrupted", previous_state: previousState,
+    entries: [{ path: p, beforeHash: sha256(bytes("old")), afterHash: sha256(bytes("partly committed new")), backupPath }] };
+  interrupted.files.set(journalPath, bytes(JSON.stringify(legacyJournal)));
   await engine(interrupted, fixture({ [p]: "old" })).sync();
   assert.strictEqual(interrupted.text(p), "old", "startup recovery repairs an interrupted application");
   assert.strictEqual(interrupted.text(`${stateDir}/journal.json`), undefined);
+
+  interrupted.files.set(journalPath, bytes(JSON.stringify(legacyJournal)));
+  await engine(interrupted, remote).cleanupLegacyBaseCache();
+  assert.strictEqual(interrupted.text(journalPath), undefined, "older rollback journals may outlive an already restored file's backup");
+
+  interrupted.files.set(journalPath, bytes(JSON.stringify(legacyJournal)));
+  interrupted.files.set(p, bytes("partly committed new"));
+  await assert.rejects(engine(interrupted, remote).cleanupLegacyBaseCache(), /恢复备份损坏/);
+  assert.ok(interrupted.files.has(journalPath), "keep the journal when the backup is still required");
+  interrupted.files.set(p, bytes("user edited after legacy rollback"));
+  await engine(interrupted, remote).cleanupLegacyBaseCache();
+  assert.strictEqual(interrupted.text(p), "user edited after legacy rollback");
+  assert.ok(!interrupted.files.has(journalPath));
+  const missingBackupReport = JSON.parse(interrupted.text(`${stateDir}/recovery-conflicts.json`));
+  assert.deepStrictEqual(missingBackupReport.paths, [p]);
+  assert.deepStrictEqual(missingBackupReport.backups, [], "report only backups that still exist and match the baseline");
+
+  interrupted.files.set(journalPath, bytes(JSON.stringify({ ...legacyJournal, phase: "unknown" })));
+  await assert.rejects(engine(interrupted, remote).cleanupLegacyBaseCache(), /阶段无效/);
 
   const cancelledStorage = new MemoryStorage();
   await engine(cancelledStorage, fixture({ [p]: "old", [note]: "old note" })).sync();

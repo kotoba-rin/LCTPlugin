@@ -105,6 +105,28 @@ const makeVault = (text = "") => {
 };
 
 const tests = [
+  ["only newly created translations get skeletons after vault initialization", async () => {
+    const { plugin, translation, texts, writes } = makeVault();
+    plugin.app.workspace = { layoutReady: false };
+    plugin.createdFileTimers = new Set();
+    const previousWindow = global.window;
+    const clock = new FakeTimers();
+    global.window = clock;
+    try {
+      await plugin.handleCreatedFile(translation);
+      plugin.app.workspace.layoutReady = true;
+      await clock.advance(500);
+      assert.strictEqual(texts.get(translation.path), "", "startup enumeration must preserve existing files");
+      assert.strictEqual(writes(), 0);
+
+      await plugin.handleCreatedFile(translation);
+      await clock.advance(100);
+      assert.ok(texts.get(translation.path).includes("<!-- untranslated -->"));
+      assert.strictEqual(writes(), 1);
+    } finally {
+      global.window = previousWindow;
+    }
+  }],
   ["preserve content written while an empty translation's original is loading", async () => {
     const { plugin, translation, original, texts } = makeVault();
     const read = plugin.app.vault.read;

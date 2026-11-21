@@ -96,7 +96,9 @@ async function bulkTests() {
   assert.strictEqual(result.usedArchive, false);
   assert.ok(!storage.files.has(unused), "unreferenced assets stay remote");
   remote.requests.length = 0;
+  const baseline = storage.text(`${stateDir}/state.json`);
   assert.strictEqual((await engine.syncAllKnowledgeEntries({ getOrderedPaths })).downloadedFiles, 0);
+  assert.strictEqual(storage.text(`${stateDir}/state.json`), baseline, "a current batch reuses its existing baseline across all cards");
   assert.strictEqual(remote.requests.length, 2, "already-current knowledge needs only the single release check");
 
   const protectedStorage = new Storage();

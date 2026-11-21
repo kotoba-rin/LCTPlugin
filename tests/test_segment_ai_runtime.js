@@ -1295,6 +1295,8 @@ const runInterrupt = async () => {
     },
   });
   await runtimeStarted;
+  assert.strictEqual(await runtime.interrupt({ threadId: "", turnId: "" }), false);
+  assert.strictEqual(await runtime.interrupt({ threadId: "other-thread" }), false);
   await runtime.interrupt();
   const result = await resultPromise;
   assert.strictEqual(result.status, "interrupted");
@@ -1306,6 +1308,7 @@ const runInterrupt = async () => {
     turnId: "turn-stop",
   });
   await runtime.shutdown();
+  await assert.rejects(runtime.runTurn({ prompt: "关闭后的追问" }), (error) => error.code === "RuntimeClosed");
 };
 
 const runShutdownActive = async () => {

@@ -235,6 +235,8 @@ async function testInterruptTimeoutAndShutdown() {
     discoverCli: () => new Promise((resolve) => { finishDiscovery = resolve; }),
   });
   const pendingTurn = pending.runtime.runTurn({ prompt: "test" });
+  assert.strictEqual(await pending.runtime.interrupt({ threadId: "", turnId: "" }), false);
+  assert.strictEqual([...pending.runtime.activeTurns.values()][0].interrupted, false);
   await pending.runtime.interrupt();
   finishDiscovery({ path: process.execPath, command: process.execPath, args: [] });
   assert.strictEqual((await pendingTurn).status, "interrupted");
