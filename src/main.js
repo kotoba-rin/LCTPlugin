@@ -4467,7 +4467,11 @@ class LacanTranslationHelperSettingTab extends PluginSettingTab {
     } else {
       containerEl.createEl("p", {
         cls: "setting-item-description",
-        text: "DeepSeek Harness 使用 headless profile 中配置的模型、凭据和推理参数。请先在终端完成 dsh 配置；插件只向模型开放允许的只读／网页工具，profile 自带插件仍可能在启动时运行。当前适配不提供模型清单。",
+        text: "“重新检测”只检查本机 dsh。发起解读或翻译时，dsh 优先使用在 Harness 中保存的 API Key。未保存时，依次从 Obsidian 的进程环境、笔记库根目录的 .env 和 Harness 主目录的 .env 读取。",
+      });
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text: "模型与推理参数请在 dsh 的 headless profile 中配置。插件只向模型开放允许的只读／网页工具，profile 自带插件仍可能在启动时运行。",
       });
     }
 

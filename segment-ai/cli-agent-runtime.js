@@ -351,13 +351,23 @@ class CliAgentRuntime {
       this.startSession(active, event.sessionId);
       if (!active.policyConfirmed) throw this.error("CliPolicyUnavailable", "DeepSeek Harness 未确认只读工具限制。");
       if (event.reason?.kind !== "completed") {
-        throw this.error("CliTurnFailed", cleanDiagnostic(event.reason?.error?.message || `DeepSeek Harness 未完成回答（${event.reason?.kind || "无完成原因"}）。`));
+        throw this.deepSeekError(event.reason?.error, `DeepSeek Harness 未完成回答（${event.reason?.kind || "无完成原因"}）。`);
       }
       this.updateText(active, event.text);
       active.terminal = true;
     } else if (event.type === "error") {
-      throw this.error("CliTurnFailed", cleanDiagnostic(event.message || "DeepSeek Harness 执行失败。"));
+      throw this.deepSeekError(event.error || event, event.message || "DeepSeek Harness 执行失败。");
     }
+  }
+
+  deepSeekError(error, fallback) {
+    if (error?.code === "MISSING_CREDENTIAL") {
+      return this.error("DeepSeekMissingCredential", "DeepSeek Harness 未找到当前模型的 API Key（MISSING_CREDENTIAL）。请在 Harness 的“模型”页面保存该服务的密钥后重试。");
+    }
+    if (Number(error?.status) === 401) {
+      return this.error("DeepSeekUnauthorized", "模型服务拒绝了当前凭据（HTTP 401）。请在 Harness 中核对 API Key 与服务地址是否匹配。");
+    }
+    return this.error("CliTurnFailed", cleanDiagnostic(error?.message || fallback));
   }
 
   emit(active, event) {
@@ -471,6 +481,8 @@ async function createInvocationArtifacts({ provider, baseInstructions, researchE
       ...(!researchEnabled ? ["tool-web", "web-deepseek-api", "web-search-deepseek", "web-fetch-http"] : []),
     ];
     const patch = [
+      // Headless disables the native store. Mount it for this invocation so dsh resolves saved API keys.
+      { id: "credentials", disabled: false },
       ...disabled.map((id) => ({ id, disabled: true })),
       { id: "tool-fs", config: { read: true, readImage: false, write: false, edit: false, applyPatch: false } },
       { insert: [{ id: "lctp-read-only-policy", name: pluginPath,

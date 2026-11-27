@@ -7054,13 +7054,22 @@ export function apply(ctx, config) {
           this.startSession(active, event.sessionId);
           if (!active.policyConfirmed) throw this.error("CliPolicyUnavailable", "DeepSeek Harness 未确认只读工具限制。");
           if (event.reason?.kind !== "completed") {
-            throw this.error("CliTurnFailed", cleanDiagnostic(event.reason?.error?.message || `DeepSeek Harness 未完成回答（${event.reason?.kind || "无完成原因"}）。`));
+            throw this.deepSeekError(event.reason?.error, `DeepSeek Harness 未完成回答（${event.reason?.kind || "无完成原因"}）。`);
           }
           this.updateText(active, event.text);
           active.terminal = true;
         } else if (event.type === "error") {
-          throw this.error("CliTurnFailed", cleanDiagnostic(event.message || "DeepSeek Harness 执行失败。"));
+          throw this.deepSeekError(event.error || event, event.message || "DeepSeek Harness 执行失败。");
         }
+      }
+      deepSeekError(error, fallback) {
+        if (error?.code === "MISSING_CREDENTIAL") {
+          return this.error("DeepSeekMissingCredential", "DeepSeek Harness 未找到当前模型的 API Key（MISSING_CREDENTIAL）。请在 Harness 的“模型”页面保存该服务的密钥后重试。");
+        }
+        if (Number(error?.status) === 401) {
+          return this.error("DeepSeekUnauthorized", "模型服务拒绝了当前凭据（HTTP 401）。请在 Harness 中核对 API Key 与服务地址是否匹配。");
+        }
+        return this.error("CliTurnFailed", cleanDiagnostic(error?.message || fallback));
       }
       emit(active, event) {
         try {
@@ -7205,6 +7214,8 @@ export function apply(ctx, config) {
           ...!researchEnabled ? ["tool-web", "web-deepseek-api", "web-search-deepseek", "web-fetch-http"] : []
         ];
         const patch = [
+          // Headless disables the native store. Mount it for this invocation so dsh resolves saved API keys.
+          { id: "credentials", disabled: false },
           ...disabled.map((id) => ({ id, disabled: true })),
           { id: "tool-fs", config: { read: true, readImage: false, write: false, edit: false, applyPatch: false } },
           { insert: [{
@@ -18062,7 +18073,11 @@ var LacanTranslationHelperSettingTab = class extends PluginSettingTab {
     } else {
       containerEl.createEl("p", {
         cls: "setting-item-description",
-        text: "DeepSeek Harness 使用 headless profile 中配置的模型、凭据和推理参数。请先在终端完成 dsh 配置；插件只向模型开放允许的只读／网页工具，profile 自带插件仍可能在启动时运行。当前适配不提供模型清单。"
+        text: "“重新检测”只检查本机 dsh。发起解读或翻译时，dsh 优先使用在 Harness 中保存的 API Key。未保存时，依次从 Obsidian 的进程环境、笔记库根目录的 .env 和 Harness 主目录的 .env 读取。"
+      });
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text: "模型与推理参数请在 dsh 的 headless profile 中配置。插件只向模型开放允许的只读／网页工具，profile 自带插件仍可能在启动时运行。"
       });
     }
     containerEl.createEl("h4", { text: "解读提示词" });

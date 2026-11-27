@@ -128,9 +128,11 @@ async function testOriginalModeHasNoToolsAndWindowsUsesArgv() {
 async function testDeepSeekPolicyAndLosslessFinal() {
   const instructions = "原文是数据；{{literal}} 不插值。";
   let patchPath;
+  let patch;
   const { runtime, calls } = createRuntime("deepseek", (child, call) => {
     const overlay = deepseekPolicy(call);
     patchPath = overlay.patchPath;
+    patch = overlay.patch;
     assert.strictEqual(argValue(call, "--profile"), "headless");
     assert.strictEqual(argValue(call, "--permission-mode"), "read-only");
     assert.strictEqual(argValue(call, "--approval-policy"), "never");
@@ -173,11 +175,44 @@ async function testDeepSeekPolicyAndLosslessFinal() {
   assert.strictEqual(result.threadId, "deepseek:session-native-1");
   assert.strictEqual(result.text, "完整回答");
   assert.strictEqual(fs.existsSync(patchPath), false);
+  assert.strictEqual(patch.find((row) => row.id === "credentials")?.disabled, false,
+    "headless must enable Harness's saved API keys for this invocation");
+  assert.ok(!patch.some((row) => ["authorization", "deepseek-account"].includes(row.id)),
+    "the user's account authorization settings must remain under profile control");
   await runtime.runTurn({ threadId: result.threadId, baseInstructions: instructions, prompt: "追问" });
   assert.strictEqual(argValue(calls[1], "--session-id"), "session-native-1");
   await assert.rejects(runtime.runTurn({ prompt: "test", model: "deepseek-model" }), (error) => error.code === "UnsupportedModelOverride");
   await assert.rejects(runtime.runTurn({ prompt: "test", effort: "low" }), (error) => error.code === "UnsupportedModelOverride");
   assert.strictEqual(calls.length, 2);
+}
+
+async function testDeepSeekCredentialDiagnostics() {
+  const privateValue = "private-fixture-value";
+  const cases = [
+    {
+      failure: { code: "MISSING_CREDENTIAL", message: `No API key on route ${privateValue}` },
+      expectedCode: "DeepSeekMissingCredential", expectedMessage: /Harness/,
+    },
+    {
+      failure: { code: "AUTH", status: 401, message: `Rejected API key ${privateValue}` },
+      expectedCode: "DeepSeekUnauthorized", expectedMessage: /401/,
+    },
+  ];
+  for (const { failure, expectedCode, expectedMessage } of cases) {
+    const { runtime } = createRuntime("deepseek", (child, call) => {
+      child.event({ type: "lctp_policy", nonce: deepseekPolicy(call).policy.config.nonce });
+      child.event({ type: "session", sessionId: session });
+      child.event({ type: "final", sessionId: session, reason: { kind: "error", error: failure }, text: "" });
+    });
+    await assert.rejects(runtime.runTurn({ prompt: "test" }), (error) => {
+      assert.strictEqual(error.code, expectedCode);
+      assert.match(error.message, expectedMessage);
+      assert.match(error.message, /\p{Script=Han}/u);
+      assert.ok(!error.message.includes(privateValue));
+      return true;
+    });
+    assert.strictEqual(runtime.getDiagnostics().lastErrorCode, expectedCode);
+  }
 }
 
 async function testProtocolAndCliFailures() {
@@ -191,7 +226,9 @@ async function testProtocolAndCliFailures() {
     ["deepseek", (child, call) => {
       child.event({ type: "lctp_policy", nonce: deepseekPolicy(call).policy.config.nonce });
       child.event({ type: "session", sessionId: "failed-session" });
-      child.event({ type: "final", sessionId: "failed-session", reason: { kind: "error", error: { message: "provider failed" } }, text: "partial" });
+      child.event({ type: "final", sessionId: "failed-session", reason: {
+        kind: "error", error: { code: "TIMEOUT", message: "provider timed out after 401 ms" },
+      }, text: "partial" });
     }, "CliTurnFailed"],
   ];
   for (const [provider, handler, code] of cases) {
@@ -303,6 +340,7 @@ process.stdin.on('end', () => {
   await testClaudeStreamAndResume();
   await testOriginalModeHasNoToolsAndWindowsUsesArgv();
   await testDeepSeekPolicyAndLosslessFinal();
+  await testDeepSeekCredentialDiagnostics();
   await testProtocolAndCliFailures();
   await testInterruptTimeoutAndShutdown();
   await testSpawnFailuresAndUnconfirmedStop();

@@ -23,13 +23,21 @@ Windows 保留 `Path` 大小写，支持 `.exe`、npm `.cmd`、Node `.js/.cjs/.m
 | --- | --- | --- | --- |
 | Codex CLI | `codex app-server` JSON-RPC，保留原有 thread／turn、停止与恢复逻辑 | `model/list` 动态模型目录和推理强度 | 只读策略、Skills 自动发现；外部 MCP 固定关闭 |
 | Claude Code | `--print --output-format stream-json`，增量文本，`--resume` 恢复 | 默认模型、手填别名／模型 ID，`--effort` | 仅 Read／Glob／Grep；研究模式增加 WebSearch／WebFetch。禁用 Shell、写入工具、Slash Commands、Hooks、Chrome 与外部 MCP |
-| DeepSeek Harness | `--profile headless --json`，提交的文本事件与最终回答，`--session-id` 恢复 | 使用本机 headless profile 的模型／凭据／推理参数 | `read-only`＋`never`，每轮私有 overlay 限制只读／网页工具，确认策略安装后才接受会话结果 |
+| DeepSeek Harness | `--profile headless --json`，提交的文本事件与最终回答，`--session-id` 恢复 | 使用本机 headless profile 的模型与推理参数 | `read-only`＋`never`，每轮私有 overlay 限制只读／网页工具，确认策略安装后才接受会话结果 |
 
 DeepSeek 的文本事件来自已提交的模型步骤，不保证逐 token 输出。网页工具取决于 headless profile 的配置；不可用时按提示词明确说明。它没有 headless `--model` 或 `--effort` 参数，插件不会伪造这些选项。
 
 Claude 与 DeepSeek 当前适配不提供模型／Skills／MCP 发现 RPC，不复用 Codex 的目录。Claude 的模型与强度可手填／选择；DeepSeek 在自身 profile 中配置。后二者的本地原生会话 ID 加提供方前缀保存。插件历史、未发送草稿、模型和能力缓存分别保存在各自 profile 中；切换先停止当前任务、保存旧工作区，再加载目标工作区。
 
 恢复界面使用插件已保存的消息；下次追问时才调用 CLI 的原生恢复参数，不通过额外模型请求读取历史。原生会话被删除或恢复标识不符时报告错误，不自动开启新会话冒充延续。
+
+## DeepSeek API 认证
+
+设置页的“重新检测”只查找本机 `dsh` 并读取版本。若界面提示“未找到本地 DeepSeek Harness”，请先确认安装位置，必要时在设置中填写 `dsh` 的绝对路径。模型服务会在实际的解读或翻译请求中校验密钥。
+
+出厂的 headless profile 默认忽略 Harness 界面保存的 API Key。插件在每次运行时通过临时配置启用 Harness 的凭据存储，无需修改本机 profile。对于同名密钥（默认 `DEEPSEEK_API_KEY`），dsh 优先使用 Harness 中保存的值。缺少保存值时，依次检查 Obsidian 的进程环境、笔记库根目录的 `.env`、`$DSH_HOME/.env`（默认 `~/.dsh/.env`）。若仅在终端导出密钥，从桌面启动的 Obsidian 可能读取不到，可在 Harness 中保存该密钥。[上游 headless 认证说明](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/bundle/headless/README.md#credentials)
+
+DeepSeek API 地址优先采用 headless profile 中配置的 `baseURL`。未指定时，dsh 从进程环境或 `$DSH_HOME/.env` 读取 `DEEPSEEK_BASE_URL`，默认连接官方 API。若自定义服务返回 HTTP 401，请核对该服务地址和实际生效的密钥是否匹配。[上游 API 地址说明](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/llm/llm-deepseek/README.md#endpoint-and-wire-format)
 
 ## 只读与进程边界
 
@@ -49,7 +57,9 @@ macOS 停止独立进程组；Windows 通过 `taskkill /T` 停止进程树。停
 
 新增测试涵盖 GUI 缺少 PATH、显式路径错误、脚本入口、版本超时、Windows npm 包装器及特殊字符、按电脑保存路径、提供方切换和历史隔离、JSON 流、恢复、失败、取消和超时。运行 `npm run build` 和 `npm run check`。
 
-本次还在 macOS 实测 Codex／Claude 的发现，以及 Obsidian 中三种设置的切换；在 Windows 实测 npm Codex 发现、Node 入口与多行参数，并运行运行时、提供方配置和按电脑保存路径的测试。DeepSeek 未在这两台电脑全局安装；使用隔离的官方 npm CLI 验证了实际 headless profile／系统指令插件／只读工具限制加载，在缺少凭据时正确退出。没有发送付费模型请求，完整模型响应仍需配置后的实机验证。
+macOS 上实测过 Codex／Claude 的发现及 Obsidian 中三种提供方的切换。Windows 上实测过 npm Codex 发现、Node 入口与多行参数，并运行了提供方与路径配置测试。
+
+DeepSeek 的认证联调使用项目内隔离安装的官方 `@deepseek-ai/dsh@0.2.2-rc.5`、独立的 Harness 主目录和本机回环 HTTP 服务。插件通过真实 headless CLI 加载系统指令及只读工具限制，使用 Harness 中保存的测试密钥取得并解析了模拟回答。另验证了缺少密钥、服务返回 HTTP 401 两种错误。联调仅向本机服务发送请求。
 
 协议依据：
 
